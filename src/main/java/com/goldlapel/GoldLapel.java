@@ -63,15 +63,38 @@ public class GoldLapel {
             throw new RuntimeException("Failed to start Gold Lapel process", e);
         }
 
-        if (!waitForPort("127.0.0.1", port, STARTUP_TIMEOUT_MS)) {
-            String stderr = "";
+        // Drain stderr on a daemon thread to prevent pipe-buffer deadlock
+        StringBuilder stderrBuf = new StringBuilder();
+        Thread stderrDrain = new Thread(() -> {
             try {
-                stderr = new String(process.getErrorStream().readAllBytes());
+                InputStream err = process.getErrorStream();
+                byte[] buf = new byte[1024];
+                int n;
+                while ((n = err.read(buf)) != -1) {
+                    stderrBuf.append(new String(buf, 0, n));
+                }
             } catch (IOException ignored) {}
+        });
+        stderrDrain.setDaemon(true);
+        stderrDrain.start();
+
+        // Poll for port readiness, short-circuiting if the process exits early
+        long deadline = System.nanoTime() + STARTUP_TIMEOUT_MS * 1_000_000L;
+        boolean ready = false;
+        while (System.nanoTime() < deadline) {
+            if (!process.isAlive()) break;
+            if (waitForPort("127.0.0.1", port, 500)) {
+                ready = true;
+                break;
+            }
+        }
+
+        if (!ready) {
             process.destroyForcibly();
+            try { stderrDrain.join(2000); } catch (InterruptedException ignored) {}
             throw new RuntimeException(
                 "Gold Lapel failed to start on port " + port +
-                " within " + (STARTUP_TIMEOUT_MS / 1000) + "s.\nstderr: " + stderr
+                " within " + (STARTUP_TIMEOUT_MS / 1000) + "s.\nstderr: " + stderrBuf
             );
         }
 
@@ -223,8 +246,8 @@ public class GoldLapel {
     }
 
     static boolean waitForPort(String host, int port, long timeoutMs) {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        while (System.currentTimeMillis() < deadline) {
+        long deadline = System.nanoTime() + timeoutMs * 1_000_000L;
+        while (System.nanoTime() < deadline) {
             try (Socket sock = new Socket()) {
                 sock.connect(new java.net.InetSocketAddress(host, port), 500);
                 return true;
