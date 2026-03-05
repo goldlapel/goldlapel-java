@@ -91,6 +91,7 @@ public class GoldLapel {
 
         if (!ready) {
             process.destroyForcibly();
+            try { process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
             try { stderrDrain.join(2000); } catch (InterruptedException ignored) {}
             throw new RuntimeException(
                 "Gold Lapel failed to start on port " + port +
@@ -160,6 +161,12 @@ public class GoldLapel {
 
     public static String start(String upstream, Options options) {
         if (instance != null && instance.isRunning()) {
+            if (!instance.upstream.equals(upstream)) {
+                throw new RuntimeException(
+                    "Gold Lapel is already running for a different upstream. " +
+                    "Call GoldLapel.stop() before starting with a new upstream."
+                );
+            }
             return instance.getUrl();
         }
         instance = new GoldLapel(upstream, options);
