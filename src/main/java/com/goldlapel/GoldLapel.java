@@ -304,6 +304,7 @@ public class GoldLapel {
         }
 
         String resourceName = "bin/goldlapel-" + osName + "-" + archName;
+        if (osName.equals("linux") && isMusl(archName)) resourceName += "-musl";
         if (isWindows) resourceName += ".exe";
         InputStream in = GoldLapel.class.getClassLoader().getResourceAsStream(resourceName);
         if (in == null) return null;
@@ -325,6 +326,10 @@ public class GoldLapel {
         } catch (IOException e) {
             return null;
         }
+    }
+
+    static boolean isMusl(String arch) {
+        return new File("/lib/ld-musl-" + arch + ".so.1").exists();
     }
 
     static String findOnPath(String name) {
