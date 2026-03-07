@@ -291,20 +291,25 @@ public class GoldLapel {
         }
 
         String osName;
+        boolean isWindows = false;
         if (os.contains("linux")) {
             osName = "linux";
         } else if (os.contains("mac") || os.contains("darwin")) {
             osName = "darwin";
+        } else if (os.contains("windows")) {
+            osName = "windows";
+            isWindows = true;
         } else {
             osName = os.replaceAll("\\s+", "-");
         }
 
         String resourceName = "bin/goldlapel-" + osName + "-" + archName;
+        if (isWindows) resourceName += ".exe";
         InputStream in = GoldLapel.class.getClassLoader().getResourceAsStream(resourceName);
         if (in == null) return null;
 
         try {
-            Path tmp = Files.createTempFile("goldlapel-", "");
+            Path tmp = Files.createTempFile("goldlapel-", isWindows ? ".exe" : "");
             Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
             in.close();
 
@@ -325,9 +330,13 @@ public class GoldLapel {
     static String findOnPath(String name) {
         String pathEnv = System.getenv("PATH");
         if (pathEnv == null) return null;
+        boolean isWindows = System.getProperty("os.name", "").toLowerCase().contains("windows");
+        String[] names = isWindows ? new String[]{name + ".exe", name} : new String[]{name};
         for (String dir : pathEnv.split(File.pathSeparator)) {
-            File f = new File(dir, name);
-            if (f.isFile() && f.canExecute()) return f.getAbsolutePath();
+            for (String n : names) {
+                File f = new File(dir, n);
+                if (f.isFile() && f.canExecute()) return f.getAbsolutePath();
+            }
         }
         return null;
     }
