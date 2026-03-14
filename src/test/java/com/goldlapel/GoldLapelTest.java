@@ -256,12 +256,66 @@ class GoldLapelClassTest {
 }
 
 
+class DashboardUrlTest {
+
+    @Test
+    void defaultDashboardPort() {
+        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
+        assertEquals(7933, GoldLapel.DEFAULT_DASHBOARD_PORT);
+    }
+
+    @Test
+    void customDashboardPort() {
+        Map<String, Object> config = new HashMap<>();
+        config.put("dashboardPort", 8080);
+        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb",
+            new GoldLapel.Options().config(config));
+        assertNull(gl.getDashboardUrl()); // not running, so null
+    }
+
+    @Test
+    void disabledDashboardPort() {
+        Map<String, Object> config = new HashMap<>();
+        config.put("dashboardPort", 0);
+        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb",
+            new GoldLapel.Options().config(config));
+        assertNull(gl.getDashboardUrl());
+    }
+
+    @Test
+    void dashboardUrlNullWhenNotRunning() {
+        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
+        assertFalse(gl.isRunning());
+        assertNull(gl.getDashboardUrl());
+    }
+
+    @Test
+    void dashboardPortExtractedFromConfig() {
+        Map<String, Object> config = new HashMap<>();
+        config.put("dashboardPort", 9999);
+        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb",
+            new GoldLapel.Options().config(config));
+        // Verify port was extracted (dashboardUrl includes it when running)
+        // Since not running, getDashboardUrl() returns null — verify via config pass-through
+        List<String> args = GoldLapel.configToArgs(config);
+        assertTrue(args.contains("--dashboard-port"));
+        assertTrue(args.contains("9999"));
+    }
+}
+
+
 class ModuleFunctionsTest {
 
     @Test
     void proxyUrlNullWhenNotStarted() {
         GoldLapel.stop();
         assertNull(GoldLapel.proxyUrl());
+    }
+
+    @Test
+    void dashboardUrlNullWhenNotStarted() {
+        GoldLapel.stop();
+        assertNull(GoldLapel.dashboardUrl());
     }
 }
 

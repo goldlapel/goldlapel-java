@@ -21,6 +21,7 @@ import java.util.regex.Pattern;
 public class GoldLapel {
 
     static final int DEFAULT_PORT = 7932;
+    static final int DEFAULT_DASHBOARD_PORT = 7933;
     static final long STARTUP_TIMEOUT_MS = 10000;
     static final long STARTUP_POLL_INTERVAL_MS = 50;
 
@@ -65,6 +66,7 @@ public class GoldLapel {
 
     private final String upstream;
     private final int port;
+    private final int dashboardPort;
     private final Map<String, Object> config;
     private final List<String> extraArgs;
     private Process process;
@@ -77,6 +79,9 @@ public class GoldLapel {
     public GoldLapel(String upstream, Options options) {
         this.upstream = upstream;
         this.port = options.port != null ? options.port : DEFAULT_PORT;
+        this.dashboardPort = options.config != null && options.config.containsKey("dashboardPort")
+            ? ((Number) options.config.get("dashboardPort")).intValue()
+            : DEFAULT_DASHBOARD_PORT;
         this.config = options.config;
         this.extraArgs = options.extraArgs != null ? options.extraArgs : new ArrayList<>();
         this.process = null;
@@ -146,6 +151,13 @@ public class GoldLapel {
         }
 
         proxyUrl = makeProxyUrl(upstream, port);
+
+        if (dashboardPort > 0) {
+            System.out.println("goldlapel → :" + port + " (proxy) | http://127.0.0.1:" + dashboardPort + " (dashboard)");
+        } else {
+            System.out.println("goldlapel → :" + port + " (proxy)");
+        }
+
         return proxyUrl;
     }
 
@@ -173,6 +185,13 @@ public class GoldLapel {
 
     public int getPort() {
         return port;
+    }
+
+    public String getDashboardUrl() {
+        if (dashboardPort > 0 && process != null && process.isAlive()) {
+            return "http://127.0.0.1:" + dashboardPort;
+        }
+        return null;
     }
 
     public boolean isRunning() {
@@ -308,6 +327,10 @@ public class GoldLapel {
 
     public static String proxyUrl() {
         return instance != null ? instance.getUrl() : null;
+    }
+
+    public static String dashboardUrl() {
+        return instance != null ? instance.getDashboardUrl() : null;
     }
 
     // ── Internal methods ───────────────────────────────────

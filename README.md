@@ -49,6 +49,18 @@ Stops the proxy. Also called automatically on JVM shutdown.
 
 Returns the current proxy URL, or `null` if not running.
 
+### `GoldLapel.dashboardUrl()`
+
+Returns the dashboard URL (e.g. `http://127.0.0.1:7933`), or `null` if not running. The dashboard port defaults to 7933 and can be changed via config:
+
+```java
+GoldLapel.start("postgresql://user:pass@localhost/mydb",
+    new GoldLapel.Options().config(Map.of("dashboardPort", 8080)));
+String dashboard = GoldLapel.dashboardUrl(); // http://127.0.0.1:8080
+```
+
+Set `dashboardPort` to `0` to disable.
+
 ### `new GoldLapel(upstream)` / `new GoldLapel(upstream, options)`
 
 Instance API for managing multiple proxies:
