@@ -7,6 +7,12 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -255,5 +261,122 @@ class ModuleFunctionsTest {
     void proxyUrlNullWhenNotStarted() {
         GoldLapel.stop();
         assertNull(GoldLapel.proxyUrl());
+    }
+}
+
+
+class ConfigToArgsTest {
+
+    @Test
+    void testStringValue() {
+        Map<String, Object> config = Collections.singletonMap("mode", "butler");
+        List<String> args = GoldLapel.configToArgs(config);
+        assertEquals(Arrays.asList("--mode", "butler"), args);
+    }
+
+    @Test
+    void testNumericValue() {
+        Map<String, Object> config = Collections.singletonMap("poolSize", 20);
+        List<String> args = GoldLapel.configToArgs(config);
+        assertEquals(Arrays.asList("--pool-size", "20"), args);
+    }
+
+    @Test
+    void testBooleanTrue() {
+        Map<String, Object> config = Collections.singletonMap("disablePool", true);
+        List<String> args = GoldLapel.configToArgs(config);
+        assertEquals(Collections.singletonList("--disable-pool"), args);
+    }
+
+    @Test
+    void testBooleanFalse() {
+        Map<String, Object> config = Collections.singletonMap("disablePool", false);
+        List<String> args = GoldLapel.configToArgs(config);
+        assertTrue(args.isEmpty());
+    }
+
+    @Test
+    void testListValue() {
+        Map<String, Object> config = Collections.singletonMap(
+            "replica", Arrays.asList("postgres://r1:5432/db", "postgres://r2:5432/db")
+        );
+        List<String> args = GoldLapel.configToArgs(config);
+        assertEquals(Arrays.asList(
+            "--replica", "postgres://r1:5432/db",
+            "--replica", "postgres://r2:5432/db"
+        ), args);
+    }
+
+    @Test
+    void testExcludeTablesList() {
+        Map<String, Object> config = Collections.singletonMap(
+            "excludeTables", Arrays.asList("sessions", "logs")
+        );
+        List<String> args = GoldLapel.configToArgs(config);
+        assertEquals(Arrays.asList(
+            "--exclude-tables", "sessions",
+            "--exclude-tables", "logs"
+        ), args);
+    }
+
+    @Test
+    void testUnknownKeyThrows() {
+        Map<String, Object> config = Collections.singletonMap("bogusKey", "value");
+        IllegalArgumentException ex = assertThrows(
+            IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(config)
+        );
+        assertTrue(ex.getMessage().contains("Unknown config key: bogusKey"));
+    }
+
+    @Test
+    void testMultipleKeys() {
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("mode", "butler");
+        config.put("poolSize", 10);
+        config.put("disableRewrite", true);
+        List<String> args = GoldLapel.configToArgs(config);
+        assertEquals(5, args.size());
+        assertTrue(args.contains("--mode"));
+        assertTrue(args.contains("butler"));
+        assertTrue(args.contains("--pool-size"));
+        assertTrue(args.contains("10"));
+        assertTrue(args.contains("--disable-rewrite"));
+    }
+
+    @Test
+    void testEmptyConfig() {
+        List<String> args = GoldLapel.configToArgs(Collections.emptyMap());
+        assertTrue(args.isEmpty());
+    }
+
+    @Test
+    void testNullConfig() {
+        List<String> args = GoldLapel.configToArgs(null);
+        assertTrue(args.isEmpty());
+    }
+
+    @Test
+    void testBooleanNonBoolThrows() {
+        Map<String, Object> config = Collections.singletonMap("disablePool", "yes");
+        IllegalArgumentException ex = assertThrows(
+            IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(config)
+        );
+        assertTrue(ex.getMessage().contains("must be a Boolean"));
+    }
+
+    @Test
+    void testConfigWithOptions() {
+        Map<String, Object> config = new HashMap<>();
+        config.put("mode", "butler");
+        config.put("disablePool", true);
+
+        GoldLapel.Options opts = new GoldLapel.Options()
+            .port(9000)
+            .config(config);
+
+        assertEquals(9000, opts.port);
+        assertSame(config, opts.config());
     }
 }

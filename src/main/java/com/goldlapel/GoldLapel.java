@@ -10,7 +10,11 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -20,8 +24,48 @@ public class GoldLapel {
     static final long STARTUP_TIMEOUT_MS = 10000;
     static final long STARTUP_POLL_INTERVAL_MS = 50;
 
+    private static final Set<String> VALID_CONFIG_KEYS;
+    private static final Set<String> BOOLEAN_KEYS;
+    private static final Set<String> LIST_KEYS;
+
+    static {
+        Set<String> keys = new HashSet<>();
+        Collections.addAll(keys,
+            "mode", "minPatternCount", "refreshIntervalSecs", "patternTtlSecs",
+            "maxTablesPerView", "maxColumnsPerView", "deepPaginationThreshold",
+            "reportIntervalSecs", "resultCacheSize", "batchCacheSize",
+            "batchCacheTtlSecs", "redisUrl", "poolSize", "poolTimeoutSecs",
+            "poolMode", "mgmtIdleTimeout", "fallback", "readAfterWriteSecs",
+            "n1Threshold", "n1WindowMs", "n1CrossThreshold",
+            "tlsCert", "tlsKey", "tlsClientCa", "config", "dashboardPort",
+            "disableMatviews", "disableConsolidation", "disableBtreeIndexes",
+            "disableTrigramIndexes", "disableExpressionIndexes",
+            "disablePartialIndexes", "disableRewrite", "disablePreparedCache",
+            "disableResultCache", "disableRedisCache", "disablePool",
+            "disableN1", "disableN1CrossConnection", "disableShadowMode",
+            "enableCoalescing", "replica", "excludeTables"
+        );
+        VALID_CONFIG_KEYS = Collections.unmodifiableSet(keys);
+
+        Set<String> bools = new HashSet<>();
+        Collections.addAll(bools,
+            "disableMatviews", "disableConsolidation", "disableBtreeIndexes",
+            "disableTrigramIndexes", "disableExpressionIndexes",
+            "disablePartialIndexes", "disableRewrite", "disablePreparedCache",
+            "disableResultCache", "disableRedisCache", "disablePool",
+            "disableN1", "disableN1CrossConnection", "disableShadowMode",
+            "enableCoalescing"
+        );
+        BOOLEAN_KEYS = Collections.unmodifiableSet(bools);
+
+        Set<String> lists = new HashSet<>();
+        Collections.addAll(lists, "replica", "excludeTables");
+        LIST_KEYS = Collections.unmodifiableSet(lists);
+    }
+
     private final String upstream;
     private final int port;
+    private final Map<String, Object> config;
     private final List<String> extraArgs;
     private Process process;
     private String proxyUrl;
@@ -33,6 +77,7 @@ public class GoldLapel {
     public GoldLapel(String upstream, Options options) {
         this.upstream = upstream;
         this.port = options.port != null ? options.port : DEFAULT_PORT;
+        this.config = options.config;
         this.extraArgs = options.extraArgs != null ? options.extraArgs : new ArrayList<>();
         this.process = null;
         this.proxyUrl = null;
@@ -50,6 +95,7 @@ public class GoldLapel {
         cmd.add(upstream);
         cmd.add("--port");
         cmd.add(String.valueOf(port));
+        cmd.addAll(configToArgs(config));
         cmd.addAll(extraArgs);
 
         try {
@@ -133,15 +179,82 @@ public class GoldLapel {
         return process != null && process.isAlive();
     }
 
+    // ── Config ─────────────────────────────────────────────
+
+    static String camelToKebab(String key) {
+        StringBuilder sb = new StringBuilder();
+        for (char c : key.toCharArray()) {
+            if (Character.isUpperCase(c)) {
+                sb.append('-').append(Character.toLowerCase(c));
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    @SuppressWarnings("unchecked")
+    static List<String> configToArgs(Map<String, Object> config) {
+        if (config == null || config.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<String> args = new ArrayList<>();
+
+        for (Map.Entry<String, Object> entry : config.entrySet()) {
+            String key = entry.getKey();
+            Object value = entry.getValue();
+
+            if (!VALID_CONFIG_KEYS.contains(key)) {
+                throw new IllegalArgumentException("Unknown config key: " + key);
+            }
+
+            String flag = "--" + camelToKebab(key);
+
+            if (BOOLEAN_KEYS.contains(key)) {
+                if (!(value instanceof Boolean)) {
+                    throw new IllegalArgumentException(
+                        "Config key '" + key + "' must be a Boolean, got " +
+                        value.getClass().getSimpleName()
+                    );
+                }
+                if ((Boolean) value) {
+                    args.add(flag);
+                }
+            } else if (LIST_KEYS.contains(key)) {
+                List<?> items = (List<?>) value;
+                for (Object item : items) {
+                    args.add(flag);
+                    args.add(item.toString());
+                }
+            } else {
+                args.add(flag);
+                args.add(value.toString());
+            }
+        }
+
+        return args;
+    }
+
     // ── Options ────────────────────────────────────────────
 
     public static class Options {
         Integer port;
+        Map<String, Object> config;
         List<String> extraArgs;
 
         public Options port(int port) {
             this.port = port;
             return this;
+        }
+
+        public Options config(Map<String, Object> config) {
+            this.config = config;
+            return this;
+        }
+
+        public Map<String, Object> config() {
+            return config;
         }
 
         public Options extraArgs(String... args) {
