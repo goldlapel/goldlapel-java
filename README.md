@@ -65,7 +65,33 @@ proxy.stopProxy();
 
 ## Configuration
 
-The proxy binary accepts all standard Gold Lapel flags. Pass them via `extraArgs`:
+Pass a config map via the Options builder:
+
+```java
+import com.goldlapel.GoldLapel;
+import java.util.List;
+import java.util.Map;
+
+String url = GoldLapel.start("postgresql://user:pass@localhost/mydb",
+    new GoldLapel.Options().config(Map.of(
+        "mode", "butler",
+        "poolSize", 50,
+        "disableMatviews", true,
+        "replica", List.of("postgresql://user:pass@replica1/mydb")
+    )));
+```
+
+Keys use `camelCase` and map to CLI flags (`poolSize` → `--pool-size`). Boolean keys are flags — `true` enables them. List keys produce repeated flags.
+
+Unknown keys throw `IllegalArgumentException`. To see all valid keys:
+
+```java
+GoldLapel.configKeys()
+```
+
+For the full configuration reference, see the [main documentation](https://github.com/goldlapel/goldlapel#setting-reference).
+
+You can also pass raw CLI flags via `extraArgs`:
 
 ```java
 String url = GoldLapel.start(

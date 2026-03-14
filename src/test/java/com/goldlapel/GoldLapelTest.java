@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -261,6 +262,38 @@ class ModuleFunctionsTest {
     void proxyUrlNullWhenNotStarted() {
         GoldLapel.stop();
         assertNull(GoldLapel.proxyUrl());
+    }
+}
+
+
+class ConfigKeysTest {
+
+    @Test
+    void returnsASet() {
+        Set<String> keys = GoldLapel.configKeys();
+        assertNotNull(keys);
+        assertFalse(keys.isEmpty());
+    }
+
+    @Test
+    void containsKnownKeys() {
+        Set<String> keys = GoldLapel.configKeys();
+        assertTrue(keys.contains("mode"));
+        assertTrue(keys.contains("poolSize"));
+        assertTrue(keys.contains("disableMatviews"));
+        assertTrue(keys.contains("replica"));
+    }
+
+    @Test
+    void hasExpectedCount() {
+        Set<String> keys = GoldLapel.configKeys();
+        assertEquals(43, keys.size());
+    }
+
+    @Test
+    void isUnmodifiable() {
+        Set<String> keys = GoldLapel.configKeys();
+        assertThrows(UnsupportedOperationException.class, () -> keys.add("bogus"));
     }
 }
 

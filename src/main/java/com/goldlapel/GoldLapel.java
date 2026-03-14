@@ -179,6 +179,10 @@ public class GoldLapel {
         return process != null && process.isAlive();
     }
 
+    public static Set<String> configKeys() {
+        return Collections.unmodifiableSet(VALID_CONFIG_KEYS);
+    }
+
     // ── Config ─────────────────────────────────────────────
 
     static String camelToKebab(String key) {
