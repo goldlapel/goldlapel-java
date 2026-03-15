@@ -7,3 +7,5 @@ src/main/resources/bin/
 .settings/
 .classpath
 .project
+.mvn/
+mvnw
