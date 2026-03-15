@@ -69,6 +69,7 @@ public class GoldLapel {
     private final int dashboardPort;
     private final Map<String, Object> config;
     private final List<String> extraArgs;
+    private final String client;
     private Process process;
     private String proxyUrl;
 
@@ -84,6 +85,7 @@ public class GoldLapel {
             : DEFAULT_DASHBOARD_PORT;
         this.config = options.config;
         this.extraArgs = options.extraArgs != null ? options.extraArgs : new ArrayList<>();
+        this.client = options.client != null ? options.client : "java";
         this.process = null;
         this.proxyUrl = null;
     }
@@ -105,6 +107,7 @@ public class GoldLapel {
 
         try {
             ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.environment().putIfAbsent("GOLDLAPEL_CLIENT", client);
             pb.redirectInput(ProcessBuilder.Redirect.PIPE);
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
             pb.redirectError(ProcessBuilder.Redirect.PIPE);
@@ -271,6 +274,7 @@ public class GoldLapel {
         Integer port;
         Map<String, Object> config;
         List<String> extraArgs;
+        String client;
 
         public Options port(int port) {
             this.port = port;
@@ -288,6 +292,11 @@ public class GoldLapel {
 
         public Options extraArgs(String... args) {
             this.extraArgs = Arrays.asList(args);
+            return this;
+        }
+
+        public Options client(String client) {
+            this.client = client;
             return this;
         }
     }
