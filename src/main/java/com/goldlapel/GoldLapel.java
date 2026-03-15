@@ -245,6 +245,12 @@ public class GoldLapel {
                     args.add(flag);
                 }
             } else if (LIST_KEYS.contains(key)) {
+                if (!(value instanceof List)) {
+                    throw new IllegalArgumentException(
+                        "Config key '" + key + "' must be a List, got " +
+                        value.getClass().getSimpleName()
+                    );
+                }
                 List<?> items = (List<?>) value;
                 for (Object item : items) {
                     args.add(flag);
@@ -449,10 +455,14 @@ public class GoldLapel {
         InputStream in = GoldLapel.class.getClassLoader().getResourceAsStream(resourceName);
         if (in == null) return null;
 
-        try {
+        try (in) {
             Path tmp = Files.createTempFile("goldlapel-", isWindows ? ".exe" : "");
-            Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
-            in.close();
+            try {
+                Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException e) {
+                Files.deleteIfExists(tmp);
+                return null;
+            }
 
             try {
                 Files.setPosixFilePermissions(tmp, PosixFilePermissions.fromString("rwxr-xr-x"));

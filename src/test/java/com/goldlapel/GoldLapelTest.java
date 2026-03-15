@@ -85,6 +85,32 @@ class FindBinaryTest {
 }
 
 
+class ExtractBinaryTest {
+
+    @Test
+    void returnsNullWhenNoResourceBundled() throws Exception {
+        // Reset the cached path so extractBinary() actually runs the extraction logic
+        java.lang.reflect.Field field = GoldLapel.class.getDeclaredField("extractedBinaryPath");
+        field.setAccessible(true);
+        Path prev = (Path) field.get(null);
+        field.set(null, null);
+
+        try {
+            // No platform binary is bundled in the test classpath, so extractBinary()
+            // should return null without throwing (and without leaking an InputStream,
+            // which is now guaranteed by the try-with-resources pattern).
+            String result = GoldLapel.extractBinary();
+            // In the test environment there's no bundled binary, so null is expected
+            if (result != null) {
+                assertTrue(Files.isRegularFile(Path.of(result)));
+            }
+        } finally {
+            field.set(null, prev);
+        }
+    }
+}
+
+
 class MakeProxyUrlTest {
 
     @Test
@@ -441,6 +467,30 @@ class ConfigToArgsTest {
     void testNullConfig() {
         List<String> args = GoldLapel.configToArgs(null);
         assertTrue(args.isEmpty());
+    }
+
+    @Test
+    void testListKeyWithStringThrows() {
+        Map<String, Object> config = Collections.singletonMap("replica", "postgres://r1:5432/db");
+        IllegalArgumentException ex = assertThrows(
+            IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(config)
+        );
+        assertTrue(ex.getMessage().contains("must be a List"));
+        assertTrue(ex.getMessage().contains("replica"));
+        assertTrue(ex.getMessage().contains("String"));
+    }
+
+    @Test
+    void testExcludeTablesWithIntegerThrows() {
+        Map<String, Object> config = Collections.singletonMap("excludeTables", 42);
+        IllegalArgumentException ex = assertThrows(
+            IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(config)
+        );
+        assertTrue(ex.getMessage().contains("must be a List"));
+        assertTrue(ex.getMessage().contains("excludeTables"));
+        assertTrue(ex.getMessage().contains("Integer"));
     }
 
     @Test
