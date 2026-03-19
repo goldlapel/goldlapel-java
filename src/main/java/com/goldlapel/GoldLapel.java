@@ -35,14 +35,14 @@ public class GoldLapel {
             "mode", "minPatternCount", "refreshIntervalSecs", "patternTtlSecs",
             "maxTablesPerView", "maxColumnsPerView", "deepPaginationThreshold",
             "reportIntervalSecs", "resultCacheSize", "batchCacheSize",
-            "batchCacheTtlSecs", "redisUrl", "poolSize", "poolTimeoutSecs",
+            "batchCacheTtlSecs", "poolSize", "poolTimeoutSecs",
             "poolMode", "mgmtIdleTimeout", "fallback", "readAfterWriteSecs",
             "n1Threshold", "n1WindowMs", "n1CrossThreshold",
             "tlsCert", "tlsKey", "tlsClientCa", "config", "dashboardPort",
             "disableMatviews", "disableConsolidation", "disableBtreeIndexes",
             "disableTrigramIndexes", "disableExpressionIndexes",
             "disablePartialIndexes", "disableRewrite", "disablePreparedCache",
-            "disableResultCache", "disableRedisCache", "disablePool",
+            "disableResultCache", "disablePool",
             "disableN1", "disableN1CrossConnection", "disableShadowMode",
             "enableCoalescing", "replica", "excludeTables"
         );
@@ -53,7 +53,7 @@ public class GoldLapel {
             "disableMatviews", "disableConsolidation", "disableBtreeIndexes",
             "disableTrigramIndexes", "disableExpressionIndexes",
             "disablePartialIndexes", "disableRewrite", "disablePreparedCache",
-            "disableResultCache", "disableRedisCache", "disablePool",
+            "disableResultCache", "disablePool",
             "disableN1", "disableN1CrossConnection", "disableShadowMode",
             "enableCoalescing"
         );
