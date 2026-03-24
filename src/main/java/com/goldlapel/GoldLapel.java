@@ -17,6 +17,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.sql.Connection;
+import java.sql.DriverManager;
 
 public class GoldLapel {
 
@@ -44,7 +46,8 @@ public class GoldLapel {
             "disablePartialIndexes", "disableRewrite", "disablePreparedCache",
             "disableResultCache", "disablePool",
             "disableN1", "disableN1CrossConnection", "disableShadowMode",
-            "enableCoalescing", "replica", "excludeTables"
+            "enableCoalescing", "replica", "excludeTables",
+            "invalidationPort"
         );
         VALID_CONFIG_KEYS = Collections.unmodifiableSet(keys);
 
@@ -72,6 +75,7 @@ public class GoldLapel {
     private final String client;
     private Process process;
     private String proxyUrl;
+    Connection wrappedConn;
 
     public GoldLapel(String upstream) {
         this(upstream, new Options());
@@ -306,11 +310,41 @@ public class GoldLapel {
     private static GoldLapel instance;
     private static boolean cleanupRegistered = false;
 
-    public static String start(String upstream) {
+    public static Connection start(String upstream) {
         return start(upstream, new Options());
     }
 
-    public static String start(String upstream, Options options) {
+    public static Connection start(String upstream, Options options) {
+        if (instance != null && instance.isRunning()) {
+            if (!instance.upstream.equals(upstream)) {
+                throw new RuntimeException(
+                    "Gold Lapel is already running for a different upstream. " +
+                    "Call GoldLapel.stop() before starting with a new upstream."
+                );
+            }
+            Connection cached = instance.wrappedConn;
+            if (cached != null) return cached;
+            return tryWrapConnection(instance);
+        }
+        instance = new GoldLapel(upstream, options);
+        if (!cleanupRegistered) {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                if (instance != null) {
+                    instance.stopProxy();
+                    instance = null;
+                }
+            }));
+            cleanupRegistered = true;
+        }
+        instance.startProxy();
+        return tryWrapConnection(instance);
+    }
+
+    public static String startUrl(String upstream) {
+        return startUrl(upstream, new Options());
+    }
+
+    public static String startUrl(String upstream, Options options) {
         if (instance != null && instance.isRunning()) {
             if (!instance.upstream.equals(upstream)) {
                 throw new RuntimeException(
@@ -333,11 +367,31 @@ public class GoldLapel {
         return instance.startProxy();
     }
 
+    private static Connection tryWrapConnection(GoldLapel inst) {
+        try {
+            Class.forName("org.postgresql.Driver");
+            Connection conn = DriverManager.getConnection(inst.getUrl());
+            NativeCache cache = NativeCache.getInstance();
+            int invPort = inst.port + 2;
+            if (inst.config != null) {
+                Object p = inst.config.get("invalidationPort");
+                if (p != null) invPort = Integer.parseInt(p.toString());
+            }
+            cache.connectInvalidation(invPort);
+            Connection wrapped = ConnectionProxy.wrap(conn, cache);
+            inst.wrappedConn = wrapped;
+            return wrapped;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     public static void stop() {
         if (instance != null) {
             instance.stopProxy();
             instance = null;
         }
+        NativeCache.reset();
     }
 
     public static String proxyUrl() {

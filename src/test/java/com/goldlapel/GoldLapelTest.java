@@ -367,7 +367,7 @@ class ConfigKeysTest {
     @Test
     void hasExpectedCount() {
         Set<String> keys = GoldLapel.configKeys();
-        assertEquals(43, keys.size());
+        assertEquals(42, keys.size());
     }
 
     @Test
