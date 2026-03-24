@@ -324,7 +324,14 @@ public class GoldLapel {
             }
             Connection cached = instance.wrappedConn;
             if (cached != null) return cached;
-            return tryWrapConnection(instance);
+            Connection wrapped = tryWrapConnection(instance);
+            if (wrapped == null) {
+                throw new RuntimeException(
+                    "No PostgreSQL JDBC driver found. Add org.postgresql:postgresql to your dependencies, " +
+                    "or use GoldLapel.startUrl() to get the proxy URL and connect manually."
+                );
+            }
+            return wrapped;
         }
         instance = new GoldLapel(upstream, options);
         if (!cleanupRegistered) {
@@ -337,7 +344,14 @@ public class GoldLapel {
             cleanupRegistered = true;
         }
         instance.startProxy();
-        return tryWrapConnection(instance);
+        Connection wrapped = tryWrapConnection(instance);
+        if (wrapped == null) {
+            throw new RuntimeException(
+                "No PostgreSQL JDBC driver found. Add org.postgresql:postgresql to your dependencies, " +
+                "or use GoldLapel.startUrl() to get the proxy URL and connect manually."
+            );
+        }
+        return wrapped;
     }
 
     public static String startUrl(String upstream) {
