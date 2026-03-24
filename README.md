@@ -1,6 +1,6 @@
 # Gold Lapel
 
-Self-optimizing Postgres proxy — automatic materialized views and indexes. Zero code changes required.
+Self-optimizing Postgres proxy — automatic materialized views and indexes, with an L1 native cache that serves repeated reads in microseconds. Zero code changes required.
 
 Gold Lapel sits between your app and Postgres, watches query patterns, and automatically creates materialized views and indexes to make your database faster. Port 7932 (79 = atomic number for gold, 32 from Postgres).
 
@@ -19,23 +19,19 @@ Gold Lapel sits between your app and Postgres, watches query patterns, and autom
 ```java
 import com.goldlapel.GoldLapel;
 
-// Start the proxy — returns a connection string pointing at Gold Lapel
-String url = GoldLapel.start("postgresql://user:pass@localhost:5432/mydb");
+// Start the proxy — returns a database connection with L1 cache built in
+Connection conn = GoldLapel.start("postgresql://user:pass@localhost:5432/mydb");
 
-// Use the URL with any Postgres driver
-Connection conn = DriverManager.getConnection(url);
-
-// Or HikariCP, JOOQ, Hibernate, Spring JDBC — anything that speaks Postgres
+// Use the connection directly — no DriverManager needed
+ResultSet rs = conn.createStatement().executeQuery("SELECT * FROM users WHERE id = 42");
 ```
-
-Gold Lapel is driver-agnostic. `start()` returns a connection string (`postgresql://...@localhost:7932/...`) that works with any Postgres driver or ORM.
 
 ## API
 
 ### `GoldLapel.start(upstream)`
 ### `GoldLapel.start(upstream, options)`
 
-Starts the Gold Lapel proxy and returns the proxy connection string.
+Starts the Gold Lapel proxy and returns a database connection with L1 cache.
 
 - `upstream` — your Postgres connection string (e.g. `postgresql://user:pass@localhost:5432/mydb`)
 - `options.port(int)` — proxy port (default: 7932)
@@ -70,7 +66,7 @@ import com.goldlapel.GoldLapel;
 
 GoldLapel proxy = new GoldLapel("postgresql://user:pass@localhost:5432/mydb",
     new GoldLapel.Options().port(7932));
-String url = proxy.startProxy();
+Connection conn = proxy.startProxy();
 // ...
 proxy.stopProxy();
 ```
@@ -84,7 +80,7 @@ import com.goldlapel.GoldLapel;
 import java.util.List;
 import java.util.Map;
 
-String url = GoldLapel.start("postgresql://user:pass@localhost/mydb",
+Connection conn = GoldLapel.start("postgresql://user:pass@localhost/mydb",
     new GoldLapel.Options().config(Map.of(
         "mode", "butler",
         "poolSize", 50,
@@ -106,7 +102,7 @@ For the full configuration reference, see the [main documentation](https://githu
 You can also pass raw CLI flags via `extraArgs`:
 
 ```java
-String url = GoldLapel.start(
+Connection conn = GoldLapel.start(
     "postgresql://user:pass@localhost:5432/mydb",
     new GoldLapel.Options()
         .extraArgs("--threshold-duration-ms", "200", "--refresh-interval-secs", "30")
@@ -122,7 +118,7 @@ This package bundles the Gold Lapel Rust binary for your platform. When you call
 1. Locates the binary (bundled in JAR, on PATH, or via `GOLDLAPEL_BINARY` env var)
 2. Spawns it as a subprocess listening on localhost
 3. Waits for the port to be ready
-4. Returns a connection string pointing at the proxy
+4. Returns a database connection with L1 native cache built in
 5. Cleans up automatically on JVM shutdown
 
 The binary does all the work — this wrapper just manages its lifecycle.
