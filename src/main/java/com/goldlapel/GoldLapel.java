@@ -384,7 +384,14 @@ public class GoldLapel {
     private static Connection tryWrapConnection(GoldLapel inst) {
         try {
             Class.forName("org.postgresql.Driver");
-            Connection conn = DriverManager.getConnection(inst.getUrl());
+            String url = inst.getUrl();
+            // JDBC requires jdbc:postgresql:// prefix
+            if (url.startsWith("postgres://")) {
+                url = "jdbc:postgresql://" + url.substring("postgres://".length());
+            } else if (url.startsWith("postgresql://")) {
+                url = "jdbc:postgresql://" + url.substring("postgresql://".length());
+            }
+            Connection conn = DriverManager.getConnection(url);
             NativeCache cache = NativeCache.getInstance();
             int invPort = inst.port + 2;
             if (inst.config != null) {
