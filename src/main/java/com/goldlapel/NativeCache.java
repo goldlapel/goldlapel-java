@@ -238,8 +238,35 @@ public class NativeCache {
                     return bareTable(tokens[2]);
                 }
                 return bareTable(tokens[1]);
-            case "CREATE": case "ALTER": case "DROP":
+            case "CREATE": case "ALTER": case "DROP": case "REFRESH": case "DO": case "CALL":
                 return DDL_SENTINEL;
+            case "MERGE":
+                if (tokens.length < 3 || !"INTO".equalsIgnoreCase(tokens[1])) return null;
+                return bareTable(tokens[2]);
+            case "SELECT":
+                boolean sawInto = false;
+                String intoTarget = null;
+                for (int i = 1; i < tokens.length; i++) {
+                    String upper = tokens[i].toUpperCase();
+                    if ("INTO".equals(upper) && !sawInto) {
+                        sawInto = true;
+                        continue;
+                    }
+                    if (sawInto && intoTarget == null) {
+                        if ("TEMPORARY".equals(upper) || "TEMP".equals(upper) || "UNLOGGED".equals(upper)) {
+                            continue;
+                        }
+                        intoTarget = tokens[i];
+                        continue;
+                    }
+                    if (sawInto && intoTarget != null && "FROM".equals(upper)) {
+                        return DDL_SENTINEL;
+                    }
+                    if ("FROM".equals(upper)) {
+                        return null;
+                    }
+                }
+                return null;
             case "COPY":
                 if (tokens.length < 2) return null;
                 String raw = tokens[1];
