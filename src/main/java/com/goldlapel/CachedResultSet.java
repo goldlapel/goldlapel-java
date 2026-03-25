@@ -3,8 +3,12 @@ package com.goldlapel;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.math.BigDecimal;
+import java.sql.Date;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.sql.Time;
+import java.sql.Timestamp;
 import java.util.*;
 
 public class CachedResultSet {
@@ -71,6 +75,18 @@ public class CachedResultSet {
                 case "getByte":
                     if (args[0] instanceof Integer) return asByte(getByIndex((int) args[0]));
                     return asByte(getByName((String) args[0]));
+                case "getTimestamp":
+                    if (args[0] instanceof Integer) return asTimestamp(getByIndex((int) args[0]));
+                    return asTimestamp(getByName((String) args[0]));
+                case "getDate":
+                    if (args[0] instanceof Integer) return asDate(getByIndex((int) args[0]));
+                    return asDate(getByName((String) args[0]));
+                case "getTime":
+                    if (args[0] instanceof Integer) return asTime(getByIndex((int) args[0]));
+                    return asTime(getByName((String) args[0]));
+                case "getBigDecimal":
+                    if (args[0] instanceof Integer) return asBigDecimal(getByIndex((int) args[0]));
+                    return asBigDecimal(getByName((String) args[0]));
 
                 case "getMetaData": return createMetaData();
                 case "findColumn": return findColumn((String) args[0]);
@@ -174,6 +190,26 @@ public class CachedResultSet {
             if (val == null) return 0;
             if (val instanceof Number) return ((Number) val).byteValue();
             return Byte.parseByte(val.toString());
+        }
+        private Timestamp asTimestamp(Object val) {
+            if (val == null) return null;
+            if (val instanceof Timestamp) return (Timestamp) val;
+            return Timestamp.valueOf(val.toString());
+        }
+        private Date asDate(Object val) {
+            if (val == null) return null;
+            if (val instanceof Date) return (Date) val;
+            return Date.valueOf(val.toString());
+        }
+        private Time asTime(Object val) {
+            if (val == null) return null;
+            if (val instanceof Time) return (Time) val;
+            return Time.valueOf(val.toString());
+        }
+        private BigDecimal asBigDecimal(Object val) {
+            if (val == null) return null;
+            if (val instanceof BigDecimal) return (BigDecimal) val;
+            return new BigDecimal(val.toString());
         }
 
         private ResultSetMetaData createMetaData() {
