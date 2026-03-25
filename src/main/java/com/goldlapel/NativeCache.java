@@ -123,11 +123,13 @@ public class NativeCache {
     }
 
     public void invalidateAll() {
-        long count = cache.size();
-        cache.clear();
-        tableIndex.clear();
-        accessOrder.clear();
-        statsInvalidations.addAndGet(count);
+        synchronized (this) {
+            long count = cache.size();
+            cache.clear();
+            tableIndex.clear();
+            accessOrder.clear();
+            statsInvalidations.addAndGet(count);
+        }
     }
 
     // --- Invalidation ---

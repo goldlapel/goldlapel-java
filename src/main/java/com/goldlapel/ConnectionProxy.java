@@ -79,6 +79,17 @@ public class ConnectionProxy {
             this.connHandler = connHandler;
         }
 
+        private void handleWriteInvalidation(String sql) {
+            String writeTable = NativeCache.detectWrite(sql);
+            if (writeTable != null) {
+                if (writeTable.equals(NativeCache.DDL_SENTINEL)) {
+                    cache.invalidateAll();
+                } else {
+                    cache.invalidateTable(writeTable);
+                }
+            }
+        }
+
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
             switch (method.getName()) {
@@ -108,13 +119,8 @@ public class ConnectionProxy {
             }
 
             // Write detection
-            String writeTable = NativeCache.detectWrite(sql);
-            if (writeTable != null) {
-                if (writeTable.equals(NativeCache.DDL_SENTINEL)) {
-                    cache.invalidateAll();
-                } else {
-                    cache.invalidateTable(writeTable);
-                }
+            if (NativeCache.detectWrite(sql) != null) {
+                handleWriteInvalidation(sql);
                 return real.executeQuery(sql);
             }
 
@@ -135,14 +141,7 @@ public class ConnectionProxy {
         }
 
         private int handleExecuteUpdate(String sql) throws SQLException {
-            String writeTable = NativeCache.detectWrite(sql);
-            if (writeTable != null) {
-                if (writeTable.equals(NativeCache.DDL_SENTINEL)) {
-                    cache.invalidateAll();
-                } else {
-                    cache.invalidateTable(writeTable);
-                }
-            }
+            handleWriteInvalidation(sql);
             return real.executeUpdate(sql);
         }
 
@@ -152,14 +151,7 @@ public class ConnectionProxy {
             } else if (NativeCache.isTxEnd(sql)) {
                 connHandler.inTransaction = false;
             }
-            String writeTable = NativeCache.detectWrite(sql);
-            if (writeTable != null) {
-                if (writeTable.equals(NativeCache.DDL_SENTINEL)) {
-                    cache.invalidateAll();
-                } else {
-                    cache.invalidateTable(writeTable);
-                }
-            }
+            handleWriteInvalidation(sql);
             return real.execute(sql);
         }
 
@@ -202,6 +194,17 @@ public class ConnectionProxy {
             this.sql = sql;
             this.cache = cache;
             this.connHandler = connHandler;
+        }
+
+        private void handleWriteInvalidation(String sql) {
+            String writeTable = NativeCache.detectWrite(sql);
+            if (writeTable != null) {
+                if (writeTable.equals(NativeCache.DDL_SENTINEL)) {
+                    cache.invalidateAll();
+                } else {
+                    cache.invalidateTable(writeTable);
+                }
+            }
         }
 
         @Override
@@ -252,13 +255,8 @@ public class ConnectionProxy {
         private ResultSet handlePreparedQuery() throws SQLException {
             Object[] p = paramsArray();
 
-            String writeTable = NativeCache.detectWrite(sql);
-            if (writeTable != null) {
-                if (writeTable.equals(NativeCache.DDL_SENTINEL)) {
-                    cache.invalidateAll();
-                } else {
-                    cache.invalidateTable(writeTable);
-                }
+            if (NativeCache.detectWrite(sql) != null) {
+                handleWriteInvalidation(sql);
                 return real.executeQuery();
             }
 
@@ -297,26 +295,12 @@ public class ConnectionProxy {
         }
 
         private int handlePreparedUpdate() throws SQLException {
-            String writeTable = NativeCache.detectWrite(sql);
-            if (writeTable != null) {
-                if (writeTable.equals(NativeCache.DDL_SENTINEL)) {
-                    cache.invalidateAll();
-                } else {
-                    cache.invalidateTable(writeTable);
-                }
-            }
+            handleWriteInvalidation(sql);
             return real.executeUpdate();
         }
 
         private boolean handlePreparedExecute() throws SQLException {
-            String writeTable = NativeCache.detectWrite(sql);
-            if (writeTable != null) {
-                if (writeTable.equals(NativeCache.DDL_SENTINEL)) {
-                    cache.invalidateAll();
-                } else {
-                    cache.invalidateTable(writeTable);
-                }
-            }
+            handleWriteInvalidation(sql);
             return real.execute();
         }
     }

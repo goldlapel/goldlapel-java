@@ -310,11 +310,11 @@ public class GoldLapel {
     private static GoldLapel instance;
     private static boolean cleanupRegistered = false;
 
-    public static Connection start(String upstream) {
+    public static synchronized Connection start(String upstream) {
         return start(upstream, new Options());
     }
 
-    public static Connection start(String upstream, Options options) {
+    public static synchronized Connection start(String upstream, Options options) {
         if (instance != null && instance.isRunning()) {
             if (!instance.upstream.equals(upstream)) {
                 throw new RuntimeException(
@@ -354,11 +354,11 @@ public class GoldLapel {
         return wrapped;
     }
 
-    public static String startUrl(String upstream) {
+    public static synchronized String startUrl(String upstream) {
         return startUrl(upstream, new Options());
     }
 
-    public static String startUrl(String upstream, Options options) {
+    public static synchronized String startUrl(String upstream, Options options) {
         if (instance != null && instance.isRunning()) {
             if (!instance.upstream.equals(upstream)) {
                 throw new RuntimeException(
@@ -407,7 +407,7 @@ public class GoldLapel {
         }
     }
 
-    public static void stop() {
+    public static synchronized void stop() {
         if (instance != null) {
             instance.stopProxy();
             instance = null;
