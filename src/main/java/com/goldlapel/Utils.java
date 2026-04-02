@@ -134,4 +134,84 @@ public class Utils {
             return results;
         }
     }
+
+    /**
+     * Set a field in a hash. Like redis.hset().
+     * Creates the hash table if it doesn't exist. Uses JSONB for storage.
+     */
+    public static void hset(Connection conn, String table, String key, String field, String valueJson) throws SQLException {
+        try (java.sql.Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE TABLE IF NOT EXISTS " + table + " (" +
+                "key TEXT PRIMARY KEY, " +
+                "data JSONB NOT NULL DEFAULT '{}'::jsonb)"
+            );
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO " + table + " (key, data) VALUES (?, jsonb_build_object(?, ?::jsonb)) " +
+                "ON CONFLICT (key) DO UPDATE SET data = " + table + ".data || jsonb_build_object(?, ?::jsonb)")) {
+            ps.setString(1, key);
+            ps.setString(2, field);
+            ps.setString(3, valueJson);
+            ps.setString(4, field);
+            ps.setString(5, valueJson);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Get a field from a hash. Like redis.hget().
+     * Returns the value as a JSON string, or null if key or field doesn't exist.
+     */
+    public static String hget(Connection conn, String table, String key, String field) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT data->>? FROM " + table + " WHERE key = ?")) {
+            ps.setString(1, field);
+            ps.setString(2, key);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                return rs.getString(1);
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Get all fields from a hash. Like redis.hgetall().
+     * Returns the full JSONB object as a string, or null if key doesn't exist.
+     */
+    public static String hgetall(Connection conn, String table, String key) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT data FROM " + table + " WHERE key = ?")) {
+            ps.setString(1, key);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                return rs.getString(1);
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Remove a field from a hash. Like redis.hdel().
+     * Returns true if the field existed, false otherwise.
+     */
+    public static boolean hdel(Connection conn, String table, String key, String field) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT data ? ? AS existed FROM " + table + " WHERE key = ?")) {
+            ps.setString(1, field);
+            ps.setString(2, key);
+            ResultSet rs = ps.executeQuery();
+            if (!rs.next() || !rs.getBoolean("existed")) {
+                return false;
+            }
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE " + table + " SET data = data - ? WHERE key = ?")) {
+            ps.setString(1, field);
+            ps.setString(2, key);
+            ps.executeUpdate();
+        }
+        return true;
+    }
 }
