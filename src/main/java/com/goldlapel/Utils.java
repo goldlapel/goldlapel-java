@@ -3,9 +3,11 @@ package com.goldlapel;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -213,5 +215,94 @@ public class Utils {
             ps.executeUpdate();
         }
         return true;
+    }
+
+    /**
+     * Add a location to a geo table. Like redis.geoadd().
+     * Creates the table with PostGIS geometry column if it doesn't exist.
+     * Requires PostGIS extension.
+     */
+    public static void geoadd(Connection conn, String table, String nameColumn,
+            String geomColumn, String name, double lon, double lat) throws SQLException {
+        try (java.sql.Statement st = conn.createStatement()) {
+            st.execute("CREATE EXTENSION IF NOT EXISTS postgis");
+        }
+        try (java.sql.Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE TABLE IF NOT EXISTS " + table + " (" +
+                "id BIGSERIAL PRIMARY KEY, " +
+                nameColumn + " TEXT NOT NULL, " +
+                geomColumn + " GEOMETRY(Point, 4326) NOT NULL)"
+            );
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO " + table + " (" + nameColumn + ", " + geomColumn + ") " +
+                "VALUES (?, ST_SetSRID(ST_MakePoint(?, ?), 4326))")) {
+            ps.setString(1, name);
+            ps.setDouble(2, lon);
+            ps.setDouble(3, lat);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Find rows within a radius of a point. Like redis.georadius().
+     * Requires PostGIS extension. Uses ST_DWithin with geography type
+     * for accurate distance on the Earth's surface.
+     * Returns a list of maps with all columns plus a "distance_m" field.
+     */
+    public static List<Map<String, Object>> georadius(Connection conn, String table,
+            String geomColumn, double lon, double lat, double radiusMeters, int limit) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT *, ST_Distance(" +
+                geomColumn + "::geography, " +
+                "ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography" +
+                ") AS distance_m " +
+                "FROM " + table + " " +
+                "WHERE ST_DWithin(" +
+                geomColumn + "::geography, " +
+                "ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, " +
+                "?) " +
+                "ORDER BY distance_m " +
+                "LIMIT ?")) {
+            ps.setDouble(1, lon);
+            ps.setDouble(2, lat);
+            ps.setDouble(3, lon);
+            ps.setDouble(4, lat);
+            ps.setDouble(5, radiusMeters);
+            ps.setInt(6, limit);
+            ResultSet rs = ps.executeQuery();
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= colCount; i++) {
+                    row.put(meta.getColumnLabel(i), rs.getObject(i));
+                }
+                results.add(row);
+            }
+            return results;
+        }
+    }
+
+    /**
+     * Get distance between two members in meters. Like redis.geodist().
+     * Returns the distance in meters, or null if either member doesn't exist.
+     */
+    public static Double geodist(Connection conn, String table, String geomColumn,
+            String nameColumn, String nameA, String nameB) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT ST_Distance(a." + geomColumn + "::geography, b." + geomColumn + "::geography) " +
+                "FROM " + table + " a, " + table + " b " +
+                "WHERE a." + nameColumn + " = ? AND b." + nameColumn + " = ?")) {
+            ps.setString(1, nameA);
+            ps.setString(2, nameB);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                return rs.getDouble(1);
+            }
+            return null;
+        }
     }
 }
