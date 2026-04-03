@@ -5,11 +5,16 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
+
+import org.postgresql.PGConnection;
+import org.postgresql.PGNotification;
 
 public class Utils {
 
@@ -303,6 +308,105 @@ public class Utils {
                 return rs.getDouble(1);
             }
             return null;
+        }
+    }
+
+    public static Thread subscribe(Connection conn, String channel,
+            BiConsumer<String, String> callback) throws SQLException {
+        return subscribe(conn, channel, callback, true);
+    }
+
+    public static Thread subscribe(Connection conn, String channel,
+            BiConsumer<String, String> callback, boolean blocking) throws SQLException {
+        PGConnection pgConn = conn.unwrap(PGConnection.class);
+        Runnable listen = () -> {
+            try {
+                try (Statement st = conn.createStatement()) {
+                    st.execute("LISTEN " + channel);
+                }
+                while (true) {
+                    PGNotification[] notifications = pgConn.getNotifications(5000);
+                    if (notifications != null) {
+                        for (PGNotification n : notifications) {
+                            callback.accept(n.getName(), n.getParameter());
+                        }
+                    }
+                }
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
+            }
+        };
+        if (blocking) {
+            listen.run();
+            return null;
+        }
+        Thread t = new Thread(listen);
+        t.setDaemon(true);
+        t.start();
+        return t;
+    }
+
+    public static long getCounter(Connection conn, String table, String key) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT value FROM " + table + " WHERE key = ?")) {
+            ps.setString(1, key);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                return rs.getLong(1);
+            }
+            return 0;
+        }
+    }
+
+    public static double zincrby(Connection conn, String table, String member,
+            double amount) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO " + table + " (member, score) VALUES (?, ?) " +
+                "ON CONFLICT (member) DO UPDATE SET score = " + table + ".score + ? " +
+                "RETURNING score")) {
+            ps.setString(1, member);
+            ps.setDouble(2, amount);
+            ps.setDouble(3, amount);
+            ResultSet rs = ps.executeQuery();
+            rs.next();
+            return rs.getDouble(1);
+        }
+    }
+
+    public static Long zrank(Connection conn, String table, String member,
+            boolean desc) throws SQLException {
+        String order = desc ? "DESC" : "ASC";
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT rank FROM (" +
+                "SELECT member, ROW_NUMBER() OVER (ORDER BY score " + order + ") - 1 AS rank " +
+                "FROM " + table +
+                ") sub WHERE member = ?")) {
+            ps.setString(1, member);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                return rs.getLong(1);
+            }
+            return null;
+        }
+    }
+
+    public static Double zscore(Connection conn, String table, String member) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT score FROM " + table + " WHERE member = ?")) {
+            ps.setString(1, member);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                return rs.getDouble(1);
+            }
+            return null;
+        }
+    }
+
+    public static boolean zrem(Connection conn, String table, String member) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "DELETE FROM " + table + " WHERE member = ?")) {
+            ps.setString(1, member);
+            return ps.executeUpdate() > 0;
         }
     }
 }
