@@ -417,4 +417,33 @@ public class Utils {
             return rs.getLong(1);
         }
     }
+
+    public static String script(Connection conn, String luaCode, String... args) throws SQLException {
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE EXTENSION IF NOT EXISTS pllua");
+        }
+        String funcName = "_gl_lua_" + Long.toHexString(Double.doubleToLongBits(Math.random())).substring(0, 8);
+        StringBuilder params = new StringBuilder();
+        for (int i = 0; i < args.length; i++) {
+            if (i > 0) params.append(", ");
+            params.append("p").append(i + 1).append(" text");
+        }
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE OR REPLACE FUNCTION pg_temp." + funcName + "(" + params + ") RETURNS text LANGUAGE pllua AS $pllua$ " + luaCode + " $pllua$");
+        }
+        StringBuilder placeholders = new StringBuilder();
+        for (int i = 0; i < args.length; i++) {
+            if (i > 0) placeholders.append(", ");
+            placeholders.append("?");
+        }
+        String query = "SELECT pg_temp." + funcName + "(" + placeholders + ")";
+        try (PreparedStatement ps = conn.prepareStatement(query)) {
+            for (int i = 0; i < args.length; i++) {
+                ps.setString(i + 1, args[i]);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
+    }
 }
