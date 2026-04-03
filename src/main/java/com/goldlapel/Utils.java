@@ -409,4 +409,12 @@ public class Utils {
             return ps.executeUpdate() > 0;
         }
     }
+
+    public static long countDistinct(Connection conn, String table, String column) throws SQLException {
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT COUNT(DISTINCT " + column + ") FROM " + table)) {
+            rs.next();
+            return rs.getLong(1);
+        }
+    }
 }
