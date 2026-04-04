@@ -418,6 +418,162 @@ public class Utils {
         }
     }
 
+    public static long streamAdd(Connection conn, String stream, String payload) throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE TABLE IF NOT EXISTS " + stream + " (" +
+                "id BIGSERIAL PRIMARY KEY, " +
+                "payload JSONB NOT NULL, " +
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+            );
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO " + stream + " (payload) VALUES (?::jsonb) RETURNING id")) {
+            ps.setString(1, payload);
+            ResultSet rs = ps.executeQuery();
+            rs.next();
+            return rs.getLong(1);
+        }
+    }
+
+    public static void streamCreateGroup(Connection conn, String stream, String group) throws SQLException {
+        String groupTable = stream + "_groups";
+        String pelTable = stream + "_pel";
+        try (Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE TABLE IF NOT EXISTS " + groupTable + " (" +
+                "group_name TEXT PRIMARY KEY, " +
+                "last_delivered_id BIGINT NOT NULL DEFAULT 0)"
+            );
+        }
+        try (Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE TABLE IF NOT EXISTS " + pelTable + " (" +
+                "message_id BIGINT NOT NULL, " +
+                "group_name TEXT NOT NULL, " +
+                "consumer TEXT NOT NULL, " +
+                "delivered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), " +
+                "PRIMARY KEY (message_id, group_name))"
+            );
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO " + groupTable + " (group_name) VALUES (?) " +
+                "ON CONFLICT (group_name) DO NOTHING")) {
+            ps.setString(1, group);
+            ps.executeUpdate();
+        }
+    }
+
+    public static List<Map<String, Object>> streamRead(Connection conn, String stream,
+            String group, String consumer, int count) throws SQLException {
+        String groupTable = stream + "_groups";
+        String pelTable = stream + "_pel";
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT last_delivered_id FROM " + groupTable + " WHERE group_name = ?")) {
+            ps.setString(1, group);
+            ResultSet rs = ps.executeQuery();
+            if (!rs.next()) {
+                throw new SQLException("Consumer group '" + group + "' does not exist");
+            }
+        }
+        List<Map<String, Object>> results = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "WITH new_messages AS (" +
+                "SELECT s.id, s.payload, s.created_at FROM " + stream + " s " +
+                "WHERE s.id > (SELECT last_delivered_id FROM " + groupTable + " WHERE group_name = ?) " +
+                "AND NOT EXISTS (SELECT 1 FROM " + pelTable + " p WHERE p.message_id = s.id AND p.group_name = ?) " +
+                "ORDER BY s.id LIMIT ?" +
+                ") SELECT * FROM new_messages")) {
+            ps.setString(1, group);
+            ps.setString(2, group);
+            ps.setInt(3, count);
+            ResultSet rs = ps.executeQuery();
+            long maxId = 0;
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                long id = rs.getLong("id");
+                row.put("id", id);
+                row.put("payload", rs.getString("payload"));
+                row.put("created_at", rs.getTimestamp("created_at"));
+                results.add(row);
+                if (id > maxId) maxId = id;
+            }
+            if (maxId > 0) {
+                try (PreparedStatement upd = conn.prepareStatement(
+                        "UPDATE " + groupTable + " SET last_delivered_id = ? WHERE group_name = ? AND last_delivered_id < ?")) {
+                    upd.setLong(1, maxId);
+                    upd.setString(2, group);
+                    upd.setLong(3, maxId);
+                    upd.executeUpdate();
+                }
+                for (Map<String, Object> row : results) {
+                    try (PreparedStatement ins = conn.prepareStatement(
+                            "INSERT INTO " + pelTable + " (message_id, group_name, consumer) VALUES (?, ?, ?) " +
+                            "ON CONFLICT (message_id, group_name) DO NOTHING")) {
+                        ins.setLong(1, (Long) row.get("id"));
+                        ins.setString(2, group);
+                        ins.setString(3, consumer);
+                        ins.executeUpdate();
+                    }
+                }
+            }
+        }
+        return results;
+    }
+
+    public static boolean streamAck(Connection conn, String stream, String group, long messageId) throws SQLException {
+        String pelTable = stream + "_pel";
+        try (PreparedStatement ps = conn.prepareStatement(
+                "DELETE FROM " + pelTable + " WHERE message_id = ? AND group_name = ?")) {
+            ps.setLong(1, messageId);
+            ps.setString(2, group);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    public static List<Map<String, Object>> streamClaim(Connection conn, String stream,
+            String group, String consumer, long minIdleMs) throws SQLException {
+        String pelTable = stream + "_pel";
+        List<Long> claimedIds = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE " + pelTable + " SET consumer = ?, delivered_at = NOW() " +
+                "WHERE group_name = ? AND delivered_at < NOW() - (? || ' milliseconds')::interval " +
+                "RETURNING message_id")) {
+            ps.setString(1, consumer);
+            ps.setString(2, group);
+            ps.setString(3, String.valueOf(minIdleMs));
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) {
+                claimedIds.add(rs.getLong(1));
+            }
+        }
+        if (claimedIds.isEmpty()) {
+            return new ArrayList<>();
+        }
+        StringBuilder placeholders = new StringBuilder();
+        for (int i = 0; i < claimedIds.size(); i++) {
+            if (i > 0) placeholders.append(", ");
+            placeholders.append("?");
+        }
+        List<Map<String, Object>> results = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT id, payload, created_at FROM " + stream +
+                " WHERE id IN (" + placeholders + ") ORDER BY id")) {
+            for (int i = 0; i < claimedIds.size(); i++) {
+                ps.setLong(i + 1, claimedIds.get(i));
+            }
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id"));
+                row.put("payload", rs.getString("payload"));
+                row.put("created_at", rs.getTimestamp("created_at"));
+                results.add(row);
+            }
+        }
+        return results;
+    }
+
     public static String script(Connection conn, String luaCode, String... args) throws SQLException {
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("CREATE EXTENSION IF NOT EXISTS pllua");
