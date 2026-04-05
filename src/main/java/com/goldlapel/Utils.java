@@ -12,11 +12,20 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BiConsumer;
+import java.util.regex.Pattern;
 
 import org.postgresql.PGConnection;
 import org.postgresql.PGNotification;
 
 public class Utils {
+
+    private static final Pattern IDENTIFIER_RE = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*$");
+
+    static void validateIdentifier(String name) {
+        if (!IDENTIFIER_RE.matcher(name).matches()) {
+            throw new IllegalArgumentException("Invalid identifier: " + name);
+        }
+    }
 
     /**
      * Publish a message to a channel. Like redis.publish().
@@ -600,6 +609,209 @@ public class Utils {
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? rs.getString(1) : null;
             }
+        }
+    }
+
+    /**
+     * Full-text search with ranking. Like Elasticsearch match query.
+     * Uses PostgreSQL tsvector/tsquery under the hood.
+     * Returns a list of maps with all columns plus a "_score" field.
+     * If highlight is true, adds a "_highlight" field with matched terms wrapped in &lt;mark&gt; tags.
+     */
+    public static List<Map<String, Object>> search(Connection conn, String table,
+            String column, String query, int limit, String lang, boolean highlight) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(column);
+        String sql;
+        if (highlight) {
+            sql = "SELECT *, " +
+                "ts_rank(to_tsvector(?, " + column + "), plainto_tsquery(?, ?)) AS _score, " +
+                "ts_headline(?, " + column + ", plainto_tsquery(?, ?), " +
+                "'StartSel=<mark>, StopSel=</mark>, MaxWords=35, MinWords=15') AS _highlight " +
+                "FROM " + table + " " +
+                "WHERE to_tsvector(?, " + column + ") @@ plainto_tsquery(?, ?) " +
+                "ORDER BY _score DESC LIMIT ?";
+        } else {
+            sql = "SELECT *, " +
+                "ts_rank(to_tsvector(?, " + column + "), plainto_tsquery(?, ?)) AS _score " +
+                "FROM " + table + " " +
+                "WHERE to_tsvector(?, " + column + ") @@ plainto_tsquery(?, ?) " +
+                "ORDER BY _score DESC LIMIT ?";
+        }
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int idx = 1;
+            ps.setString(idx++, lang);
+            ps.setString(idx++, lang);
+            ps.setString(idx++, query);
+            if (highlight) {
+                ps.setString(idx++, lang);
+                ps.setString(idx++, lang);
+                ps.setString(idx++, query);
+            }
+            ps.setString(idx++, lang);
+            ps.setString(idx++, lang);
+            ps.setString(idx++, query);
+            ps.setInt(idx++, limit);
+            ResultSet rs = ps.executeQuery();
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= colCount; i++) {
+                    row.put(meta.getColumnLabel(i), rs.getObject(i));
+                }
+                results.add(row);
+            }
+            return results;
+        }
+    }
+
+    /**
+     * Typo-tolerant fuzzy search. Like Elasticsearch fuzzy query.
+     * Uses pg_trgm similarity() under the hood.
+     * Returns a list of maps with all columns plus a "_score" field.
+     */
+    public static List<Map<String, Object>> searchFuzzy(Connection conn, String table,
+            String column, String query, int limit, double threshold) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(column);
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT *, similarity(" + column + ", ?) AS _score " +
+                "FROM " + table + " " +
+                "WHERE similarity(" + column + ", ?) > ? " +
+                "ORDER BY _score DESC LIMIT ?")) {
+            ps.setString(1, query);
+            ps.setString(2, query);
+            ps.setDouble(3, threshold);
+            ps.setInt(4, limit);
+            ResultSet rs = ps.executeQuery();
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= colCount; i++) {
+                    row.put(meta.getColumnLabel(i), rs.getObject(i));
+                }
+                results.add(row);
+            }
+            return results;
+        }
+    }
+
+    /**
+     * Sound-alike phonetic search. Like Elasticsearch phonetic plugin.
+     * Uses fuzzystrmatch soundex() with pg_trgm similarity for ranking.
+     * Returns a list of maps with all columns plus a "_score" field.
+     */
+    public static List<Map<String, Object>> searchPhonetic(Connection conn, String table,
+            String column, String query, int limit) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(column);
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE EXTENSION IF NOT EXISTS fuzzystrmatch");
+        }
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT *, similarity(" + column + ", ?) AS _score " +
+                "FROM " + table + " " +
+                "WHERE soundex(" + column + ") = soundex(?) " +
+                "ORDER BY _score DESC, " + column + " LIMIT ?")) {
+            ps.setString(1, query);
+            ps.setString(2, query);
+            ps.setInt(3, limit);
+            ResultSet rs = ps.executeQuery();
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= colCount; i++) {
+                    row.put(meta.getColumnLabel(i), rs.getObject(i));
+                }
+                results.add(row);
+            }
+            return results;
+        }
+    }
+
+    /**
+     * Vector similarity search. Like Elasticsearch kNN.
+     * Uses pgvector's <=> (cosine distance) operator.
+     * Returns a list of maps with all columns plus a "_score" field (lower = more similar).
+     */
+    public static List<Map<String, Object>> similar(Connection conn, String table,
+            String column, double[] vector, int limit) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(column);
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE EXTENSION IF NOT EXISTS vector");
+        }
+        StringBuilder vecLiteral = new StringBuilder("[");
+        for (int i = 0; i < vector.length; i++) {
+            if (i > 0) vecLiteral.append(",");
+            vecLiteral.append(vector[i]);
+        }
+        vecLiteral.append("]");
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT *, (" + column + " <=> ?::vector) AS _score " +
+                "FROM " + table + " " +
+                "ORDER BY _score LIMIT ?")) {
+            ps.setString(1, vecLiteral.toString());
+            ps.setInt(2, limit);
+            ResultSet rs = ps.executeQuery();
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= colCount; i++) {
+                    row.put(meta.getColumnLabel(i), rs.getObject(i));
+                }
+                results.add(row);
+            }
+            return results;
+        }
+    }
+
+    /**
+     * Autocomplete/typeahead suggestions. Like Elasticsearch completion suggester.
+     * Uses pg_trgm for similarity ranking with ILIKE prefix matching.
+     * Returns a list of maps with all columns plus a "_score" field.
+     */
+    public static List<Map<String, Object>> suggest(Connection conn, String table,
+            String column, String prefix, int limit) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(column);
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT *, similarity(" + column + ", ?) AS _score " +
+                "FROM " + table + " " +
+                "WHERE " + column + " ILIKE ? " +
+                "ORDER BY _score DESC, " + column + " LIMIT ?")) {
+            ps.setString(1, prefix);
+            ps.setString(2, prefix + "%");
+            ps.setInt(3, limit);
+            ResultSet rs = ps.executeQuery();
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= colCount; i++) {
+                    row.put(meta.getColumnLabel(i), rs.getObject(i));
+                }
+                results.add(row);
+            }
+            return results;
         }
     }
 }
