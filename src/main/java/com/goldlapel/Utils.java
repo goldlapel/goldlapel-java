@@ -6,6 +6,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -1010,6 +1011,116 @@ public class Utils {
             try (Statement st = conn.createStatement()) {
                 st.execute("CREATE TEXT SEARCH CONFIGURATION " + name + " (COPY = " + copyFrom + ")");
             }
+        }
+    }
+
+    /**
+     * Register a named query for reverse matching. Like Elasticsearch percolator.
+     * Convenience overload with lang="english" and no metadata.
+     */
+    public static void percolateAdd(Connection conn, String name, String queryId,
+            String query) throws SQLException {
+        percolateAdd(conn, name, queryId, query, "english", null);
+    }
+
+    /**
+     * Register a named query for reverse matching. Like Elasticsearch percolator.
+     * Creates the percolator table and GIN index if they don't exist.
+     * Upserts the query — if queryId already exists, updates it.
+     */
+    public static void percolateAdd(Connection conn, String name, String queryId,
+            String query, String lang, String metadataJson) throws SQLException {
+        validateIdentifier(name);
+        try (Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE TABLE IF NOT EXISTS " + name + " (" +
+                "query_id TEXT PRIMARY KEY, " +
+                "query_text TEXT NOT NULL, " +
+                "tsquery TSQUERY NOT NULL, " +
+                "lang TEXT NOT NULL DEFAULT 'english', " +
+                "metadata JSONB, " +
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+            );
+        }
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE INDEX IF NOT EXISTS " + name + "_tsq_idx ON " + name + " USING GIN (tsquery)");
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO " + name + " (query_id, query_text, tsquery, lang, metadata) " +
+                "VALUES (?, ?, plainto_tsquery(?, ?), ?, ?) " +
+                "ON CONFLICT (query_id) DO UPDATE SET " +
+                "query_text = EXCLUDED.query_text, " +
+                "tsquery = EXCLUDED.tsquery, " +
+                "lang = EXCLUDED.lang, " +
+                "metadata = EXCLUDED.metadata")) {
+            ps.setString(1, queryId);
+            ps.setString(2, query);
+            ps.setString(3, lang);
+            ps.setString(4, query);
+            ps.setString(5, lang);
+            if (metadataJson != null) {
+                ps.setString(6, metadataJson);
+            } else {
+                ps.setNull(6, Types.OTHER);
+            }
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Match a document against stored queries. Like Elasticsearch percolate API.
+     * Convenience overload with limit=50 and lang="english".
+     */
+    public static List<Map<String, Object>> percolate(Connection conn, String name,
+            String text) throws SQLException {
+        return percolate(conn, name, text, 50, "english");
+    }
+
+    /**
+     * Match a document against stored queries. Like Elasticsearch percolate API.
+     * Returns matching queries ranked by relevance score.
+     */
+    public static List<Map<String, Object>> percolate(Connection conn, String name,
+            String text, int limit, String lang) throws SQLException {
+        validateIdentifier(name);
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT query_id, query_text, metadata, " +
+                "ts_rank(to_tsvector(?, ?), tsquery) AS _score " +
+                "FROM " + name + " " +
+                "WHERE to_tsvector(?, ?) @@ tsquery " +
+                "ORDER BY _score DESC LIMIT ?")) {
+            ps.setString(1, lang);
+            ps.setString(2, text);
+            ps.setString(3, lang);
+            ps.setString(4, text);
+            ps.setInt(5, limit);
+            ResultSet rs = ps.executeQuery();
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= colCount; i++) {
+                    row.put(meta.getColumnLabel(i), rs.getObject(i));
+                }
+                results.add(row);
+            }
+            return results;
+        }
+    }
+
+    /**
+     * Remove a stored query from a percolator index. Like Elasticsearch delete percolator query.
+     * Returns true if the query existed, false otherwise.
+     */
+    public static boolean percolateDelete(Connection conn, String name,
+            String queryId) throws SQLException {
+        validateIdentifier(name);
+        try (PreparedStatement ps = conn.prepareStatement(
+                "DELETE FROM " + name + " WHERE query_id = ? RETURNING query_id")) {
+            ps.setString(1, queryId);
+            ResultSet rs = ps.executeQuery();
+            return rs.next();
         }
     }
 }
