@@ -617,25 +617,50 @@ public class Utils {
      * Uses PostgreSQL tsvector/tsquery under the hood.
      * Returns a list of maps with all columns plus a "_score" field.
      * If highlight is true, adds a "_highlight" field with matched terms wrapped in &lt;mark&gt; tags.
+     * Single-column convenience overload.
      */
     public static List<Map<String, Object>> search(Connection conn, String table,
             String column, String query, int limit, String lang, boolean highlight) throws SQLException {
+        return search(conn, table, new String[]{column}, query, limit, lang, highlight);
+    }
+
+    /**
+     * Full-text search with ranking across one or more columns.
+     * Like Elasticsearch match query. Uses PostgreSQL tsvector/tsquery.
+     * Multiple columns are concatenated for searching.
+     * Returns a list of maps with all columns plus a "_score" field.
+     * If highlight is true, adds a "_highlight" field with matched terms wrapped in &lt;mark&gt; tags.
+     */
+    public static List<Map<String, Object>> search(Connection conn, String table,
+            String[] columns, String query, int limit, String lang, boolean highlight) throws SQLException {
         validateIdentifier(table);
-        validateIdentifier(column);
+        for (String col : columns) {
+            validateIdentifier(col);
+        }
+
+        // Build tsvector expression: coalesce(col1, '') || ' ' || coalesce(col2, '')
+        StringBuilder tsvParts = new StringBuilder();
+        for (int i = 0; i < columns.length; i++) {
+            if (i > 0) tsvParts.append(" || ' ' || ");
+            tsvParts.append("coalesce(").append(columns[i]).append(", '')");
+        }
+        String tsvExpr = "to_tsvector(?, " + tsvParts + ")";
+        String highlightCol = columns[0];
+
         String sql;
         if (highlight) {
             sql = "SELECT *, " +
-                "ts_rank(to_tsvector(?, " + column + "), plainto_tsquery(?, ?)) AS _score, " +
-                "ts_headline(?, " + column + ", plainto_tsquery(?, ?), " +
+                "ts_rank(" + tsvExpr + ", plainto_tsquery(?, ?)) AS _score, " +
+                "ts_headline(?, coalesce(" + highlightCol + ", ''), plainto_tsquery(?, ?), " +
                 "'StartSel=<mark>, StopSel=</mark>, MaxWords=35, MinWords=15') AS _highlight " +
                 "FROM " + table + " " +
-                "WHERE to_tsvector(?, " + column + ") @@ plainto_tsquery(?, ?) " +
+                "WHERE " + tsvExpr + " @@ plainto_tsquery(?, ?) " +
                 "ORDER BY _score DESC LIMIT ?";
         } else {
             sql = "SELECT *, " +
-                "ts_rank(to_tsvector(?, " + column + "), plainto_tsquery(?, ?)) AS _score " +
+                "ts_rank(" + tsvExpr + ", plainto_tsquery(?, ?)) AS _score " +
                 "FROM " + table + " " +
-                "WHERE to_tsvector(?, " + column + ") @@ plainto_tsquery(?, ?) " +
+                "WHERE " + tsvExpr + " @@ plainto_tsquery(?, ?) " +
                 "ORDER BY _score DESC LIMIT ?";
         }
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
