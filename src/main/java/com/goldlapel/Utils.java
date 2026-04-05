@@ -1123,4 +1123,99 @@ public class Utils {
             return rs.next();
         }
     }
+
+    /**
+     * Analyze how text is tokenized by the full-text search engine.
+     * Like Elasticsearch _analyze API. Uses ts_debug() under the hood.
+     * Returns a list of maps with alias, description, token, dictionaries, dictionary, lexemes.
+     * Convenience overload with lang="english".
+     */
+    public static List<Map<String, Object>> analyze(Connection conn, String text) throws SQLException {
+        return analyze(conn, text, "english");
+    }
+
+    /**
+     * Analyze how text is tokenized by the full-text search engine.
+     * Like Elasticsearch _analyze API. Uses ts_debug() under the hood.
+     * Returns a list of maps with alias, description, token, dictionaries, dictionary, lexemes.
+     */
+    public static List<Map<String, Object>> analyze(Connection conn, String text, String lang) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT alias, description, token, dictionaries, dictionary, lexemes FROM ts_debug(?, ?)")) {
+            ps.setString(1, lang);
+            ps.setString(2, text);
+            ResultSet rs = ps.executeQuery();
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= colCount; i++) {
+                    row.put(meta.getColumnLabel(i), rs.getObject(i));
+                }
+                results.add(row);
+            }
+            return results;
+        }
+    }
+
+    /**
+     * Explain how a specific row scores against a full-text query.
+     * Like Elasticsearch _explain API. Shows document tokens, query tokens,
+     * match status, rank score, and headline with matched terms highlighted.
+     * Convenience overload with lang="english".
+     */
+    public static Map<String, Object> explainScore(Connection conn, String table, String column,
+            String query, String idColumn, Object idValue) throws SQLException {
+        return explainScore(conn, table, column, query, idColumn, idValue, "english");
+    }
+
+    /**
+     * Explain how a specific row scores against a full-text query.
+     * Like Elasticsearch _explain API. Shows document tokens, query tokens,
+     * match status, rank score, and headline with matched terms highlighted.
+     * Returns a single map or null if the row is not found.
+     */
+    public static Map<String, Object> explainScore(Connection conn, String table, String column,
+            String query, String idColumn, Object idValue, String lang) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(column);
+        validateIdentifier(idColumn);
+
+        String sql = "SELECT " + column + " AS document_text, to_tsvector(?, " + column + ")::text AS document_tokens, " +
+            "plainto_tsquery(?, ?)::text AS query_tokens, " +
+            "to_tsvector(?, " + column + ") @@ plainto_tsquery(?, ?) AS matches, " +
+            "ts_rank(to_tsvector(?, " + column + "), plainto_tsquery(?, ?)) AS score, " +
+            "ts_headline(?, " + column + ", plainto_tsquery(?, ?), " +
+            "'StartSel=**, StopSel=**, MaxWords=50, MinWords=20') AS headline " +
+            "FROM " + table + " WHERE " + idColumn + " = ?";
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int idx = 1;
+            ps.setString(idx++, lang);
+            ps.setString(idx++, lang);
+            ps.setString(idx++, query);
+            ps.setString(idx++, lang);
+            ps.setString(idx++, lang);
+            ps.setString(idx++, query);
+            ps.setString(idx++, lang);
+            ps.setString(idx++, lang);
+            ps.setString(idx++, query);
+            ps.setString(idx++, lang);
+            ps.setString(idx++, lang);
+            ps.setString(idx++, query);
+            ps.setObject(idx++, idValue);
+            ResultSet rs = ps.executeQuery();
+            if (!rs.next()) {
+                return null;
+            }
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            Map<String, Object> row = new LinkedHashMap<>();
+            for (int i = 1; i <= colCount; i++) {
+                row.put(meta.getColumnLabel(i), rs.getObject(i));
+            }
+            return row;
+        }
+    }
 }
