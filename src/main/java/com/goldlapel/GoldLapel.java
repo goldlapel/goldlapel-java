@@ -104,7 +104,7 @@ public class GoldLapel {
         cmd.add(binary);
         cmd.add("--upstream");
         cmd.add(upstream);
-        cmd.add("--port");
+        cmd.add("--proxy-port");
         cmd.add(String.valueOf(port));
         cmd.addAll(configToArgs(config));
         cmd.addAll(extraArgs);

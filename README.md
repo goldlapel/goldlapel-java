@@ -109,7 +109,7 @@ Connection conn = GoldLapel.start(
 );
 ```
 
-Or set environment variables (`GOLDLAPEL_PORT`, `GOLDLAPEL_UPSTREAM`, etc.) — the binary reads them automatically.
+Or set environment variables (`GOLDLAPEL_PROXY_PORT`, `GOLDLAPEL_UPSTREAM`, etc.) — the binary reads them automatically.
 
 ## How It Works
 
