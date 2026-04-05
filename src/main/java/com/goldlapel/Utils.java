@@ -839,4 +839,177 @@ public class Utils {
             return results;
         }
     }
+
+    /**
+     * Terms aggregation (faceted counts). Like Elasticsearch terms aggregation.
+     * Returns a list of maps with {value, count} for each distinct value in the column.
+     * Convenience overload without full-text filtering.
+     */
+    public static List<Map<String, Object>> facets(Connection conn, String table,
+            String column, int limit) throws SQLException {
+        return facets(conn, table, column, limit, null, (String[]) null, null);
+    }
+
+    /**
+     * Terms aggregation with optional full-text search filter.
+     * Single-column convenience overload.
+     */
+    public static List<Map<String, Object>> facets(Connection conn, String table,
+            String column, int limit, String query, String queryColumn, String lang) throws SQLException {
+        return facets(conn, table, column, limit, query,
+                queryColumn != null ? new String[]{queryColumn} : null, lang);
+    }
+
+    /**
+     * Terms aggregation with optional full-text search filter across multiple columns.
+     * Like Elasticsearch terms aggregation with a query filter.
+     * Returns a list of maps with {value, count} for each distinct value in the column.
+     * When query and queryColumns are non-null, filters rows by full-text search first.
+     */
+    public static List<Map<String, Object>> facets(Connection conn, String table,
+            String column, int limit, String query, String[] queryColumns, String lang) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(column);
+
+        boolean hasQuery = query != null && queryColumns != null && queryColumns.length > 0;
+
+        if (hasQuery) {
+            for (String qc : queryColumns) {
+                validateIdentifier(qc);
+            }
+        }
+
+        String sql;
+        if (hasQuery) {
+            StringBuilder tsvParts = new StringBuilder();
+            for (int i = 0; i < queryColumns.length; i++) {
+                if (i > 0) tsvParts.append(" || ' ' || ");
+                tsvParts.append("coalesce(").append(queryColumns[i]).append(", '')");
+            }
+            sql = "SELECT " + column + " AS value, COUNT(*) AS count " +
+                "FROM " + table + " " +
+                "WHERE to_tsvector(?, " + tsvParts + ") @@ plainto_tsquery(?, ?) " +
+                "GROUP BY " + column + " ORDER BY count DESC, " + column + " LIMIT ?";
+        } else {
+            sql = "SELECT " + column + " AS value, COUNT(*) AS count " +
+                "FROM " + table + " " +
+                "GROUP BY " + column + " ORDER BY count DESC, " + column + " LIMIT ?";
+        }
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int idx = 1;
+            if (hasQuery) {
+                ps.setString(idx++, lang);
+                ps.setString(idx++, lang);
+                ps.setString(idx++, query);
+            }
+            ps.setInt(idx++, limit);
+            ResultSet rs = ps.executeQuery();
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= colCount; i++) {
+                    row.put(meta.getColumnLabel(i), rs.getObject(i));
+                }
+                results.add(row);
+            }
+            return results;
+        }
+    }
+
+    private static final java.util.Set<String> AGGREGATE_FUNCS =
+        java.util.Set.of("count", "sum", "avg", "min", "max");
+
+    /**
+     * Aggregate function on a column. Like Elasticsearch metric aggregation.
+     * Convenience overload without groupBy — returns a single-row result.
+     */
+    public static List<Map<String, Object>> aggregate(Connection conn, String table,
+            String column, String func) throws SQLException {
+        return aggregate(conn, table, column, func, null, 0);
+    }
+
+    /**
+     * Aggregate function on a column with optional groupBy.
+     * Like Elasticsearch metric aggregation with bucket grouping.
+     * func must be one of: count, sum, avg, min, max.
+     * With groupBy: returns grouped results ordered by value DESC.
+     * Without groupBy: returns a single row with the aggregate value.
+     */
+    public static List<Map<String, Object>> aggregate(Connection conn, String table,
+            String column, String func, String groupBy, int limit) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(column);
+        String funcLower = func.toLowerCase();
+        if (!AGGREGATE_FUNCS.contains(funcLower)) {
+            throw new IllegalArgumentException(
+                "Invalid aggregate function: " + func + ". Must be one of: count, sum, avg, min, max");
+        }
+
+        String funcExpr = funcLower.equals("count")
+            ? "COUNT(*)"
+            : funcLower.toUpperCase() + "(" + column + ")";
+
+        String sql;
+        if (groupBy != null) {
+            validateIdentifier(groupBy);
+            sql = "SELECT " + groupBy + ", " + funcExpr + " AS value " +
+                "FROM " + table + " " +
+                "GROUP BY " + groupBy + " ORDER BY value DESC LIMIT ?";
+        } else {
+            sql = "SELECT " + funcExpr + " AS value FROM " + table;
+        }
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            if (groupBy != null) {
+                ps.setInt(1, limit);
+            }
+            ResultSet rs = ps.executeQuery();
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= colCount; i++) {
+                    row.put(meta.getColumnLabel(i), rs.getObject(i));
+                }
+                results.add(row);
+            }
+            return results;
+        }
+    }
+
+    /**
+     * Create a custom text search configuration.
+     * Convenience overload that copies from "english" by default.
+     */
+    public static void createSearchConfig(Connection conn, String name) throws SQLException {
+        createSearchConfig(conn, name, "english");
+    }
+
+    /**
+     * Create a custom text search configuration if it doesn't already exist.
+     * Like Elasticsearch custom analyzer creation.
+     * Copies from an existing configuration (default: english).
+     */
+    public static void createSearchConfig(Connection conn, String name, String copyFrom) throws SQLException {
+        validateIdentifier(name);
+        validateIdentifier(copyFrom);
+
+        boolean exists = false;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT 1 FROM pg_ts_config WHERE cfgname = ?")) {
+            ps.setString(1, name);
+            ResultSet rs = ps.executeQuery();
+            exists = rs.next();
+        }
+
+        if (!exists) {
+            try (Statement st = conn.createStatement()) {
+                st.execute("CREATE TEXT SEARCH CONFIGURATION " + name + " (COPY = " + copyFrom + ")");
+            }
+        }
+    }
 }
