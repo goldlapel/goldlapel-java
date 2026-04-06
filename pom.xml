@@ -6,7 +6,7 @@
 
     <groupId>com.goldlapel</groupId>
     <artifactId>goldlapel</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.0-rc16</version>
     <packaging>jar</packaging>
 
     <name>Gold Lapel</name>

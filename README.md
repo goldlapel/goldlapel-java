@@ -10,7 +10,7 @@ Gold Lapel sits between your app and Postgres, watches query patterns, and autom
 <dependency>
     <groupId>com.goldlapel</groupId>
     <artifactId>goldlapel</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.0-rc16</version>
 </dependency>
 ```
 
