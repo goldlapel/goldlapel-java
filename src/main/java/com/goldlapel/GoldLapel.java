@@ -6,8 +6,10 @@ import java.io.InputStream;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -503,7 +505,7 @@ public class GoldLapel {
     private static Path extractedBinaryPath;
 
     static String extractBinary() {
-        // Return cached path if already extracted
+        // Return cached path if already extracted and still present on disk
         if (extractedBinaryPath != null && Files.isRegularFile(extractedBinaryPath)) {
             return extractedBinaryPath.toString();
         }
@@ -540,9 +542,39 @@ public class GoldLapel {
         if (in == null) return null;
 
         try (in) {
-            Path tmp = Files.createTempFile("goldlapel-", isWindows ? ".exe" : "");
+            // Read the full resource into memory so we can hash it
+            byte[] bytes = in.readAllBytes();
+
+            // Compute SHA-256 content hash (first 16 hex chars)
+            String hash;
             try {
-                Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                byte[] digest = md.digest(bytes);
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < 8; i++) {
+                    sb.append(String.format("%02x", digest[i]));
+                }
+                hash = sb.toString();
+            } catch (java.security.NoSuchAlgorithmException e) {
+                // SHA-256 is guaranteed by the JVM spec, but handle gracefully
+                hash = String.valueOf(bytes.length);
+            }
+
+            // Build a deterministic path: /tmp/goldlapel-{hash}-{os}-{arch}[.exe]
+            String suffix = isWindows ? ".exe" : "";
+            String fileName = "goldlapel-" + hash + "-" + osName + "-" + archName + suffix;
+            Path target = Paths.get(System.getProperty("java.io.tmpdir"), fileName);
+
+            // If the hashed file already exists and is executable, reuse it
+            if (Files.isRegularFile(target) && target.toFile().canExecute()) {
+                extractedBinaryPath = target;
+                return target.toString();
+            }
+
+            // Extract to a temp file in the same directory, then atomic-rename
+            Path tmp = Files.createTempFile(target.getParent(), "goldlapel-", suffix);
+            try {
+                Files.write(tmp, bytes);
             } catch (IOException e) {
                 Files.deleteIfExists(tmp);
                 return null;
@@ -554,9 +586,26 @@ public class GoldLapel {
                 tmp.toFile().setExecutable(true);
             }
 
-            tmp.toFile().deleteOnExit();
-            extractedBinaryPath = tmp;
-            return tmp.toString();
+            // Atomic move to the deterministic path (race-safe across processes)
+            try {
+                Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException e) {
+                // Atomic move may fail across filesystems; fall back to copy
+                try {
+                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                } catch (IOException e2) {
+                    // Another process may have beaten us — if target exists, use it
+                    Files.deleteIfExists(tmp);
+                    if (Files.isRegularFile(target) && target.toFile().canExecute()) {
+                        extractedBinaryPath = target;
+                        return target.toString();
+                    }
+                    return null;
+                }
+            }
+
+            extractedBinaryPath = target;
+            return target.toString();
         } catch (IOException e) {
             return null;
         }
