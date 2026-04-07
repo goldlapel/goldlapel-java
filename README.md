@@ -82,7 +82,7 @@ import java.util.Map;
 
 Connection conn = GoldLapel.start("postgresql://user:pass@localhost/mydb",
     new GoldLapel.Options().config(Map.of(
-        "mode", "butler",
+        "mode", "waiter",
         "poolSize", 50,
         "disableMatviews", true,
         "replica", List.of("postgresql://user:pass@replica1/mydb")

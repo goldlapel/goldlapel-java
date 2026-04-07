@@ -382,9 +382,9 @@ class ConfigToArgsTest {
 
     @Test
     void testStringValue() {
-        Map<String, Object> config = Collections.singletonMap("mode", "butler");
+        Map<String, Object> config = Collections.singletonMap("mode", "waiter");
         List<String> args = GoldLapel.configToArgs(config);
-        assertEquals(Arrays.asList("--mode", "butler"), args);
+        assertEquals(Arrays.asList("--mode", "waiter"), args);
     }
 
     @Test
@@ -445,13 +445,13 @@ class ConfigToArgsTest {
     @Test
     void testMultipleKeys() {
         Map<String, Object> config = new LinkedHashMap<>();
-        config.put("mode", "butler");
+        config.put("mode", "waiter");
         config.put("poolSize", 10);
         config.put("disableRewrite", true);
         List<String> args = GoldLapel.configToArgs(config);
         assertEquals(5, args.size());
         assertTrue(args.contains("--mode"));
-        assertTrue(args.contains("butler"));
+        assertTrue(args.contains("waiter"));
         assertTrue(args.contains("--pool-size"));
         assertTrue(args.contains("10"));
         assertTrue(args.contains("--disable-rewrite"));
@@ -506,7 +506,7 @@ class ConfigToArgsTest {
     @Test
     void testConfigWithOptions() {
         Map<String, Object> config = new HashMap<>();
-        config.put("mode", "butler");
+        config.put("mode", "waiter");
         config.put("disablePool", true);
 
         GoldLapel.Options opts = new GoldLapel.Options()
