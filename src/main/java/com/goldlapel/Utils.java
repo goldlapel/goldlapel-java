@@ -1467,6 +1467,376 @@ public class Utils {
     }
 
     /**
+     * Aggregate documents in a collection. Like MongoDB aggregate().
+     * pipelineJson is a JSON array of stage objects. Supported stages:
+     * $match (JSONB containment), $group (_id + accumulators), $sort, $limit, $skip.
+     *
+     * $group accumulators: $sum, $avg, $min, $max, $count.
+     * $sum with 1 becomes COUNT(*). $sum/$avg/$min/$max with "$field" operates on (data->>'field')::numeric.
+     *
+     * Returns a list of result rows as maps.
+     */
+    public static List<Map<String, Object>> docAggregate(Connection conn, String collection,
+            String pipelineJson) throws SQLException {
+        validateIdentifier(collection);
+        List<Map<String, String>> stages = parsePipeline(pipelineJson);
+
+        String matchFilter = null;
+        String groupIdField = null;  // null = _id:null, non-null = field name
+        boolean hasGroup = false;
+        List<String> selectExprs = new ArrayList<>();
+        List<String> groupByExprs = new ArrayList<>();
+        String sortClause = null;
+        boolean sortAfterGroup = false;
+        Integer limitVal = null;
+        Integer skipVal = null;
+
+        for (Map<String, String> stage : stages) {
+            String type = stage.get("_type");
+            switch (type) {
+                case "$match":
+                    matchFilter = stage.get("_body");
+                    break;
+                case "$group": {
+                    hasGroup = true;
+                    String idRaw = stage.get("_id");
+                    if (idRaw != null && !idRaw.equals("null")) {
+                        // "$field" reference
+                        if (idRaw.startsWith("\"$") && idRaw.endsWith("\"")) {
+                            groupIdField = idRaw.substring(2, idRaw.length() - 1);
+                        } else if (idRaw.startsWith("$")) {
+                            groupIdField = idRaw.substring(1);
+                        } else {
+                            // bare field name (unquoted or quoted without $)
+                            groupIdField = idRaw.replaceAll("^\"|\"$", "");
+                        }
+                        validateIdentifier(groupIdField);
+                        selectExprs.add("data->>'" + groupIdField + "' AS _id");
+                        groupByExprs.add("data->>'" + groupIdField + "'");
+                    }
+                    // Parse accumulators
+                    for (Map.Entry<String, String> entry : stage.entrySet()) {
+                        String alias = entry.getKey();
+                        if (alias.equals("_type") || alias.equals("_id") || alias.equals("_body")) continue;
+                        validateIdentifier(alias);
+                        String accValue = entry.getValue();
+                        String accExpr = parseAccumulator(accValue);
+                        selectExprs.add(accExpr + " AS " + alias);
+                    }
+                    break;
+                }
+                case "$sort": {
+                    sortAfterGroup = hasGroup;
+                    String sortBody = stage.get("_body");
+                    if (sortAfterGroup) {
+                        sortClause = parseAliasSortClause(sortBody);
+                    } else {
+                        sortClause = parseSortClause(sortBody);
+                    }
+                    break;
+                }
+                case "$limit":
+                    limitVal = Integer.parseInt(stage.get("_body"));
+                    break;
+                case "$skip":
+                    skipVal = Integer.parseInt(stage.get("_body"));
+                    break;
+                default:
+                    throw new IllegalArgumentException("Unsupported pipeline stage: " + type);
+            }
+        }
+
+        StringBuilder sql = new StringBuilder();
+        if (hasGroup && !selectExprs.isEmpty()) {
+            sql.append("SELECT ");
+            for (int i = 0; i < selectExprs.size(); i++) {
+                if (i > 0) sql.append(", ");
+                sql.append(selectExprs.get(i));
+            }
+        } else {
+            sql.append("SELECT id, data, created_at, updated_at");
+        }
+        sql.append(" FROM ").append(collection);
+
+        if (matchFilter != null && !matchFilter.trim().isEmpty()) {
+            sql.append(" WHERE data @> ?::jsonb");
+        }
+        if (!groupByExprs.isEmpty()) {
+            sql.append(" GROUP BY ");
+            for (int i = 0; i < groupByExprs.size(); i++) {
+                if (i > 0) sql.append(", ");
+                sql.append(groupByExprs.get(i));
+            }
+        }
+        if (sortClause != null && !sortClause.isEmpty()) {
+            sql.append(" ORDER BY ").append(sortClause);
+        }
+        if (limitVal != null) {
+            sql.append(" LIMIT ?");
+        }
+        if (skipVal != null) {
+            sql.append(" OFFSET ?");
+        }
+
+        try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            if (matchFilter != null && !matchFilter.trim().isEmpty()) {
+                ps.setString(idx++, matchFilter);
+            }
+            if (limitVal != null) {
+                ps.setInt(idx++, limitVal);
+            }
+            if (skipVal != null) {
+                ps.setInt(idx++, skipVal);
+            }
+            ResultSet rs = ps.executeQuery();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                results.add(rowToMap(rs));
+            }
+            return results;
+        }
+    }
+
+    static List<Map<String, String>> parsePipeline(String pipelineJson) {
+        if (pipelineJson == null) {
+            throw new IllegalArgumentException("Pipeline must not be null");
+        }
+        String s = pipelineJson.trim();
+        if (!s.startsWith("[") || !s.endsWith("]")) {
+            throw new IllegalArgumentException("Pipeline must be a JSON array");
+        }
+        s = s.substring(1, s.length() - 1).trim();
+        if (s.isEmpty()) {
+            return new ArrayList<>();
+        }
+        // Split into top-level objects by finding matching braces
+        List<String> objects = splitTopLevelObjects(s);
+        List<Map<String, String>> stages = new ArrayList<>();
+        for (String obj : objects) {
+            stages.add(parseStageObject(obj.trim()));
+        }
+        return stages;
+    }
+
+    private static List<String> splitTopLevelObjects(String s) {
+        List<String> result = new ArrayList<>();
+        int depth = 0;
+        int start = -1;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '{') {
+                if (depth == 0) start = i;
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0 && start >= 0) {
+                    result.add(s.substring(start, i + 1));
+                    start = -1;
+                }
+            }
+        }
+        return result;
+    }
+
+    private static Map<String, String> parseStageObject(String obj) {
+        if (!obj.startsWith("{") || !obj.endsWith("}")) {
+            throw new IllegalArgumentException("Invalid stage: " + obj);
+        }
+        String body = obj.substring(1, obj.length() - 1).trim();
+        // Find the stage type key (first key starting with $)
+        int colonPos = body.indexOf(':');
+        if (colonPos < 0) {
+            throw new IllegalArgumentException("Invalid stage: " + obj);
+        }
+        String stageKey = body.substring(0, colonPos).trim().replaceAll("^\"|\"$", "");
+        String stageValue = body.substring(colonPos + 1).trim();
+
+        Map<String, String> stage = new LinkedHashMap<>();
+        stage.put("_type", stageKey);
+
+        if (stageKey.equals("$group")) {
+            parseGroupStage(stageValue, stage);
+        } else if (stageKey.equals("$sort")) {
+            // Store the sort object body for parsing
+            stage.put("_body", stageValue);
+        } else if (stageKey.equals("$match")) {
+            stage.put("_body", stageValue);
+        } else {
+            // $limit, $skip — scalar values
+            stage.put("_body", stageValue.trim());
+        }
+        return stage;
+    }
+
+    private static void parseGroupStage(String value, Map<String, String> stage) {
+        // value is a JSON object: { "_id": ..., "alias": { "$op": ... }, ... }
+        if (!value.startsWith("{") || !value.endsWith("}")) {
+            throw new IllegalArgumentException("$group value must be an object");
+        }
+        String body = value.substring(1, value.length() - 1).trim();
+        // Split into top-level key-value pairs, respecting nested braces
+        List<String[]> pairs = splitKeyValuePairs(body);
+        for (String[] kv : pairs) {
+            String key = kv[0].trim().replaceAll("^\"|\"$", "");
+            String val = kv[1].trim();
+            if (key.equals("_id")) {
+                stage.put("_id", val);
+            } else {
+                // accumulator: {"$sum": 1} or {"$sum": "$field"}
+                stage.put(key, val);
+            }
+        }
+    }
+
+    private static List<String[]> splitKeyValuePairs(String body) {
+        List<String[]> pairs = new ArrayList<>();
+        int i = 0;
+        while (i < body.length()) {
+            // Skip whitespace and commas
+            while (i < body.length() && (body.charAt(i) == ',' || body.charAt(i) == ' '
+                    || body.charAt(i) == '\n' || body.charAt(i) == '\r' || body.charAt(i) == '\t')) {
+                i++;
+            }
+            if (i >= body.length()) break;
+
+            // Find key
+            int keyStart, keyEnd;
+            if (body.charAt(i) == '"') {
+                keyStart = i;
+                i++;
+                while (i < body.length() && body.charAt(i) != '"') i++;
+                keyEnd = i + 1;
+                i++;
+            } else {
+                keyStart = i;
+                while (i < body.length() && body.charAt(i) != ':') i++;
+                keyEnd = i;
+            }
+            String key = body.substring(keyStart, keyEnd).trim();
+
+            // Skip colon
+            while (i < body.length() && body.charAt(i) != ':') i++;
+            i++; // skip ':'
+
+            // Skip whitespace
+            while (i < body.length() && (body.charAt(i) == ' ' || body.charAt(i) == '\t')) i++;
+
+            // Find value (could be object, string, number, null)
+            int valStart = i;
+            if (i < body.length() && body.charAt(i) == '{') {
+                int depth = 0;
+                while (i < body.length()) {
+                    if (body.charAt(i) == '{') depth++;
+                    else if (body.charAt(i) == '}') { depth--; if (depth == 0) { i++; break; } }
+                    i++;
+                }
+            } else if (i < body.length() && body.charAt(i) == '"') {
+                i++;
+                while (i < body.length() && body.charAt(i) != '"') {
+                    if (body.charAt(i) == '\\') i++; // skip escaped char
+                    i++;
+                }
+                i++; // closing quote
+            } else {
+                // number or null or bare token
+                while (i < body.length() && body.charAt(i) != ',' && body.charAt(i) != '}'
+                        && body.charAt(i) != ' ' && body.charAt(i) != '\n') {
+                    i++;
+                }
+            }
+            String val = body.substring(valStart, i).trim();
+            pairs.add(new String[]{key, val});
+        }
+        return pairs;
+    }
+
+    private static String parseAccumulator(String accJson) {
+        // accJson is like {"$sum": 1} or {"$sum": "$field"} or {"$count": {}}
+        String s = accJson.trim();
+        if (!s.startsWith("{") || !s.endsWith("}")) {
+            throw new IllegalArgumentException("Accumulator must be an object: " + accJson);
+        }
+        String inner = s.substring(1, s.length() - 1).trim();
+        int colonPos = inner.indexOf(':');
+        if (colonPos < 0) {
+            throw new IllegalArgumentException("Invalid accumulator: " + accJson);
+        }
+        String op = inner.substring(0, colonPos).trim().replaceAll("^\"|\"$", "");
+        String arg = inner.substring(colonPos + 1).trim();
+
+        switch (op) {
+            case "$sum":
+                if (arg.equals("1")) {
+                    return "COUNT(*)";
+                } else {
+                    String field = extractFieldRef(arg);
+                    return "SUM((data->>'" + field + "')::numeric)";
+                }
+            case "$avg": {
+                String field = extractFieldRef(arg);
+                return "AVG((data->>'" + field + "')::numeric)";
+            }
+            case "$min": {
+                String field = extractFieldRef(arg);
+                return "MIN((data->>'" + field + "')::numeric)";
+            }
+            case "$max": {
+                String field = extractFieldRef(arg);
+                return "MAX((data->>'" + field + "')::numeric)";
+            }
+            case "$count":
+                return "COUNT(*)";
+            default:
+                throw new IllegalArgumentException("Unsupported accumulator: " + op);
+        }
+    }
+
+    private static String extractFieldRef(String arg) {
+        // arg is "$field" (with or without quotes)
+        String s = arg.trim().replaceAll("^\"|\"$", "");
+        if (!s.startsWith("$")) {
+            throw new IllegalArgumentException("Accumulator field must be a $reference: " + arg);
+        }
+        String field = s.substring(1);
+        validateIdentifier(field);
+        return field;
+    }
+
+    static String parseAliasSortClause(String sortJson) {
+        if (sortJson == null || sortJson.trim().isEmpty()) {
+            return "";
+        }
+        String body = sortJson.trim();
+        if (!body.startsWith("{") || !body.endsWith("}")) {
+            throw new IllegalArgumentException("Sort must be a JSON object");
+        }
+        body = body.substring(1, body.length() - 1).trim();
+        if (body.isEmpty()) {
+            return "";
+        }
+        StringBuilder orderBy = new StringBuilder();
+        String[] pairs = body.split(",");
+        for (String pair : pairs) {
+            String[] kv = pair.split(":");
+            if (kv.length != 2) {
+                throw new IllegalArgumentException("Invalid sort entry: " + pair.trim());
+            }
+            String key = kv[0].trim().replaceAll("^\"|\"$", "");
+            validateIdentifier(key);
+            int dir = Integer.parseInt(kv[1].trim());
+            if (dir != 1 && dir != -1) {
+                throw new IllegalArgumentException("Sort direction must be 1 or -1, got: " + dir);
+            }
+            if (orderBy.length() > 0) {
+                orderBy.append(", ");
+            }
+            orderBy.append(key).append(dir == 1 ? " ASC" : " DESC");
+        }
+        return orderBy.toString();
+    }
+
+    /**
      * Create an index on JSONB keys in a collection. Like MongoDB createIndex().
      * keys is a list of JSONB field names to include in the index.
      * Uses btree expression index on (data->>'field') for each key.

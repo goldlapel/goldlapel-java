@@ -516,6 +516,154 @@ class DocTest {
 
 
     // -------------------------------------------------------------------------
+    // docAggregate
+    // -------------------------------------------------------------------------
+
+    @Nested class DocAggregateTest {
+
+        @Test
+        void fullPipeline() throws SQLException {
+            emptyResultSet("_id", "total");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$match\": {\"status\":\"shipped\"}}, " +
+                "{\"$group\": {\"_id\": \"$region\", \"total\": {\"$sum\": \"$amount\"}}}, " +
+                "{\"$sort\": {\"total\": -1}}, " +
+                "{\"$limit\": 10}, " +
+                "{\"$skip\": 5}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("SELECT data->>'region' AS _id, SUM((data->>'amount')::numeric) AS total"));
+            assertTrue(sql.contains("FROM orders"));
+            assertTrue(sql.contains("WHERE data @> ?::jsonb"));
+            assertTrue(sql.contains("GROUP BY data->>'region'"));
+            assertTrue(sql.contains("ORDER BY total DESC"));
+            assertTrue(sql.contains("LIMIT ?"));
+            assertTrue(sql.contains("OFFSET ?"));
+            verify(ps).setString(1, "{\"status\":\"shipped\"}");
+            verify(ps).setInt(2, 10);
+            verify(ps).setInt(3, 5);
+        }
+
+        @Test
+        void accumulators() throws SQLException {
+            emptyResultSet("_id", "cnt", "total", "mean", "lo", "hi");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$group\": {" +
+                "\"_id\": \"$category\", " +
+                "\"cnt\": {\"$sum\": 1}, " +
+                "\"total\": {\"$sum\": \"$price\"}, " +
+                "\"mean\": {\"$avg\": \"$price\"}, " +
+                "\"lo\": {\"$min\": \"$price\"}, " +
+                "\"hi\": {\"$max\": \"$price\"}}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("COUNT(*) AS cnt"));
+            assertTrue(sql.contains("SUM((data->>'price')::numeric) AS total"));
+            assertTrue(sql.contains("AVG((data->>'price')::numeric) AS mean"));
+            assertTrue(sql.contains("MIN((data->>'price')::numeric) AS lo"));
+            assertTrue(sql.contains("MAX((data->>'price')::numeric) AS hi"));
+            assertTrue(sql.contains("GROUP BY data->>'category'"));
+        }
+
+        @Test
+        void nullGroupId() throws SQLException {
+            emptyResultSet("total");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$group\": {\"_id\": null, \"total\": {\"$sum\": \"$amount\"}}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("SUM((data->>'amount')::numeric) AS total"));
+            assertFalse(sql.contains("GROUP BY"));
+            assertFalse(sql.contains("AS _id"));
+        }
+
+        @Test
+        void matchOnly() throws SQLException {
+            emptyResultSet("id", "data", "created_at", "updated_at");
+            Utils.docAggregate(conn, "users",
+                "[{\"$match\": {\"active\":true}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("SELECT id, data, created_at, updated_at FROM users"));
+            assertTrue(sql.contains("WHERE data @> ?::jsonb"));
+            assertFalse(sql.contains("GROUP BY"));
+            verify(ps).setString(1, "{\"active\":true}");
+        }
+
+        @Test
+        void sortContextBeforeGroup() throws SQLException {
+            emptyResultSet("id", "data", "created_at", "updated_at");
+            Utils.docAggregate(conn, "users",
+                "[{\"$sort\": {\"name\": 1}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            // Before any $group: sort uses data->>'field'
+            assertTrue(sql.contains("ORDER BY data->>'name' ASC"));
+        }
+
+        @Test
+        void sortContextAfterGroup() throws SQLException {
+            emptyResultSet("_id", "cnt");
+            Utils.docAggregate(conn, "users",
+                "[{\"$group\": {\"_id\": \"$role\", \"cnt\": {\"$sum\": 1}}}, " +
+                "{\"$sort\": {\"cnt\": -1}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            // After $group: sort uses alias directly
+            assertTrue(sql.contains("ORDER BY cnt DESC"));
+            assertFalse(sql.contains("data->>'cnt'"));
+        }
+
+        @Test
+        void unsupportedStageThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.docAggregate(conn, "users", "[{\"$lookup\": {}}]"));
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.docAggregate(conn, "bad table", "[]"));
+        }
+
+        @Test
+        void nullPipelineThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.docAggregate(conn, "users", null));
+        }
+
+        @Test
+        void countAccumulator() throws SQLException {
+            emptyResultSet("_id", "n");
+            Utils.docAggregate(conn, "events",
+                "[{\"$group\": {\"_id\": \"$type\", \"n\": {\"$count\": {}}}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("COUNT(*) AS n"));
+        }
+
+        @Test
+        void emptyPipeline() throws SQLException {
+            emptyResultSet("id", "data", "created_at", "updated_at");
+            Utils.docAggregate(conn, "users", "[]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("SELECT id, data, created_at, updated_at FROM users"));
+            assertFalse(sql.contains("WHERE"));
+            assertFalse(sql.contains("GROUP BY"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
     // docCreateIndex
     // -------------------------------------------------------------------------
 
