@@ -1738,10 +1738,14 @@ public class Utils {
     /**
      * Aggregate documents in a collection. Like MongoDB aggregate().
      * pipelineJson is a JSON array of stage objects. Supported stages:
-     * $match (JSONB containment), $group (_id + accumulators), $sort, $limit, $skip.
+     * $match, $group, $sort, $limit, $skip, $project, $unwind, $lookup.
      *
-     * $group accumulators: $sum, $avg, $min, $max, $count.
+     * $group accumulators: $sum, $avg, $min, $max, $count, $push, $addToSet.
      * $sum with 1 becomes COUNT(*). $sum/$avg/$min/$max with "$field" operates on (data->>'field')::numeric.
+     *
+     * $project: {field: 1} include, {_id: 0} exclude, {alias: "$field"} rename.
+     * $unwind: "$field" or {"path": "$field"} — CROSS JOIN LATERAL jsonb_array_elements.
+     * $lookup: {from, localField, foreignField, as} — correlated subquery with json_agg.
      *
      * Returns a list of result rows as maps.
      */
@@ -1753,12 +1757,19 @@ public class Utils {
         FilterResult matchResult = null;
         String groupIdField = null;  // null = _id:null, non-null = field name
         boolean hasGroup = false;
+        boolean hasProject = false;
         List<String> selectExprs = new ArrayList<>();
         List<String> groupByExprs = new ArrayList<>();
         String sortClause = null;
         boolean sortAfterGroup = false;
         Integer limitVal = null;
         Integer skipVal = null;
+        // Unwind state: field -> alias mapping for resolving field refs in group stage
+        Map<String, String> unwindMap = new LinkedHashMap<>();
+        // Join clauses (CROSS JOIN for unwind, correlated subquery for lookup)
+        List<String> joinClauses = new ArrayList<>();
+        // Lookup: alias -> full COALESCE subquery expression
+        Map<String, String> lookupExprs = new LinkedHashMap<>();
 
         for (Map<String, String> stage : stages) {
             String type = stage.get("_type");
@@ -1777,19 +1788,22 @@ public class Utils {
                             // "$field" reference
                             groupIdField = idRaw.substring(2, idRaw.length() - 1);
                             validateIdentifier(groupIdField);
-                            selectExprs.add("data->>'" + groupIdField + "' AS _id");
-                            groupByExprs.add("data->>'" + groupIdField + "'");
+                            String resolved = resolveFieldRef(groupIdField, unwindMap);
+                            selectExprs.add(resolved + " AS _id");
+                            groupByExprs.add(resolved);
                         } else if (idRaw.startsWith("$")) {
                             groupIdField = idRaw.substring(1);
                             validateIdentifier(groupIdField);
-                            selectExprs.add("data->>'" + groupIdField + "' AS _id");
-                            groupByExprs.add("data->>'" + groupIdField + "'");
+                            String resolved = resolveFieldRef(groupIdField, unwindMap);
+                            selectExprs.add(resolved + " AS _id");
+                            groupByExprs.add(resolved);
                         } else {
                             // bare field name (unquoted or quoted without $)
                             groupIdField = idRaw.replaceAll("^\"|\"$", "");
                             validateIdentifier(groupIdField);
-                            selectExprs.add("data->>'" + groupIdField + "' AS _id");
-                            groupByExprs.add("data->>'" + groupIdField + "'");
+                            String resolved = resolveFieldRef(groupIdField, unwindMap);
+                            selectExprs.add(resolved + " AS _id");
+                            groupByExprs.add(resolved);
                         }
                     }
                     // Parse accumulators
@@ -1798,7 +1812,7 @@ public class Utils {
                         if (alias.equals("_type") || alias.equals("_id") || alias.equals("_body")) continue;
                         validateIdentifier(alias);
                         String accValue = entry.getValue();
-                        String accExpr = parseAccumulator(accValue);
+                        String accExpr = parseAccumulator(accValue, unwindMap);
                         selectExprs.add(accExpr + " AS " + alias);
                     }
                     break;
@@ -1819,6 +1833,40 @@ public class Utils {
                 case "$skip":
                     skipVal = Integer.parseInt(stage.get("_body"));
                     break;
+                case "$project": {
+                    hasProject = true;
+                    parseProjectStage(stage.get("_body"), selectExprs, lookupExprs);
+                    break;
+                }
+                case "$unwind": {
+                    String unwindBody = stage.get("_body");
+                    String unwindField = parseUnwindField(unwindBody);
+                    validateIdentifier(unwindField);
+                    String alias = "_u_" + unwindField;
+                    unwindMap.put(unwindField, alias);
+                    joinClauses.add("CROSS JOIN LATERAL jsonb_array_elements_text(data->'" +
+                            unwindField + "') AS " + alias + "(val)");
+                    break;
+                }
+                case "$lookup": {
+                    String fromTable = stage.get("from");
+                    String localField = stage.get("localField");
+                    String foreignField = stage.get("foreignField");
+                    String asField = stage.get("as");
+                    if (fromTable == null || localField == null || foreignField == null || asField == null) {
+                        throw new IllegalArgumentException(
+                                "$lookup requires from, localField, foreignField, and as");
+                    }
+                    validateIdentifier(fromTable);
+                    validateIdentifier(localField);
+                    validateIdentifier(foreignField);
+                    validateIdentifier(asField);
+                    lookupExprs.put(asField,
+                        "COALESCE((SELECT json_agg(" + fromTable + ".data) FROM " + fromTable +
+                        " WHERE " + fromTable + ".data->>'" + foreignField + "' = " +
+                        collection + ".data->>'" + localField + "'), '[]'::json) AS " + asField);
+                    break;
+                }
                 default:
                     throw new IllegalArgumentException("Unsupported pipeline stage: " + type);
             }
@@ -1831,10 +1879,25 @@ public class Utils {
                 if (i > 0) sql.append(", ");
                 sql.append(selectExprs.get(i));
             }
+        } else if (hasProject && !selectExprs.isEmpty()) {
+            sql.append("SELECT ");
+            for (int i = 0; i < selectExprs.size(); i++) {
+                if (i > 0) sql.append(", ");
+                sql.append(selectExprs.get(i));
+            }
         } else {
             sql.append("SELECT id, data, created_at, updated_at");
+            // Append any lookup expressions not consumed by $project
+            for (String lookupExpr : lookupExprs.values()) {
+                sql.append(", ").append(lookupExpr);
+            }
         }
         sql.append(" FROM ").append(collection);
+
+        // Append JOIN clauses (unwind)
+        for (String joinClause : joinClauses) {
+            sql.append(" ").append(joinClause);
+        }
 
         if (matchResult != null && !matchResult.whereClause.isEmpty()) {
             sql.append(" WHERE ").append(matchResult.whereClause);
@@ -1876,6 +1939,83 @@ public class Utils {
             }
             return results;
         }
+    }
+
+    private static void parseProjectStage(String projectBody, List<String> selectExprs,
+            Map<String, String> lookupExprs) {
+        if (!projectBody.startsWith("{") || !projectBody.endsWith("}")) {
+            throw new IllegalArgumentException("$project value must be an object");
+        }
+        String body = projectBody.substring(1, projectBody.length() - 1).trim();
+        if (body.isEmpty()) {
+            throw new IllegalArgumentException("$project must have at least one field");
+        }
+        List<String[]> pairs = splitKeyValuePairs(body);
+        for (String[] kv : pairs) {
+            String key = kv[0].trim().replaceAll("^\"|\"$", "");
+            String val = kv[1].trim();
+            validateIdentifier(key);
+            if (val.equals("0")) {
+                // Exclusion — skip this field (don't add to select)
+                continue;
+            } else if (val.equals("1")) {
+                // Inclusion — if this field is a lookup alias, use the lookup expression
+                if (lookupExprs.containsKey(key)) {
+                    selectExprs.add(lookupExprs.get(key));
+                } else {
+                    selectExprs.add(fieldPath(key) + " AS " + key);
+                }
+            } else {
+                // Rename/computed: value is "$field" reference
+                String ref = val.replaceAll("^\"|\"$", "");
+                if (!ref.startsWith("$")) {
+                    throw new IllegalArgumentException(
+                            "$project values must be 0, 1, or a $field reference: " + val);
+                }
+                String sourceField = ref.substring(1);
+                selectExprs.add(fieldPath(sourceField) + " AS " + key);
+            }
+        }
+    }
+
+    private static String parseUnwindField(String unwindBody) {
+        String s = unwindBody.trim();
+        if (s.startsWith("\"") && s.endsWith("\"")) {
+            // String form: "$field"
+            String inner = s.substring(1, s.length() - 1);
+            if (!inner.startsWith("$")) {
+                throw new IllegalArgumentException("$unwind string must start with $: " + s);
+            }
+            return inner.substring(1);
+        } else if (s.startsWith("{")) {
+            // Object form: {"path": "$field"}
+            if (!s.endsWith("}")) {
+                throw new IllegalArgumentException("$unwind object is malformed: " + s);
+            }
+            String body = s.substring(1, s.length() - 1).trim();
+            List<String[]> pairs = splitKeyValuePairs(body);
+            for (String[] kv : pairs) {
+                String key = kv[0].trim().replaceAll("^\"|\"$", "");
+                if (key.equals("path")) {
+                    String pathVal = kv[1].trim().replaceAll("^\"|\"$", "");
+                    if (!pathVal.startsWith("$")) {
+                        throw new IllegalArgumentException(
+                                "$unwind path must start with $: " + pathVal);
+                    }
+                    return pathVal.substring(1);
+                }
+            }
+            throw new IllegalArgumentException("$unwind object must have a 'path' field");
+        } else {
+            throw new IllegalArgumentException("$unwind must be a string or object: " + s);
+        }
+    }
+
+    private static String resolveFieldRef(String field, Map<String, String> unwindMap) {
+        if (unwindMap.containsKey(field)) {
+            return unwindMap.get(field) + ".val";
+        }
+        return "data->>'" + field + "'";
     }
 
     static List<Map<String, String>> parsePipeline(String pipelineJson) {
@@ -1942,6 +2082,12 @@ public class Utils {
             stage.put("_body", stageValue);
         } else if (stageKey.equals("$match")) {
             stage.put("_body", stageValue);
+        } else if (stageKey.equals("$project")) {
+            stage.put("_body", stageValue);
+        } else if (stageKey.equals("$unwind")) {
+            stage.put("_body", stageValue);
+        } else if (stageKey.equals("$lookup")) {
+            parseLookupStage(stageValue, stage);
         } else {
             // $limit, $skip — scalar values
             stage.put("_body", stageValue.trim());
@@ -1966,6 +2112,19 @@ public class Utils {
                 // accumulator: {"$sum": 1} or {"$sum": "$field"}
                 stage.put(key, val);
             }
+        }
+    }
+
+    private static void parseLookupStage(String value, Map<String, String> stage) {
+        if (!value.startsWith("{") || !value.endsWith("}")) {
+            throw new IllegalArgumentException("$lookup value must be an object");
+        }
+        String body = value.substring(1, value.length() - 1).trim();
+        List<String[]> pairs = splitKeyValuePairs(body);
+        for (String[] kv : pairs) {
+            String key = kv[0].trim().replaceAll("^\"|\"$", "");
+            String val = kv[1].trim().replaceAll("^\"|\"$", "");
+            stage.put(key, val);
         }
     }
 
@@ -2068,7 +2227,7 @@ public class Utils {
         return pairs;
     }
 
-    private static String parseAccumulator(String accJson) {
+    private static String parseAccumulator(String accJson, Map<String, String> unwindMap) {
         // accJson is like {"$sum": 1} or {"$sum": "$field"} or {"$count": {}}
         String s = accJson.trim();
         if (!s.startsWith("{") || !s.endsWith("}")) {
@@ -2088,28 +2247,52 @@ public class Utils {
                     return "COUNT(*)";
                 } else {
                     String field = extractFieldRef(arg);
+                    String resolved = resolveFieldRef(field, unwindMap);
+                    if (unwindMap.containsKey(field)) {
+                        return "SUM((" + resolved + ")::numeric)";
+                    }
                     return "SUM((data->>'" + field + "')::numeric)";
                 }
             case "$avg": {
                 String field = extractFieldRef(arg);
+                String resolved = resolveFieldRef(field, unwindMap);
+                if (unwindMap.containsKey(field)) {
+                    return "AVG((" + resolved + ")::numeric)";
+                }
                 return "AVG((data->>'" + field + "')::numeric)";
             }
             case "$min": {
                 String field = extractFieldRef(arg);
+                String resolved = resolveFieldRef(field, unwindMap);
+                if (unwindMap.containsKey(field)) {
+                    return "MIN((" + resolved + ")::numeric)";
+                }
                 return "MIN((data->>'" + field + "')::numeric)";
             }
             case "$max": {
                 String field = extractFieldRef(arg);
+                String resolved = resolveFieldRef(field, unwindMap);
+                if (unwindMap.containsKey(field)) {
+                    return "MAX((" + resolved + ")::numeric)";
+                }
                 return "MAX((data->>'" + field + "')::numeric)";
             }
             case "$count":
                 return "COUNT(*)";
             case "$push": {
                 String field = extractFieldRef(arg);
+                String resolved = resolveFieldRef(field, unwindMap);
+                if (unwindMap.containsKey(field)) {
+                    return "array_agg(" + resolved + ")";
+                }
                 return "array_agg(data->>'" + field + "')";
             }
             case "$addToSet": {
                 String field = extractFieldRef(arg);
+                String resolved = resolveFieldRef(field, unwindMap);
+                if (unwindMap.containsKey(field)) {
+                    return "array_agg(DISTINCT " + resolved + ")";
+                }
                 return "array_agg(DISTINCT data->>'" + field + "')";
             }
             default:

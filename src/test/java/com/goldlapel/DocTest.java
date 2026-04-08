@@ -623,7 +623,7 @@ class DocTest {
         @Test
         void unsupportedStageThrows() {
             assertThrows(IllegalArgumentException.class,
-                () -> Utils.docAggregate(conn, "users", "[{\"$lookup\": {}}]"));
+                () -> Utils.docAggregate(conn, "users", "[{\"$bucket\": {}}]"));
         }
 
         @Test
@@ -756,6 +756,166 @@ class DocTest {
             assertTrue(sql.contains("array_agg(DISTINCT data->>'tag') AS tags"));
             assertFalse(sql.contains("GROUP BY"));
             assertFalse(sql.contains("AS _id"));
+        }
+
+        // ----- $project tests -----
+
+        @Test
+        void projectInclude() throws SQLException {
+            emptyResultSet("name", "age");
+            Utils.docAggregate(conn, "users",
+                "[{\"$project\": {\"name\": 1, \"age\": 1}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("data->>'name' AS name"));
+            assertTrue(sql.contains("data->>'age' AS age"));
+            assertTrue(sql.contains("FROM users"));
+        }
+
+        @Test
+        void projectExclude() throws SQLException {
+            emptyResultSet("name");
+            Utils.docAggregate(conn, "users",
+                "[{\"$project\": {\"name\": 1, \"_id\": 0}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("data->>'name' AS name"));
+            assertFalse(sql.contains("AS _id"));
+        }
+
+        @Test
+        void projectRename() throws SQLException {
+            emptyResultSet("fullName");
+            Utils.docAggregate(conn, "users",
+                "[{\"$project\": {\"fullName\": \"$name\"}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("data->>'name' AS fullName"));
+        }
+
+        @Test
+        void projectDotNotation() throws SQLException {
+            emptyResultSet("city");
+            Utils.docAggregate(conn, "users",
+                "[{\"$project\": {\"city\": \"$address.city\"}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("data->'address'->>'city' AS city"));
+        }
+
+        // ----- $unwind tests -----
+
+        @Test
+        void unwindString() throws SQLException {
+            emptyResultSet("id", "data", "created_at", "updated_at");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$unwind\": \"$items\"}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("CROSS JOIN LATERAL jsonb_array_elements_text(data->'items') AS _u_items(val)"));
+        }
+
+        @Test
+        void unwindObject() throws SQLException {
+            emptyResultSet("id", "data", "created_at", "updated_at");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$unwind\": {\"path\": \"$tags\"}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("CROSS JOIN LATERAL jsonb_array_elements_text(data->'tags') AS _u_tags(val)"));
+        }
+
+        @Test
+        void unwindThenGroup() throws SQLException {
+            emptyResultSet("_id", "cnt");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$unwind\": \"$items\"}, " +
+                "{\"$group\": {\"_id\": \"$items\", \"cnt\": {\"$sum\": 1}}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("CROSS JOIN LATERAL jsonb_array_elements_text(data->'items') AS _u_items(val)"));
+            assertTrue(sql.contains("_u_items.val AS _id"));
+            assertTrue(sql.contains("GROUP BY _u_items.val"));
+            assertTrue(sql.contains("COUNT(*) AS cnt"));
+        }
+
+        @Test
+        void unwindThenGroupSum() throws SQLException {
+            emptyResultSet("_id", "total");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$unwind\": \"$scores\"}, " +
+                "{\"$group\": {\"_id\": \"$category\", \"total\": {\"$sum\": \"$scores\"}}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("CROSS JOIN LATERAL jsonb_array_elements_text(data->'scores') AS _u_scores(val)"));
+            assertTrue(sql.contains("data->>'category' AS _id"));
+            assertTrue(sql.contains("SUM((_u_scores.val)::numeric) AS total"));
+            assertTrue(sql.contains("GROUP BY data->>'category'"));
+        }
+
+        // ----- $lookup tests -----
+
+        @Test
+        void lookupBasic() throws SQLException {
+            emptyResultSet("id", "data", "created_at", "updated_at", "items");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$lookup\": {\"from\": \"products\", \"localField\": \"productId\", " +
+                "\"foreignField\": \"pid\", \"as\": \"items\"}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("COALESCE((SELECT json_agg(products.data) FROM products"));
+            assertTrue(sql.contains("WHERE products.data->>'pid' = orders.data->>'productId'"));
+            assertTrue(sql.contains("), '[]'::json) AS items"));
+            assertTrue(sql.contains("FROM orders"));
+        }
+
+        @Test
+        void lookupWithMatch() throws SQLException {
+            emptyResultSet("id", "data", "created_at", "updated_at", "details");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$match\": {\"status\": \"active\"}}, " +
+                "{\"$lookup\": {\"from\": \"inventory\", \"localField\": \"sku\", " +
+                "\"foreignField\": \"sku\", \"as\": \"details\"}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("COALESCE((SELECT json_agg(inventory.data) FROM inventory"));
+            assertTrue(sql.contains("WHERE inventory.data->>'sku' = orders.data->>'sku'"));
+            assertTrue(sql.contains("), '[]'::json) AS details"));
+            assertTrue(sql.contains("WHERE data @> ?::jsonb"));
+            verify(ps).setString(1, "{\"status\": \"active\"}");
+        }
+
+        @Test
+        void lookupMissingFieldThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.docAggregate(conn, "orders",
+                    "[{\"$lookup\": {\"from\": \"products\", \"localField\": \"pid\"}}]"));
+        }
+
+        @Test
+        void lookupWithProjection() throws SQLException {
+            emptyResultSet("orderId", "matched");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$lookup\": {\"from\": \"items\", \"localField\": \"itemId\", " +
+                "\"foreignField\": \"iid\", \"as\": \"matched\"}}, " +
+                "{\"$project\": {\"orderId\": \"$oid\", \"matched\": 1}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("data->>'oid' AS orderId"));
+            assertTrue(sql.contains("COALESCE((SELECT json_agg(items.data) FROM items"));
+            assertTrue(sql.contains("WHERE items.data->>'iid' = orders.data->>'itemId'"));
+            assertTrue(sql.contains("), '[]'::json) AS matched"));
         }
     }
 
