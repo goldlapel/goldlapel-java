@@ -16,8 +16,10 @@ import org.postgresql.PGNotification;
 import java.sql.*;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -2060,6 +2062,363 @@ class DocTest {
         @Test
         void jsonbPathDeep() {
             assertEquals("{a,b,c}", Utils.jsonbPath("a.b.c"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // $elemMatch filter operator
+    // -------------------------------------------------------------------------
+
+    @Nested class ElemMatchTest {
+
+        @Test
+        void numericRange() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"scores\": {\"$elemMatch\": {\"$gt\": 80, \"$lt\": 90}}}");
+            assertTrue(r.whereClause.contains("EXISTS (SELECT 1 FROM jsonb_array_elements(data->'scores') AS elem"));
+            assertTrue(r.whereClause.contains("(elem#>>'{}')::numeric > ?"));
+            assertTrue(r.whereClause.contains("(elem#>>'{}')::numeric < ?"));
+            assertEquals(2, r.params.size());
+            assertEquals(80.0, r.params.get(0));
+            assertEquals(90.0, r.params.get(1));
+        }
+
+        @Test
+        void stringComparison() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"tags\": {\"$elemMatch\": {\"$eq\": \"vip\"}}}");
+            assertTrue(r.whereClause.contains("EXISTS (SELECT 1 FROM jsonb_array_elements(data->'tags') AS elem"));
+            assertTrue(r.whereClause.contains("elem#>>'{}' = ?"));
+            assertEquals(1, r.params.size());
+            assertEquals("vip", r.params.get(0));
+        }
+
+        @Test
+        void regexSubOperator() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"names\": {\"$elemMatch\": {\"$regex\": \"^A\"}}}");
+            assertTrue(r.whereClause.contains("EXISTS (SELECT 1 FROM jsonb_array_elements(data->'names') AS elem"));
+            assertTrue(r.whereClause.contains("elem#>>'{}' ~ ?"));
+            assertEquals(1, r.params.size());
+            assertEquals("^A", r.params.get(0));
+        }
+
+        @Test
+        void nonObjectOperandThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.buildFilter("{\"tags\": {\"$elemMatch\": [1,2]}}"));
+        }
+
+        @Test
+        void unsupportedSubOperatorThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.buildFilter("{\"tags\": {\"$elemMatch\": {\"$unknown\": 1}}}"));
+        }
+
+        @Test
+        void nestedFieldPath() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"user.scores\": {\"$elemMatch\": {\"$gte\": 50}}}");
+            assertTrue(r.whereClause.contains("jsonb_array_elements(data->'user'->'scores')"));
+            assertTrue(r.whereClause.contains("(elem#>>'{}')::numeric >= ?"));
+            assertEquals(1, r.params.size());
+            assertEquals(50.0, r.params.get(0));
+        }
+
+        @Test
+        void integrationWithDocFind() throws SQLException {
+            emptyResultSet("id", "data", "created_at", "updated_at");
+            Utils.docFind(conn, "items",
+                "{\"scores\": {\"$elemMatch\": {\"$gt\": 80, \"$lt\": 90}}}",
+                null, null, null);
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("EXISTS (SELECT 1 FROM jsonb_array_elements(data->'scores') AS elem"));
+            assertTrue(sql.contains("(elem#>>'{}')::numeric > ?"));
+            assertTrue(sql.contains("(elem#>>'{}')::numeric < ?"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // $text filter operator
+    // -------------------------------------------------------------------------
+
+    @Nested class TextFilterTest {
+
+        @Test
+        void topLevelTextSearch() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"$text\": {\"$search\": \"hello world\"}}");
+            assertEquals("to_tsvector(?, data::text) @@ plainto_tsquery(?, ?)", r.whereClause);
+            assertEquals(3, r.params.size());
+            assertEquals("english", r.params.get(0));
+            assertEquals("english", r.params.get(1));
+            assertEquals("hello world", r.params.get(2));
+        }
+
+        @Test
+        void topLevelTextWithLanguage() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"$text\": {\"$search\": \"bonjour\", \"$language\": \"french\"}}");
+            assertEquals("to_tsvector(?, data::text) @@ plainto_tsquery(?, ?)", r.whereClause);
+            assertEquals(3, r.params.size());
+            assertEquals("french", r.params.get(0));
+            assertEquals("french", r.params.get(1));
+            assertEquals("bonjour", r.params.get(2));
+        }
+
+        @Test
+        void fieldLevelTextSearch() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"content\": {\"$text\": {\"$search\": \"query term\"}}}");
+            assertEquals("to_tsvector(?, data->>'content') @@ plainto_tsquery(?, ?)", r.whereClause);
+            assertEquals(3, r.params.size());
+            assertEquals("english", r.params.get(0));
+            assertEquals("english", r.params.get(1));
+            assertEquals("query term", r.params.get(2));
+        }
+
+        @Test
+        void fieldLevelTextWithLanguage() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"content\": {\"$text\": {\"$search\": \"suchergebnis\", \"$language\": \"german\"}}}");
+            assertEquals("to_tsvector(?, data->>'content') @@ plainto_tsquery(?, ?)", r.whereClause);
+            assertEquals(3, r.params.size());
+            assertEquals("german", r.params.get(0));
+            assertEquals("german", r.params.get(1));
+            assertEquals("suchergebnis", r.params.get(2));
+        }
+
+        @Test
+        void topLevelTextMissingSearchThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.buildFilter("{\"$text\": {\"$language\": \"english\"}}"));
+        }
+
+        @Test
+        void fieldLevelTextMissingSearchThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.buildFilter("{\"content\": {\"$text\": {\"$language\": \"english\"}}}"));
+        }
+
+        @Test
+        void topLevelTextNonObjectThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.buildFilter("{\"$text\": \"just a string\"}"));
+        }
+
+        @Test
+        void fieldLevelTextNonObjectThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.buildFilter("{\"content\": {\"$text\": \"just a string\"}}"));
+        }
+
+        @Test
+        void textWithOtherFilter() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"$text\": {\"$search\": \"hello\"}, \"active\": true}");
+            assertTrue(r.whereClause.contains("to_tsvector(?, data::text) @@ plainto_tsquery(?, ?)"));
+            assertTrue(r.whereClause.contains("data @> ?::jsonb"));
+            assertEquals(4, r.params.size());
+        }
+
+        @Test
+        void integrationWithDocFind() throws SQLException {
+            emptyResultSet("id", "data", "created_at", "updated_at");
+            Utils.docFind(conn, "articles",
+                "{\"$text\": {\"$search\": \"postgres\"}}",
+                null, null, null);
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("to_tsvector(?, data::text) @@ plainto_tsquery(?, ?)"));
+        }
+
+        @Test
+        void integrationFieldLevelWithDocCount() throws SQLException {
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(true);
+            when(rs.getLong(1)).thenReturn(3L);
+
+            long count = Utils.docCount(conn, "articles",
+                "{\"body\": {\"$text\": {\"$search\": \"mongodb\"}}}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("to_tsvector(?, data->>'body') @@ plainto_tsquery(?, ?)"));
+            assertEquals(3L, count);
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // docFindCursor
+    // -------------------------------------------------------------------------
+
+    @Nested class DocFindCursorTest {
+
+        @Test
+        void returnsIteratorOverRows() throws SQLException {
+            when(conn.getAutoCommit()).thenReturn(true);
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(true, true, false);
+            when(rs.getMetaData()).thenReturn(meta);
+            when(meta.getColumnCount()).thenReturn(2);
+            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(2)).thenReturn("data");
+            when(rs.getObject(1)).thenReturn(1L, 2L);
+            when(rs.getObject(2)).thenReturn("{\"a\":1}", "{\"b\":2}");
+
+            Iterator<Map<String, Object>> it = Utils.docFindCursor(
+                conn, "users", null, null, null, null, 100);
+
+            assertTrue(it.hasNext());
+            Map<String, Object> row1 = it.next();
+            assertEquals(1L, row1.get("id"));
+
+            assertTrue(it.hasNext());
+            Map<String, Object> row2 = it.next();
+            assertEquals(2L, row2.get("id"));
+
+            assertFalse(it.hasNext());
+        }
+
+        @Test
+        void setsFetchSize() throws SQLException {
+            when(conn.getAutoCommit()).thenReturn(true);
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(false);
+            when(rs.getMetaData()).thenReturn(meta);
+            when(meta.getColumnCount()).thenReturn(2);
+            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(2)).thenReturn("data");
+
+            Utils.docFindCursor(conn, "items", null, null, null, null, 50);
+
+            verify(ps).setFetchSize(50);
+        }
+
+        @Test
+        void appliesFilterAndSort() throws SQLException {
+            when(conn.getAutoCommit()).thenReturn(true);
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(false);
+            when(rs.getMetaData()).thenReturn(meta);
+            when(meta.getColumnCount()).thenReturn(2);
+            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(2)).thenReturn("data");
+
+            Utils.docFindCursor(conn, "users",
+                "{\"active\": true}", "{\"name\": 1}", 10, 5, 100);
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("WHERE data @> ?::jsonb"));
+            assertTrue(sql.contains("ORDER BY data->>'name' ASC"));
+            assertTrue(sql.contains("LIMIT ?"));
+            assertTrue(sql.contains("OFFSET ?"));
+        }
+
+        @Test
+        void disablesAutoCommitForCursor() throws SQLException {
+            when(conn.getAutoCommit()).thenReturn(true);
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(false);
+            when(rs.getMetaData()).thenReturn(meta);
+            when(meta.getColumnCount()).thenReturn(2);
+            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(2)).thenReturn("data");
+
+            Utils.docFindCursor(conn, "items", null, null, null, null, 100);
+
+            verify(conn).setAutoCommit(false);
+        }
+
+        @Test
+        void restoresAutoCommitWhenExhausted() throws SQLException {
+            when(conn.getAutoCommit()).thenReturn(true);
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(true, false);
+            when(rs.getMetaData()).thenReturn(meta);
+            when(meta.getColumnCount()).thenReturn(2);
+            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(2)).thenReturn("data");
+            when(rs.getObject(1)).thenReturn(1L);
+            when(rs.getObject(2)).thenReturn("{\"a\":1}");
+
+            Iterator<Map<String, Object>> it = Utils.docFindCursor(
+                conn, "items", null, null, null, null, 100);
+
+            it.next(); // consume the single row
+            assertFalse(it.hasNext());
+            // autocommit restored when cursor exhausted
+            verify(conn).setAutoCommit(true);
+        }
+
+        @Test
+        void emptyResultSet() throws SQLException {
+            when(conn.getAutoCommit()).thenReturn(true);
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(false);
+            when(rs.getMetaData()).thenReturn(meta);
+            when(meta.getColumnCount()).thenReturn(2);
+            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(2)).thenReturn("data");
+
+            Iterator<Map<String, Object>> it = Utils.docFindCursor(
+                conn, "items", null, null, null, null, 100);
+
+            assertFalse(it.hasNext());
+        }
+
+        @Test
+        void nextOnExhaustedThrows() throws SQLException {
+            when(conn.getAutoCommit()).thenReturn(true);
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(false);
+            when(rs.getMetaData()).thenReturn(meta);
+            when(meta.getColumnCount()).thenReturn(2);
+            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(2)).thenReturn("data");
+
+            Iterator<Map<String, Object>> it = Utils.docFindCursor(
+                conn, "items", null, null, null, null, 100);
+
+            assertThrows(NoSuchElementException.class, it::next);
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.docFindCursor(conn, "bad table", null, null, null, null, 100));
+        }
+
+        @Test
+        void skipsAutoCommitToggleWhenAlreadyFalse() throws SQLException {
+            when(conn.getAutoCommit()).thenReturn(false);
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(false);
+            when(rs.getMetaData()).thenReturn(meta);
+            when(meta.getColumnCount()).thenReturn(2);
+            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(2)).thenReturn("data");
+
+            Utils.docFindCursor(conn, "items", null, null, null, null, 100);
+
+            // should not toggle autocommit at all
+            verify(conn, never()).setAutoCommit(anyBoolean());
         }
     }
 }

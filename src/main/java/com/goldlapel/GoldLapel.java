@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -258,6 +259,11 @@ public class GoldLapel {
 
     public Map<String, Object> docFindOne(String collection, String filterJson) throws SQLException {
         return Utils.docFindOne(requireConn(), collection, filterJson);
+    }
+
+    public Iterator<Map<String, Object>> docFindCursor(String collection, String filterJson,
+            String sortJson, Integer limit, Integer skip, int batchSize) throws SQLException {
+        return Utils.docFindCursor(requireConn(), collection, filterJson, sortJson, limit, skip, batchSize);
     }
 
     public int docUpdate(String collection, String filterJson, String updateJson) throws SQLException {

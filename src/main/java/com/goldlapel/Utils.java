@@ -9,9 +9,11 @@ import java.sql.Statement;
 import java.sql.Types;
 import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.regex.Pattern;
@@ -1232,7 +1234,7 @@ public class Utils {
     );
 
     private static final Set<String> SUPPORTED_FILTER_OPS =
-        Set.of("$gt", "$gte", "$lt", "$lte", "$eq", "$ne", "$in", "$nin", "$exists", "$regex");
+        Set.of("$gt", "$gte", "$lt", "$lte", "$eq", "$ne", "$in", "$nin", "$exists", "$regex", "$elemMatch", "$text");
 
     private static final Set<String> LOGICAL_OPS = Set.of("$or", "$and", "$not");
 
@@ -1371,7 +1373,7 @@ public class Utils {
         boolean hasLogical = false;
         for (String[] kv : pairs) {
             String key = kv[0].trim().replaceAll("^\"|\"$", "");
-            if (LOGICAL_OPS.contains(key)) {
+            if (LOGICAL_OPS.contains(key) || key.equals("$text")) {
                 hasLogical = true;
                 hasOperators = true;
                 break;
@@ -1414,7 +1416,32 @@ public class Utils {
             String key = kv[0].trim().replaceAll("^\"|\"$", "");
             String val = kv[1].trim();
 
-            if (LOGICAL_OPS.contains(key)) {
+            if (key.equals("$text")) {
+                // Top-level $text: search across entire document
+                if (!val.startsWith("{")) {
+                    throw new IllegalArgumentException("$text requires {$search: 'query'}");
+                }
+                List<String[]> textPairs = splitKeyValuePairs(
+                    val.substring(1, val.length() - 1).trim());
+                String searchQuery = null;
+                String lang = "english";
+                for (String[] tp : textPairs) {
+                    String tk = tp[0].trim().replaceAll("^\"|\"$", "");
+                    String tv = tp[1].trim();
+                    if (tk.equals("$search")) {
+                        searchQuery = unquote(tv);
+                    } else if (tk.equals("$language")) {
+                        lang = unquote(tv);
+                    }
+                }
+                if (searchQuery == null) {
+                    throw new IllegalArgumentException("$text requires {$search: 'query'}");
+                }
+                clauses.add("to_tsvector(?, data::text) @@ plainto_tsquery(?, ?)");
+                params.add(lang);
+                params.add(lang);
+                params.add(searchQuery);
+            } else if (LOGICAL_OPS.contains(key)) {
                 if (key.equals("$not")) {
                     if (!val.startsWith("{")) {
                         throw new IllegalArgumentException("$not value must be a filter object");
@@ -1496,6 +1523,63 @@ public class Utils {
                         String pattern = unquote(operand);
                         clauses.add(fieldExpr + " ~ ?");
                         params.add(pattern);
+                    } else if (op.equals("$elemMatch")) {
+                        if (!operand.startsWith("{")) {
+                            throw new IllegalArgumentException("$elemMatch value must be an object");
+                        }
+                        String fieldJson = fieldPathJson(key);
+                        List<String[]> subPairs = splitKeyValuePairs(
+                            operand.substring(1, operand.length() - 1).trim());
+                        List<String> elemClauses = new ArrayList<>();
+                        for (String[] sp : subPairs) {
+                            String subOp = sp[0].trim().replaceAll("^\"|\"$", "");
+                            String subVal = sp[1].trim();
+                            if (COMPARISON_OPS.containsKey(subOp)) {
+                                String sqlOp = COMPARISON_OPS.get(subOp);
+                                if (isNumericLiteral(subVal)) {
+                                    elemClauses.add("(elem#>>'{}')::numeric " + sqlOp + " ?");
+                                    params.add(Double.parseDouble(subVal));
+                                } else {
+                                    elemClauses.add("elem#>>'{}' " + sqlOp + " ?");
+                                    params.add(unquote(subVal));
+                                }
+                            } else if (subOp.equals("$regex")) {
+                                elemClauses.add("elem#>>'{}' ~ ?");
+                                params.add(unquote(subVal));
+                            } else {
+                                throw new IllegalArgumentException(
+                                    "Unsupported $elemMatch operator: " + subOp);
+                            }
+                        }
+                        if (!elemClauses.isEmpty()) {
+                            clauses.add("EXISTS (SELECT 1 FROM jsonb_array_elements(" +
+                                fieldJson + ") AS elem WHERE " +
+                                String.join(" AND ", elemClauses) + ")");
+                        }
+                    } else if (op.equals("$text")) {
+                        if (!operand.startsWith("{")) {
+                            throw new IllegalArgumentException("$text requires {$search: 'query'}");
+                        }
+                        List<String[]> textPairs = splitKeyValuePairs(
+                            operand.substring(1, operand.length() - 1).trim());
+                        String searchQuery = null;
+                        String lang = "english";
+                        for (String[] tp : textPairs) {
+                            String tk = tp[0].trim().replaceAll("^\"|\"$", "");
+                            String tv = tp[1].trim();
+                            if (tk.equals("$search")) {
+                                searchQuery = unquote(tv);
+                            } else if (tk.equals("$language")) {
+                                lang = unquote(tv);
+                            }
+                        }
+                        if (searchQuery == null) {
+                            throw new IllegalArgumentException("$text requires {$search: 'query'}");
+                        }
+                        clauses.add("to_tsvector(?, " + fieldExpr + ") @@ plainto_tsquery(?, ?)");
+                        params.add(lang);
+                        params.add(lang);
+                        params.add(searchQuery);
                     }
                 }
             } else {
@@ -2015,6 +2099,99 @@ public class Utils {
             String filterJson) throws SQLException {
         List<Map<String, Object>> results = docFind(conn, collection, filterJson, null, 1, null);
         return results.isEmpty() ? null : results.get(0);
+    }
+
+    public static Iterator<Map<String, Object>> docFindCursor(Connection conn, String collection,
+            String filterJson, String sortJson, Integer limit, Integer skip,
+            int batchSize) throws SQLException {
+        validateIdentifier(collection);
+        FilterResult filter = buildFilter(filterJson);
+        StringBuilder sql = new StringBuilder("SELECT id, data, created_at, updated_at FROM " + collection);
+        if (!filter.whereClause.isEmpty()) {
+            sql.append(" WHERE ").append(filter.whereClause);
+        }
+        String orderClause = parseSortClause(sortJson);
+        if (!orderClause.isEmpty()) {
+            sql.append(" ORDER BY ").append(orderClause);
+        }
+        if (limit != null) {
+            sql.append(" LIMIT ?");
+        }
+        if (skip != null) {
+            sql.append(" OFFSET ?");
+        }
+
+        boolean origAutoCommit = conn.getAutoCommit();
+        if (origAutoCommit) {
+            conn.setAutoCommit(false);
+        }
+
+        // Use JDBC server-side cursor via setFetchSize (requires autocommit=false)
+        PreparedStatement ps = conn.prepareStatement(sql.toString());
+        ps.setFetchSize(batchSize);
+        int idx = 1;
+        for (Object param : filter.params) {
+            setFilterParam(ps, idx++, param);
+        }
+        if (limit != null) {
+            ps.setInt(idx++, limit);
+        }
+        if (skip != null) {
+            ps.setInt(idx++, skip);
+        }
+        ResultSet rs = ps.executeQuery();
+
+        return new Iterator<Map<String, Object>>() {
+            private boolean hasNext;
+            private boolean closed = false;
+            private final boolean restoreAutoCommit = origAutoCommit;
+
+            {
+                advance();
+            }
+
+            private void advance() {
+                try {
+                    hasNext = rs.next();
+                    if (!hasNext) {
+                        close();
+                    }
+                } catch (SQLException e) {
+                    close();
+                    throw new RuntimeException(e);
+                }
+            }
+
+            private void close() {
+                if (closed) return;
+                closed = true;
+                try { rs.close(); } catch (SQLException ignored) {}
+                try { ps.close(); } catch (SQLException ignored) {}
+                if (restoreAutoCommit) {
+                    try { conn.setAutoCommit(true); } catch (SQLException ignored) {}
+                }
+            }
+
+            @Override
+            public boolean hasNext() {
+                return hasNext;
+            }
+
+            @Override
+            public Map<String, Object> next() {
+                if (!hasNext) {
+                    throw new NoSuchElementException();
+                }
+                try {
+                    Map<String, Object> row = rowToMap(rs);
+                    advance();
+                    return row;
+                } catch (SQLException e) {
+                    close();
+                    throw new RuntimeException(e);
+                }
+            }
+        };
     }
 
     /**
