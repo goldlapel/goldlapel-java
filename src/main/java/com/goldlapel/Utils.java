@@ -2838,7 +2838,10 @@ public class Utils {
             if (body.charAt(i) == '"') {
                 keyStart = i;
                 i++;
-                while (i < body.length() && body.charAt(i) != '"') i++;
+                while (i < body.length() && body.charAt(i) != '"') {
+                    if (body.charAt(i) == '\\') i++;
+                    i++;
+                }
                 keyEnd = i + 1;
                 i++;
             } else {
