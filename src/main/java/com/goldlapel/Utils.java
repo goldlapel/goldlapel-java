@@ -2403,6 +2403,245 @@ public class Utils {
         return orderBy.toString();
     }
 
+    // =========================================================================
+    // Change Streams, TTL, Capped Collections
+    // =========================================================================
+
+    /**
+     * Watch a collection for changes. Like MongoDB change streams.
+     * Creates a trigger that fires pg_notify on INSERT/UPDATE/DELETE,
+     * then starts a background listener thread that invokes the callback
+     * with each change event as a JSON string.
+     *
+     * The callback receives (channel, payload) where payload is a JSON object
+     * with "op" (INSERT/UPDATE/DELETE), "id" (row id), and "data" (for non-DELETE).
+     *
+     * Returns a daemon Thread that polls for notifications. Interrupt the thread
+     * or close the connection to stop watching.
+     */
+    public static Thread docWatch(Connection conn, String collection,
+            BiConsumer<String, String> callback) throws SQLException {
+        validateIdentifier(collection);
+        String channel = collection + "_changes";
+        String funcName = collection + "_notify_fn";
+        String triggerName = collection + "_notify_trg";
+
+        try (Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE OR REPLACE FUNCTION " + funcName + "() " +
+                "RETURNS TRIGGER LANGUAGE plpgsql AS $$ " +
+                "BEGIN " +
+                "IF TG_OP = 'DELETE' THEN " +
+                "PERFORM pg_notify('" + channel + "', " +
+                "json_build_object('op', TG_OP, 'id', OLD.id::text)::text); " +
+                "RETURN OLD; " +
+                "ELSE " +
+                "PERFORM pg_notify('" + channel + "', " +
+                "json_build_object('op', TG_OP, 'id', NEW.id::text, 'data', NEW.data)::text); " +
+                "RETURN NEW; " +
+                "END IF; " +
+                "END; $$"
+            );
+        }
+
+        try (Statement st = conn.createStatement()) {
+            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
+        }
+
+        try (Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE TRIGGER " + triggerName + " " +
+                "AFTER INSERT OR UPDATE OR DELETE ON " + collection + " " +
+                "FOR EACH ROW EXECUTE FUNCTION " + funcName + "()"
+            );
+        }
+
+        PGConnection pgConn = conn.unwrap(PGConnection.class);
+        try (Statement st = conn.createStatement()) {
+            st.execute("LISTEN " + channel);
+        }
+
+        Thread t = new Thread(() -> {
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    PGNotification[] notifications = pgConn.getNotifications(5000);
+                    if (notifications != null) {
+                        for (PGNotification n : notifications) {
+                            callback.accept(n.getName(), n.getParameter());
+                        }
+                    }
+                }
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        t.setDaemon(true);
+        t.start();
+        return t;
+    }
+
+    /**
+     * Stop watching a collection for changes. Like MongoDB change stream close().
+     * Drops the trigger, trigger function, and issues UNLISTEN.
+     */
+    public static void docUnwatch(Connection conn, String collection) throws SQLException {
+        validateIdentifier(collection);
+        String channel = collection + "_changes";
+        String funcName = collection + "_notify_fn";
+        String triggerName = collection + "_notify_trg";
+
+        try (Statement st = conn.createStatement()) {
+            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
+        }
+        try (Statement st = conn.createStatement()) {
+            st.execute("DROP FUNCTION IF EXISTS " + funcName + "()");
+        }
+        try (Statement st = conn.createStatement()) {
+            st.execute("UNLISTEN " + channel);
+        }
+    }
+
+    /**
+     * Create a TTL index on a collection. Like MongoDB TTL indexes.
+     * Automatically deletes documents older than expireAfterSeconds based on
+     * the specified field (defaults to "created_at").
+     * Uses a BEFORE INSERT trigger to purge expired rows on each insert.
+     */
+    public static void docCreateTtlIndex(Connection conn, String collection,
+            int expireAfterSeconds, String field) throws SQLException {
+        validateIdentifier(collection);
+        validateIdentifier(field);
+        if (expireAfterSeconds <= 0) {
+            throw new IllegalArgumentException("expireAfterSeconds must be a positive integer");
+        }
+
+        String idxName = collection + "_ttl_idx";
+        String funcName = collection + "_ttl_fn";
+        String triggerName = collection + "_ttl_trg";
+
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE INDEX IF NOT EXISTS " + idxName + " ON " + collection + " (" + field + ")");
+        }
+
+        try (Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE OR REPLACE FUNCTION " + funcName + "() " +
+                "RETURNS TRIGGER LANGUAGE plpgsql AS $$ " +
+                "BEGIN " +
+                "DELETE FROM " + collection + " WHERE " + field +
+                " < NOW() - INTERVAL '" + expireAfterSeconds + " seconds'; " +
+                "RETURN NEW; " +
+                "END; $$"
+            );
+        }
+
+        try (Statement st = conn.createStatement()) {
+            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
+        }
+
+        try (Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE TRIGGER " + triggerName + " " +
+                "BEFORE INSERT ON " + collection + " " +
+                "FOR EACH ROW EXECUTE FUNCTION " + funcName + "()"
+            );
+        }
+    }
+
+    /**
+     * Create a TTL index with the default field "created_at".
+     */
+    public static void docCreateTtlIndex(Connection conn, String collection,
+            int expireAfterSeconds) throws SQLException {
+        docCreateTtlIndex(conn, collection, expireAfterSeconds, "created_at");
+    }
+
+    /**
+     * Remove a TTL index from a collection.
+     * Drops the trigger, trigger function, and index.
+     */
+    public static void docRemoveTtlIndex(Connection conn, String collection) throws SQLException {
+        validateIdentifier(collection);
+
+        String idxName = collection + "_ttl_idx";
+        String funcName = collection + "_ttl_fn";
+        String triggerName = collection + "_ttl_trg";
+
+        try (Statement st = conn.createStatement()) {
+            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
+        }
+        try (Statement st = conn.createStatement()) {
+            st.execute("DROP FUNCTION IF EXISTS " + funcName + "()");
+        }
+        try (Statement st = conn.createStatement()) {
+            st.execute("DROP INDEX IF EXISTS " + idxName);
+        }
+    }
+
+    /**
+     * Create a capped collection. Like MongoDB capped collections.
+     * Automatically deletes the oldest documents when the collection exceeds
+     * maxDocuments. Uses an AFTER INSERT trigger to enforce the cap.
+     * Creates the collection table if it doesn't exist.
+     */
+    public static void docCreateCapped(Connection conn, String collection,
+            int maxDocuments) throws SQLException {
+        validateIdentifier(collection);
+        if (maxDocuments <= 0) {
+            throw new IllegalArgumentException("maxDocuments must be a positive integer");
+        }
+
+        ensureCollection(conn, collection);
+
+        String funcName = collection + "_cap_fn";
+        String triggerName = collection + "_cap_trg";
+
+        try (Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE OR REPLACE FUNCTION " + funcName + "() " +
+                "RETURNS TRIGGER LANGUAGE plpgsql AS $$ " +
+                "BEGIN " +
+                "DELETE FROM " + collection + " WHERE id IN (" +
+                "SELECT id FROM " + collection + " " +
+                "ORDER BY created_at ASC, id ASC " +
+                "LIMIT GREATEST((SELECT COUNT(*) FROM " + collection + ") - " + maxDocuments + ", 0)" +
+                "); " +
+                "RETURN NEW; " +
+                "END; $$"
+            );
+        }
+
+        try (Statement st = conn.createStatement()) {
+            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
+        }
+
+        try (Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE TRIGGER " + triggerName + " " +
+                "AFTER INSERT ON " + collection + " " +
+                "FOR EACH ROW EXECUTE FUNCTION " + funcName + "()"
+            );
+        }
+    }
+
+    /**
+     * Remove the cap from a collection.
+     * Drops the trigger and trigger function. Existing documents are kept.
+     */
+    public static void docRemoveCap(Connection conn, String collection) throws SQLException {
+        validateIdentifier(collection);
+
+        String funcName = collection + "_cap_fn";
+        String triggerName = collection + "_cap_trg";
+
+        try (Statement st = conn.createStatement()) {
+            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
+        }
+        try (Statement st = conn.createStatement()) {
+            st.execute("DROP FUNCTION IF EXISTS " + funcName + "()");
+        }
+    }
+
     /**
      * Create an index on JSONB keys in a collection. Like MongoDB createIndex().
      * keys is a list of JSONB field names to include in the index.

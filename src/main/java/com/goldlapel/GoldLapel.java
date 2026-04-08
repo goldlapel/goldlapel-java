@@ -288,6 +288,34 @@ public class GoldLapel {
         return Utils.docAggregate(requireConn(), collection, pipelineJson);
     }
 
+    public Thread docWatch(String collection, BiConsumer<String, String> callback) throws SQLException {
+        return Utils.docWatch(requireConn(), collection, callback);
+    }
+
+    public void docUnwatch(String collection) throws SQLException {
+        Utils.docUnwatch(requireConn(), collection);
+    }
+
+    public void docCreateTtlIndex(String collection, int expireAfterSeconds) throws SQLException {
+        Utils.docCreateTtlIndex(requireConn(), collection, expireAfterSeconds);
+    }
+
+    public void docCreateTtlIndex(String collection, int expireAfterSeconds, String field) throws SQLException {
+        Utils.docCreateTtlIndex(requireConn(), collection, expireAfterSeconds, field);
+    }
+
+    public void docRemoveTtlIndex(String collection) throws SQLException {
+        Utils.docRemoveTtlIndex(requireConn(), collection);
+    }
+
+    public void docCreateCapped(String collection, int maxDocuments) throws SQLException {
+        Utils.docCreateCapped(requireConn(), collection, maxDocuments);
+    }
+
+    public void docRemoveCap(String collection) throws SQLException {
+        Utils.docRemoveCap(requireConn(), collection);
+    }
+
     // Search
 
     public List<Map<String, Object>> search(String table, String column, String query,

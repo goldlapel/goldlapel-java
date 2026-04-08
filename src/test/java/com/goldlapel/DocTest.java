@@ -10,6 +10,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import org.postgresql.PGConnection;
+import org.postgresql.PGNotification;
+
 import java.sql.*;
 import java.util.Arrays;
 import java.util.Collections;
@@ -1274,6 +1277,257 @@ class DocTest {
             assertTrue(sql.contains("WHERE data->>'name' ~ ?"));
             verify(ps).setString(1, "^test");
             assertEquals(1, count);
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // docWatch
+    // -------------------------------------------------------------------------
+
+    @Nested class DocWatchTest {
+
+        @Mock PGConnection pgConn;
+
+        @Test
+        void createsTriggersAndListens() throws SQLException {
+            when(conn.createStatement()).thenReturn(stmt);
+            when(conn.unwrap(PGConnection.class)).thenReturn(pgConn);
+            when(pgConn.getNotifications(5000)).thenReturn(null);
+
+            Thread t = Utils.docWatch(conn, "events", (ch, payload) -> {});
+
+            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
+            verify(stmt, atLeast(4)).execute(ddlCaptor.capture());
+            List<String> ddls = ddlCaptor.getAllValues();
+
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE OR REPLACE FUNCTION events_notify_fn()")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP TRIGGER IF EXISTS events_notify_trg ON events")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE TRIGGER events_notify_trg")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("LISTEN events_changes")));
+
+            assertNotNull(t);
+            assertTrue(t.isDaemon());
+            t.interrupt();
+        }
+
+        @Test
+        void triggerBodyContainsNotify() throws SQLException {
+            when(conn.createStatement()).thenReturn(stmt);
+            when(conn.unwrap(PGConnection.class)).thenReturn(pgConn);
+            when(pgConn.getNotifications(5000)).thenReturn(null);
+
+            Thread t = Utils.docWatch(conn, "orders", (ch, payload) -> {});
+
+            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
+            verify(stmt, atLeast(4)).execute(ddlCaptor.capture());
+            List<String> ddls = ddlCaptor.getAllValues();
+
+            String funcDdl = ddls.stream()
+                .filter(s -> s.contains("CREATE OR REPLACE FUNCTION"))
+                .findFirst().orElse("");
+            assertTrue(funcDdl.contains("pg_notify('orders_changes'"));
+            assertTrue(funcDdl.contains("OLD.id::text"));
+            assertTrue(funcDdl.contains("NEW.id::text"));
+            assertTrue(funcDdl.contains("NEW.data"));
+
+            t.interrupt();
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.docWatch(conn, "bad table", (ch, p) -> {}));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // docUnwatch
+    // -------------------------------------------------------------------------
+
+    @Nested class DocUnwatchTest {
+
+        @Test
+        void dropsTriggersAndUnlistens() throws SQLException {
+            when(conn.createStatement()).thenReturn(stmt);
+
+            Utils.docUnwatch(conn, "events");
+
+            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
+            verify(stmt, times(3)).execute(ddlCaptor.capture());
+            List<String> ddls = ddlCaptor.getAllValues();
+
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP TRIGGER IF EXISTS events_notify_trg ON events")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP FUNCTION IF EXISTS events_notify_fn()")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("UNLISTEN events_changes")));
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.docUnwatch(conn, "bad table"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // docCreateTtlIndex
+    // -------------------------------------------------------------------------
+
+    @Nested class DocCreateTtlIndexTest {
+
+        @Test
+        void createsIndexTriggerAndFunction() throws SQLException {
+            when(conn.createStatement()).thenReturn(stmt);
+
+            Utils.docCreateTtlIndex(conn, "sessions", 3600);
+
+            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
+            verify(stmt, times(4)).execute(ddlCaptor.capture());
+            List<String> ddls = ddlCaptor.getAllValues();
+
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE INDEX IF NOT EXISTS sessions_ttl_idx ON sessions (created_at)")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE OR REPLACE FUNCTION sessions_ttl_fn()")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("INTERVAL '3600 seconds'")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP TRIGGER IF EXISTS sessions_ttl_trg ON sessions")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE TRIGGER sessions_ttl_trg")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("BEFORE INSERT")));
+        }
+
+        @Test
+        void customField() throws SQLException {
+            when(conn.createStatement()).thenReturn(stmt);
+
+            Utils.docCreateTtlIndex(conn, "logs", 7200, "updated_at");
+
+            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
+            verify(stmt, atLeast(1)).execute(ddlCaptor.capture());
+            List<String> ddls = ddlCaptor.getAllValues();
+
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("ON logs (updated_at)")));
+            assertTrue(ddls.stream().anyMatch(s ->
+                s.contains("WHERE updated_at < NOW() - INTERVAL '7200 seconds'")));
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.docCreateTtlIndex(conn, "bad table", 3600));
+        }
+
+        @Test
+        void zeroSecondsThrows() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.docCreateTtlIndex(conn, "logs", 0));
+        }
+
+        @Test
+        void negativeSecondsThrows() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.docCreateTtlIndex(conn, "logs", -100));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // docRemoveTtlIndex
+    // -------------------------------------------------------------------------
+
+    @Nested class DocRemoveTtlIndexTest {
+
+        @Test
+        void dropsTriggerFunctionAndIndex() throws SQLException {
+            when(conn.createStatement()).thenReturn(stmt);
+
+            Utils.docRemoveTtlIndex(conn, "sessions");
+
+            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
+            verify(stmt, times(3)).execute(ddlCaptor.capture());
+            List<String> ddls = ddlCaptor.getAllValues();
+
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP TRIGGER IF EXISTS sessions_ttl_trg ON sessions")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP FUNCTION IF EXISTS sessions_ttl_fn()")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP INDEX IF EXISTS sessions_ttl_idx")));
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.docRemoveTtlIndex(conn, "1bad"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // docCreateCapped
+    // -------------------------------------------------------------------------
+
+    @Nested class DocCreateCappedTest {
+
+        @Test
+        void ensuresCollectionAndCreatesTrigger() throws SQLException {
+            when(conn.createStatement()).thenReturn(stmt);
+
+            Utils.docCreateCapped(conn, "logs", 1000);
+
+            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
+            verify(stmt, atLeast(4)).execute(ddlCaptor.capture());
+            List<String> ddls = ddlCaptor.getAllValues();
+
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE TABLE IF NOT EXISTS logs")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE OR REPLACE FUNCTION logs_cap_fn()")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("- 1000, 0)")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("ORDER BY created_at ASC, id ASC")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP TRIGGER IF EXISTS logs_cap_trg ON logs")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE TRIGGER logs_cap_trg")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("AFTER INSERT")));
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.docCreateCapped(conn, "bad table", 100));
+        }
+
+        @Test
+        void zeroMaxDocsThrows() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.docCreateCapped(conn, "logs", 0));
+        }
+
+        @Test
+        void negativeMaxDocsThrows() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.docCreateCapped(conn, "logs", -5));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // docRemoveCap
+    // -------------------------------------------------------------------------
+
+    @Nested class DocRemoveCapTest {
+
+        @Test
+        void dropsTriggerAndFunction() throws SQLException {
+            when(conn.createStatement()).thenReturn(stmt);
+
+            Utils.docRemoveCap(conn, "logs");
+
+            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
+            verify(stmt, times(2)).execute(ddlCaptor.capture());
+            List<String> ddls = ddlCaptor.getAllValues();
+
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP TRIGGER IF EXISTS logs_cap_trg ON logs")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP FUNCTION IF EXISTS logs_cap_fn()")));
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.docRemoveCap(conn, "1bad"));
         }
     }
 }
