@@ -660,6 +660,103 @@ class DocTest {
             assertFalse(sql.contains("WHERE"));
             assertFalse(sql.contains("GROUP BY"));
         }
+
+        @Test
+        void compositeGroupId() throws SQLException {
+            emptyResultSet("_id", "total");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$group\": {\"_id\": {\"region\": \"$region\", \"year\": \"$year\"}, " +
+                "\"total\": {\"$sum\": \"$amount\"}}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("json_build_object('region', data->>'region', 'year', data->>'year') AS _id"));
+            assertTrue(sql.contains("SUM((data->>'amount')::numeric) AS total"));
+            assertTrue(sql.contains("GROUP BY data->>'region', data->>'year'"));
+        }
+
+        @Test
+        void compositeGroupIdWithSort() throws SQLException {
+            emptyResultSet("_id", "cnt");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$group\": {\"_id\": {\"status\": \"$status\", \"region\": \"$region\"}, " +
+                "\"cnt\": {\"$sum\": 1}}}, " +
+                "{\"$sort\": {\"cnt\": -1}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("json_build_object('status', data->>'status', 'region', data->>'region') AS _id"));
+            assertTrue(sql.contains("COUNT(*) AS cnt"));
+            assertTrue(sql.contains("GROUP BY data->>'status', data->>'region'"));
+            assertTrue(sql.contains("ORDER BY cnt DESC"));
+        }
+
+        @Test
+        void pushAccumulator() throws SQLException {
+            emptyResultSet("_id", "names");
+            Utils.docAggregate(conn, "users",
+                "[{\"$group\": {\"_id\": \"$role\", \"names\": {\"$push\": \"$name\"}}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("array_agg(data->>'name') AS names"));
+            assertTrue(sql.contains("GROUP BY data->>'role'"));
+        }
+
+        @Test
+        void addToSetAccumulator() throws SQLException {
+            emptyResultSet("_id", "cities");
+            Utils.docAggregate(conn, "users",
+                "[{\"$group\": {\"_id\": \"$country\", \"cities\": {\"$addToSet\": \"$city\"}}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("array_agg(DISTINCT data->>'city') AS cities"));
+            assertTrue(sql.contains("GROUP BY data->>'country'"));
+        }
+
+        @Test
+        void compositeGroupIdWithMatch() throws SQLException {
+            emptyResultSet("_id", "total");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$match\": {\"active\":true}}, " +
+                "{\"$group\": {\"_id\": {\"dept\": \"$dept\", \"role\": \"$role\"}, " +
+                "\"total\": {\"$sum\": \"$salary\"}}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("json_build_object('dept', data->>'dept', 'role', data->>'role') AS _id"));
+            assertTrue(sql.contains("WHERE data @> ?::jsonb"));
+            assertTrue(sql.contains("GROUP BY data->>'dept', data->>'role'"));
+            verify(ps).setString(1, "{\"active\":true}");
+        }
+
+        @Test
+        void pushWithCompositeId() throws SQLException {
+            emptyResultSet("_id", "items");
+            Utils.docAggregate(conn, "orders",
+                "[{\"$group\": {\"_id\": {\"store\": \"$store\", \"day\": \"$day\"}, " +
+                "\"items\": {\"$push\": \"$product\"}}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("json_build_object('store', data->>'store', 'day', data->>'day') AS _id"));
+            assertTrue(sql.contains("array_agg(data->>'product') AS items"));
+            assertTrue(sql.contains("GROUP BY data->>'store', data->>'day'"));
+        }
+
+        @Test
+        void addToSetWithNullGroupId() throws SQLException {
+            emptyResultSet("tags");
+            Utils.docAggregate(conn, "posts",
+                "[{\"$group\": {\"_id\": null, \"tags\": {\"$addToSet\": \"$tag\"}}}]");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("array_agg(DISTINCT data->>'tag') AS tags"));
+            assertFalse(sql.contains("GROUP BY"));
+            assertFalse(sql.contains("AS _id"));
+        }
     }
 
 

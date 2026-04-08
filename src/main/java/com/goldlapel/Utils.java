@@ -1770,18 +1770,27 @@ public class Utils {
                     hasGroup = true;
                     String idRaw = stage.get("_id");
                     if (idRaw != null && !idRaw.equals("null")) {
-                        // "$field" reference
-                        if (idRaw.startsWith("\"$") && idRaw.endsWith("\"")) {
+                        if (idRaw.startsWith("{")) {
+                            // Composite _id: {"region": "$region", "year": "$year"}
+                            parseCompositeGroupId(idRaw, selectExprs, groupByExprs);
+                        } else if (idRaw.startsWith("\"$") && idRaw.endsWith("\"")) {
+                            // "$field" reference
                             groupIdField = idRaw.substring(2, idRaw.length() - 1);
+                            validateIdentifier(groupIdField);
+                            selectExprs.add("data->>'" + groupIdField + "' AS _id");
+                            groupByExprs.add("data->>'" + groupIdField + "'");
                         } else if (idRaw.startsWith("$")) {
                             groupIdField = idRaw.substring(1);
+                            validateIdentifier(groupIdField);
+                            selectExprs.add("data->>'" + groupIdField + "' AS _id");
+                            groupByExprs.add("data->>'" + groupIdField + "'");
                         } else {
                             // bare field name (unquoted or quoted without $)
                             groupIdField = idRaw.replaceAll("^\"|\"$", "");
+                            validateIdentifier(groupIdField);
+                            selectExprs.add("data->>'" + groupIdField + "' AS _id");
+                            groupByExprs.add("data->>'" + groupIdField + "'");
                         }
-                        validateIdentifier(groupIdField);
-                        selectExprs.add("data->>'" + groupIdField + "' AS _id");
-                        groupByExprs.add("data->>'" + groupIdField + "'");
                     }
                     // Parse accumulators
                     for (Map.Entry<String, String> entry : stage.entrySet()) {
@@ -1960,6 +1969,35 @@ public class Utils {
         }
     }
 
+    private static void parseCompositeGroupId(String idJson, List<String> selectExprs,
+            List<String> groupByExprs) {
+        // idJson is {"region": "$region", "year": "$year"}
+        if (!idJson.startsWith("{") || !idJson.endsWith("}")) {
+            throw new IllegalArgumentException("Composite _id must be a JSON object");
+        }
+        String body = idJson.substring(1, idJson.length() - 1).trim();
+        List<String[]> pairs = splitKeyValuePairs(body);
+        if (pairs.isEmpty()) {
+            throw new IllegalArgumentException("Composite _id must have at least one field");
+        }
+        StringBuilder jsonBuild = new StringBuilder("json_build_object(");
+        for (int i = 0; i < pairs.size(); i++) {
+            String alias = pairs.get(i)[0].trim().replaceAll("^\"|\"$", "");
+            String ref = pairs.get(i)[1].trim().replaceAll("^\"|\"$", "");
+            validateIdentifier(alias);
+            if (!ref.startsWith("$")) {
+                throw new IllegalArgumentException("Composite _id values must be $field references: " + ref);
+            }
+            String field = ref.substring(1);
+            validateIdentifier(field);
+            if (i > 0) jsonBuild.append(", ");
+            jsonBuild.append("'").append(alias).append("', data->>'").append(field).append("'");
+            groupByExprs.add("data->>'" + field + "'");
+        }
+        jsonBuild.append(") AS _id");
+        selectExprs.add(jsonBuild.toString());
+    }
+
     private static List<String[]> splitKeyValuePairs(String body) {
         List<String[]> pairs = new ArrayList<>();
         int i = 0;
@@ -2066,6 +2104,14 @@ public class Utils {
             }
             case "$count":
                 return "COUNT(*)";
+            case "$push": {
+                String field = extractFieldRef(arg);
+                return "array_agg(data->>'" + field + "')";
+            }
+            case "$addToSet": {
+                String field = extractFieldRef(arg);
+                return "array_agg(DISTINCT data->>'" + field + "')";
+            }
             default:
                 throw new IllegalArgumentException("Unsupported accumulator: " + op);
         }
