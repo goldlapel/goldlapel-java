@@ -718,4 +718,240 @@ class DocTest {
                     () -> Utils.docCreateIndex(conn, "bad table", Collections.singletonList("name")));
         }
     }
+
+
+    // -------------------------------------------------------------------------
+    // fieldPath (unit tests on the helper)
+    // -------------------------------------------------------------------------
+
+    @Nested class FieldPathTest {
+
+        @Test
+        void simpleKey() {
+            assertEquals("data->>'name'", Utils.fieldPath("name"));
+        }
+
+        @Test
+        void nestedKey() {
+            assertEquals("data->'address'->>'city'", Utils.fieldPath("address.city"));
+        }
+
+        @Test
+        void deeplyNested() {
+            assertEquals("data->'a'->'b'->>'c'", Utils.fieldPath("a.b.c"));
+        }
+
+        @Test
+        void invalidKeyThrows() {
+            assertThrows(IllegalArgumentException.class, () -> Utils.fieldPath("bad key"));
+        }
+
+        @Test
+        void invalidPartThrows() {
+            assertThrows(IllegalArgumentException.class, () -> Utils.fieldPath("ok.bad key"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // buildFilter (unit tests on comparison operators)
+    // -------------------------------------------------------------------------
+
+    @Nested class BuildFilterTest {
+
+        @Test
+        void plainContainmentPassthrough() {
+            Utils.FilterResult r = Utils.buildFilter("{\"active\":true}");
+            assertEquals("data @> ?::jsonb", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("{\"active\":true}", r.params.get(0));
+        }
+
+        @Test
+        void gtNumeric() {
+            Utils.FilterResult r = Utils.buildFilter("{\"age\": {\"$gt\": 21}}");
+            assertEquals("(data->>'age')::numeric > ?", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals(21.0, r.params.get(0));
+        }
+
+        @Test
+        void gteNumeric() {
+            Utils.FilterResult r = Utils.buildFilter("{\"score\": {\"$gte\": 90}}");
+            assertEquals("(data->>'score')::numeric >= ?", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals(90.0, r.params.get(0));
+        }
+
+        @Test
+        void ltAndLte() {
+            Utils.FilterResult r = Utils.buildFilter("{\"price\": {\"$lt\": 100, \"$gte\": 10}}");
+            assertEquals("(data->>'price')::numeric < ? AND (data->>'price')::numeric >= ?", r.whereClause);
+            assertEquals(2, r.params.size());
+            assertEquals(100.0, r.params.get(0));
+            assertEquals(10.0, r.params.get(1));
+        }
+
+        @Test
+        void eqString() {
+            Utils.FilterResult r = Utils.buildFilter("{\"status\": {\"$eq\": \"active\"}}");
+            assertEquals("data->>'status' = ?", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("active", r.params.get(0));
+        }
+
+        @Test
+        void neOperator() {
+            Utils.FilterResult r = Utils.buildFilter("{\"status\": {\"$ne\": \"deleted\"}}");
+            assertEquals("data->>'status' != ?", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("deleted", r.params.get(0));
+        }
+
+        @Test
+        void inOperator() {
+            Utils.FilterResult r = Utils.buildFilter("{\"color\": {\"$in\": [\"red\", \"blue\"]}}");
+            assertEquals("data->>'color' IN (?, ?)", r.whereClause);
+            assertEquals(2, r.params.size());
+            assertEquals("red", r.params.get(0));
+            assertEquals("blue", r.params.get(1));
+        }
+
+        @Test
+        void ninOperator() {
+            Utils.FilterResult r = Utils.buildFilter("{\"color\": {\"$nin\": [\"red\"]}}");
+            assertEquals("data->>'color' NOT IN (?)", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("red", r.params.get(0));
+        }
+
+        @Test
+        void existsTrue() {
+            Utils.FilterResult r = Utils.buildFilter("{\"email\": {\"$exists\": true}}");
+            assertEquals("data ?? ?", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("email", r.params.get(0));
+        }
+
+        @Test
+        void existsFalse() {
+            Utils.FilterResult r = Utils.buildFilter("{\"email\": {\"$exists\": false}}");
+            assertEquals("NOT (data ?? ?)", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("email", r.params.get(0));
+        }
+
+        @Test
+        void regexOperator() {
+            Utils.FilterResult r = Utils.buildFilter("{\"name\": {\"$regex\": \"^A.*\"}}");
+            assertEquals("data->>'name' ~ ?", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("^A.*", r.params.get(0));
+        }
+
+        @Test
+        void mixedContainmentAndOperator() {
+            Utils.FilterResult r = Utils.buildFilter("{\"active\": true, \"age\": {\"$gte\": 18}}");
+            assertEquals("data @> ?::jsonb AND (data->>'age')::numeric >= ?", r.whereClause);
+            assertEquals(2, r.params.size());
+            assertEquals("{\"active\": true}", r.params.get(0));
+            assertEquals(18.0, r.params.get(1));
+        }
+
+        @Test
+        void nestedFieldPath() {
+            Utils.FilterResult r = Utils.buildFilter("{\"address.city\": {\"$eq\": \"NYC\"}}");
+            assertEquals("data->'address'->>'city' = ?", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("NYC", r.params.get(0));
+        }
+
+        @Test
+        void nullFilterReturnsEmpty() {
+            Utils.FilterResult r = Utils.buildFilter(null);
+            assertEquals("", r.whereClause);
+            assertTrue(r.params.isEmpty());
+        }
+
+        @Test
+        void unsupportedOperatorThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.buildFilter("{\"x\": {\"$unknown\": 1}}"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Comparison operators in doc* methods (integration-level)
+    // -------------------------------------------------------------------------
+
+    @Nested class ComparisonOperatorIntegrationTest {
+
+        @Test
+        void docFindWithGt() throws SQLException {
+            emptyResultSet("id", "data", "created_at", "updated_at");
+            Utils.docFind(conn, "users", "{\"age\": {\"$gt\": 21}}", null, null, null);
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("WHERE (data->>'age')::numeric > ?"));
+            verify(ps).setDouble(1, 21.0);
+        }
+
+        @Test
+        void docCountWithGte() throws SQLException {
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(true);
+            when(rs.getLong(1)).thenReturn(5L);
+
+            long count = Utils.docCount(conn, "users", "{\"score\": {\"$gte\": 90}}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("WHERE (data->>'score')::numeric >= ?"));
+            verify(ps).setDouble(1, 90.0);
+            assertEquals(5L, count);
+        }
+
+        @Test
+        void docDeleteWithIn() throws SQLException {
+            allowUpdate(3);
+            int count = Utils.docDelete(conn, "users", "{\"status\": {\"$in\": [\"banned\", \"spam\"]}}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("WHERE data->>'status' IN (?, ?)"));
+            verify(ps).setString(1, "banned");
+            verify(ps).setString(2, "spam");
+            assertEquals(3, count);
+        }
+
+        @Test
+        void docUpdateWithLt() throws SQLException {
+            allowUpdate(2);
+            int count = Utils.docUpdate(conn, "users",
+                "{\"score\": {\"$lt\": 50}}", "{\"flagged\":true}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("SET data = data || ?::jsonb"));
+            assertTrue(sql.contains("WHERE (data->>'score')::numeric < ?"));
+            verify(ps).setString(1, "{\"flagged\":true}");
+            verify(ps).setDouble(2, 50.0);
+            assertEquals(2, count);
+        }
+
+        @Test
+        void docDeleteOneWithRegex() throws SQLException {
+            allowUpdate(1);
+            int count = Utils.docDeleteOne(conn, "users", "{\"name\": {\"$regex\": \"^test\"}}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("WHERE data->>'name' ~ ?"));
+            verify(ps).setString(1, "^test");
+            assertEquals(1, count);
+        }
+    }
 }

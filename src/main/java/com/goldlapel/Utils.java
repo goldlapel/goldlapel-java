@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.regex.Pattern;
 
@@ -1223,6 +1224,248 @@ public class Utils {
     // Document store (MongoDB-like CRUD on JSONB)
     // =========================================================================
 
+    private static final Pattern FIELD_PART_RE = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*$");
+
+    private static final Map<String, String> COMPARISON_OPS = Map.of(
+        "$gt", ">", "$gte", ">=", "$lt", "<", "$lte", "<=",
+        "$eq", "=", "$ne", "!="
+    );
+
+    private static final Set<String> SUPPORTED_FILTER_OPS =
+        Set.of("$gt", "$gte", "$lt", "$lte", "$eq", "$ne", "$in", "$nin", "$exists", "$regex");
+
+    static class FilterResult {
+        final String whereClause;
+        final List<Object> params;
+
+        FilterResult(String whereClause, List<Object> params) {
+            this.whereClause = whereClause;
+            this.params = params;
+        }
+    }
+
+    static String fieldPath(String key) {
+        String[] parts = key.split("\\.");
+        for (String part : parts) {
+            if (!FIELD_PART_RE.matcher(part).matches()) {
+                throw new IllegalArgumentException("Invalid filter key: " + key);
+            }
+        }
+        if (parts.length == 1) {
+            return "data->>'" + parts[0] + "'";
+        }
+        StringBuilder sb = new StringBuilder("data");
+        for (int i = 0; i < parts.length - 1; i++) {
+            sb.append("->'").append(parts[i]).append("'");
+        }
+        sb.append("->>'").append(parts[parts.length - 1]).append("'");
+        return sb.toString();
+    }
+
+    static FilterResult buildFilter(String filterJson) {
+        if (filterJson == null || filterJson.trim().isEmpty()) {
+            return new FilterResult("", new ArrayList<>());
+        }
+        String s = filterJson.trim();
+        if (!s.startsWith("{") || !s.endsWith("}")) {
+            throw new IllegalArgumentException("Filter must be a JSON object");
+        }
+        String body = s.substring(1, s.length() - 1).trim();
+        if (body.isEmpty()) {
+            return new FilterResult("", new ArrayList<>());
+        }
+
+        List<String[]> pairs = splitKeyValuePairs(body);
+
+        // Fast path: if no values contain operator keys, treat the entire
+        // filter as a JSONB containment query and pass through the original string
+        boolean hasOperators = false;
+        for (String[] kv : pairs) {
+            String val = kv[1].trim();
+            if (val.startsWith("{") && hasOperatorKeys(val)) {
+                hasOperators = true;
+                break;
+            }
+        }
+        if (!hasOperators) {
+            List<Object> params = new ArrayList<>();
+            params.add(s);
+            return new FilterResult("data @> ?::jsonb", params);
+        }
+
+        Map<String, String> containment = new LinkedHashMap<>();
+        List<String> clauses = new ArrayList<>();
+        List<Object> params = new ArrayList<>();
+
+        for (String[] kv : pairs) {
+            String key = kv[0].trim().replaceAll("^\"|\"$", "");
+            String val = kv[1].trim();
+
+            if (val.startsWith("{") && hasOperatorKeys(val)) {
+                String fieldExpr = fieldPath(key);
+                List<String[]> opPairs = splitKeyValuePairs(
+                    val.substring(1, val.length() - 1).trim());
+                for (String[] opKv : opPairs) {
+                    String op = opKv[0].trim().replaceAll("^\"|\"$", "");
+                    String operand = opKv[1].trim();
+                    if (!SUPPORTED_FILTER_OPS.contains(op)) {
+                        throw new IllegalArgumentException("Unsupported filter operator: " + op);
+                    }
+
+                    if (COMPARISON_OPS.containsKey(op)) {
+                        String sqlOp = COMPARISON_OPS.get(op);
+                        if (isNumericLiteral(operand)) {
+                            clauses.add("(" + fieldExpr + ")::numeric " + sqlOp + " ?");
+                            params.add(Double.parseDouble(operand));
+                        } else {
+                            String strVal = unquote(operand);
+                            clauses.add(fieldExpr + " " + sqlOp + " ?");
+                            params.add(strVal);
+                        }
+                    } else if (op.equals("$in") || op.equals("$nin")) {
+                        List<String> elements = parseJsonArray(operand);
+                        if (elements.isEmpty()) {
+                            if (op.equals("$in")) {
+                                clauses.add("FALSE");
+                            }
+                            // $nin with empty array matches everything, no clause needed
+                        } else {
+                            StringBuilder placeholders = new StringBuilder();
+                            for (int i = 0; i < elements.size(); i++) {
+                                if (i > 0) placeholders.append(", ");
+                                placeholders.append("?");
+                            }
+                            String notPrefix = op.equals("$nin") ? "NOT " : "";
+                            clauses.add(fieldExpr + " " + notPrefix + "IN (" + placeholders + ")");
+                            for (String elem : elements) {
+                                params.add(unquote(elem.trim()));
+                            }
+                        }
+                    } else if (op.equals("$exists")) {
+                        String topKey = key.split("\\.")[0];
+                        boolean exists = operand.equals("true");
+                        if (exists) {
+                            clauses.add("data ?? ?");
+                        } else {
+                            clauses.add("NOT (data ?? ?)");
+                        }
+                        params.add(topKey);
+                    } else if (op.equals("$regex")) {
+                        String pattern = unquote(operand);
+                        clauses.add(fieldExpr + " ~ ?");
+                        params.add(pattern);
+                    }
+                }
+            } else {
+                containment.put(key, val);
+            }
+        }
+
+        List<String> allClauses = new ArrayList<>();
+        List<Object> allParams = new ArrayList<>();
+        if (!containment.isEmpty()) {
+            allClauses.add("data @> ?::jsonb");
+            allParams.add(rebuildJsonObject(containment));
+        }
+        allClauses.addAll(clauses);
+        allParams.addAll(params);
+
+        if (allClauses.isEmpty()) {
+            return new FilterResult("", allParams);
+        }
+        return new FilterResult(String.join(" AND ", allClauses), allParams);
+    }
+
+    private static boolean hasOperatorKeys(String objStr) {
+        String inner = objStr.substring(1, objStr.length() - 1).trim();
+        if (inner.isEmpty()) return false;
+        // Check if first key starts with $
+        String firstKey;
+        if (inner.charAt(0) == '"') {
+            int end = inner.indexOf('"', 1);
+            if (end < 0) return false;
+            firstKey = inner.substring(1, end);
+        } else {
+            int colon = inner.indexOf(':');
+            if (colon < 0) return false;
+            firstKey = inner.substring(0, colon).trim();
+        }
+        return firstKey.startsWith("$");
+    }
+
+    private static boolean isNumericLiteral(String s) {
+        if (s.isEmpty()) return false;
+        try {
+            Double.parseDouble(s);
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    private static String unquote(String s) {
+        if (s.length() >= 2 && s.startsWith("\"") && s.endsWith("\"")) {
+            return s.substring(1, s.length() - 1);
+        }
+        return s;
+    }
+
+    private static List<String> parseJsonArray(String s) {
+        s = s.trim();
+        if (!s.startsWith("[") || !s.endsWith("]")) {
+            throw new IllegalArgumentException("Expected JSON array: " + s);
+        }
+        String inner = s.substring(1, s.length() - 1).trim();
+        if (inner.isEmpty()) {
+            return new ArrayList<>();
+        }
+        List<String> elements = new ArrayList<>();
+        int depth = 0;
+        int start = 0;
+        boolean inString = false;
+        for (int i = 0; i < inner.length(); i++) {
+            char c = inner.charAt(i);
+            if (c == '"' && (i == 0 || inner.charAt(i - 1) != '\\')) {
+                inString = !inString;
+            } else if (!inString) {
+                if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']') depth--;
+                else if (c == ',' && depth == 0) {
+                    elements.add(inner.substring(start, i).trim());
+                    start = i + 1;
+                }
+            }
+        }
+        elements.add(inner.substring(start).trim());
+        return elements;
+    }
+
+    private static String rebuildJsonObject(Map<String, String> pairs) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<String, String> entry : pairs.entrySet()) {
+            if (!first) sb.append(", ");
+            first = false;
+            String key = entry.getKey();
+            if (!key.startsWith("\"")) {
+                sb.append("\"").append(key).append("\"");
+            } else {
+                sb.append(key);
+            }
+            sb.append(": ").append(entry.getValue());
+        }
+        sb.append("}");
+        return sb.toString();
+    }
+
+    private static void setFilterParam(PreparedStatement ps, int idx, Object param) throws SQLException {
+        if (param instanceof Double) {
+            ps.setDouble(idx, (Double) param);
+        } else {
+            ps.setString(idx, param.toString());
+        }
+    }
+
     private static void ensureCollection(Connection conn, String collection) throws SQLException {
         validateIdentifier(collection);
         try (Statement st = conn.createStatement()) {
@@ -1336,10 +1579,10 @@ public class Utils {
     public static List<Map<String, Object>> docFind(Connection conn, String collection,
             String filterJson, String sortJson, Integer limit, Integer skip) throws SQLException {
         validateIdentifier(collection);
+        FilterResult filter = buildFilter(filterJson);
         StringBuilder sql = new StringBuilder("SELECT id, data, created_at, updated_at FROM " + collection);
-        boolean hasFilter = filterJson != null && !filterJson.trim().isEmpty();
-        if (hasFilter) {
-            sql.append(" WHERE data @> ?::jsonb");
+        if (!filter.whereClause.isEmpty()) {
+            sql.append(" WHERE ").append(filter.whereClause);
         }
         String orderClause = parseSortClause(sortJson);
         if (!orderClause.isEmpty()) {
@@ -1353,8 +1596,8 @@ public class Utils {
         }
         try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             int idx = 1;
-            if (hasFilter) {
-                ps.setString(idx++, filterJson);
+            for (Object param : filter.params) {
+                setFilterParam(ps, idx++, param);
             }
             if (limit != null) {
                 ps.setInt(idx++, limit);
@@ -1389,11 +1632,18 @@ public class Utils {
     public static int docUpdate(Connection conn, String collection, String filterJson,
             String updateJson) throws SQLException {
         validateIdentifier(collection);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "UPDATE " + collection + " SET data = data || ?::jsonb, updated_at = NOW() " +
-                "WHERE data @> ?::jsonb")) {
-            ps.setString(1, updateJson);
-            ps.setString(2, filterJson);
+        FilterResult filter = buildFilter(filterJson);
+        StringBuilder sql = new StringBuilder(
+            "UPDATE " + collection + " SET data = data || ?::jsonb, updated_at = NOW()");
+        if (!filter.whereClause.isEmpty()) {
+            sql.append(" WHERE ").append(filter.whereClause);
+        }
+        try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            ps.setString(idx++, updateJson);
+            for (Object param : filter.params) {
+                setFilterParam(ps, idx++, param);
+            }
             return ps.executeUpdate();
         }
     }
@@ -1406,11 +1656,16 @@ public class Utils {
     public static int docUpdateOne(Connection conn, String collection, String filterJson,
             String updateJson) throws SQLException {
         validateIdentifier(collection);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "UPDATE " + collection + " SET data = data || ?::jsonb, updated_at = NOW() " +
-                "WHERE id = (SELECT id FROM " + collection + " WHERE data @> ?::jsonb LIMIT 1)")) {
-            ps.setString(1, updateJson);
-            ps.setString(2, filterJson);
+        FilterResult filter = buildFilter(filterJson);
+        String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
+        String sql = "UPDATE " + collection + " SET data = data || ?::jsonb, updated_at = NOW() " +
+            "WHERE id = (SELECT id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1)";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int idx = 1;
+            ps.setString(idx++, updateJson);
+            for (Object param : filter.params) {
+                setFilterParam(ps, idx++, param);
+            }
             return ps.executeUpdate();
         }
     }
@@ -1422,9 +1677,16 @@ public class Utils {
     public static int docDelete(Connection conn, String collection,
             String filterJson) throws SQLException {
         validateIdentifier(collection);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "DELETE FROM " + collection + " WHERE data @> ?::jsonb")) {
-            ps.setString(1, filterJson);
+        FilterResult filter = buildFilter(filterJson);
+        StringBuilder sql = new StringBuilder("DELETE FROM " + collection);
+        if (!filter.whereClause.isEmpty()) {
+            sql.append(" WHERE ").append(filter.whereClause);
+        }
+        try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            for (Object param : filter.params) {
+                setFilterParam(ps, idx++, param);
+            }
             return ps.executeUpdate();
         }
     }
@@ -1436,10 +1698,15 @@ public class Utils {
     public static int docDeleteOne(Connection conn, String collection,
             String filterJson) throws SQLException {
         validateIdentifier(collection);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "DELETE FROM " + collection + " WHERE id = " +
-                "(SELECT id FROM " + collection + " WHERE data @> ?::jsonb LIMIT 1)")) {
-            ps.setString(1, filterJson);
+        FilterResult filter = buildFilter(filterJson);
+        String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
+        String sql = "DELETE FROM " + collection + " WHERE id = " +
+            "(SELECT id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1)";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int idx = 1;
+            for (Object param : filter.params) {
+                setFilterParam(ps, idx++, param);
+            }
             return ps.executeUpdate();
         }
     }
@@ -1452,13 +1719,15 @@ public class Utils {
     public static long docCount(Connection conn, String collection,
             String filterJson) throws SQLException {
         validateIdentifier(collection);
-        boolean hasFilter = filterJson != null && !filterJson.trim().isEmpty();
-        String sql = hasFilter
-            ? "SELECT COUNT(*) FROM " + collection + " WHERE data @> ?::jsonb"
-            : "SELECT COUNT(*) FROM " + collection;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (hasFilter) {
-                ps.setString(1, filterJson);
+        FilterResult filter = buildFilter(filterJson);
+        StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM " + collection);
+        if (!filter.whereClause.isEmpty()) {
+            sql.append(" WHERE ").append(filter.whereClause);
+        }
+        try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            for (Object param : filter.params) {
+                setFilterParam(ps, idx++, param);
             }
             ResultSet rs = ps.executeQuery();
             rs.next();
@@ -1481,7 +1750,7 @@ public class Utils {
         validateIdentifier(collection);
         List<Map<String, String>> stages = parsePipeline(pipelineJson);
 
-        String matchFilter = null;
+        FilterResult matchResult = null;
         String groupIdField = null;  // null = _id:null, non-null = field name
         boolean hasGroup = false;
         List<String> selectExprs = new ArrayList<>();
@@ -1495,7 +1764,7 @@ public class Utils {
             String type = stage.get("_type");
             switch (type) {
                 case "$match":
-                    matchFilter = stage.get("_body");
+                    matchResult = buildFilter(stage.get("_body"));
                     break;
                 case "$group": {
                     hasGroup = true;
@@ -1558,8 +1827,8 @@ public class Utils {
         }
         sql.append(" FROM ").append(collection);
 
-        if (matchFilter != null && !matchFilter.trim().isEmpty()) {
-            sql.append(" WHERE data @> ?::jsonb");
+        if (matchResult != null && !matchResult.whereClause.isEmpty()) {
+            sql.append(" WHERE ").append(matchResult.whereClause);
         }
         if (!groupByExprs.isEmpty()) {
             sql.append(" GROUP BY ");
@@ -1580,8 +1849,10 @@ public class Utils {
 
         try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             int idx = 1;
-            if (matchFilter != null && !matchFilter.trim().isEmpty()) {
-                ps.setString(idx++, matchFilter);
+            if (matchResult != null && !matchResult.whereClause.isEmpty()) {
+                for (Object param : matchResult.params) {
+                    setFilterParam(ps, idx++, param);
+                }
             }
             if (limitVal != null) {
                 ps.setInt(idx++, limitVal);
@@ -1722,13 +1993,21 @@ public class Utils {
             // Skip whitespace
             while (i < body.length() && (body.charAt(i) == ' ' || body.charAt(i) == '\t')) i++;
 
-            // Find value (could be object, string, number, null)
+            // Find value (could be object, array, string, number, null)
             int valStart = i;
             if (i < body.length() && body.charAt(i) == '{') {
                 int depth = 0;
                 while (i < body.length()) {
                     if (body.charAt(i) == '{') depth++;
                     else if (body.charAt(i) == '}') { depth--; if (depth == 0) { i++; break; } }
+                    i++;
+                }
+            } else if (i < body.length() && body.charAt(i) == '[') {
+                int depth = 0;
+                while (i < body.length()) {
+                    if (body.charAt(i) == '[') depth++;
+                    else if (body.charAt(i) == ']') { depth--; if (depth == 0) { i++; break; } }
+                    else if (body.charAt(i) == '"') { i++; while (i < body.length() && body.charAt(i) != '"') { if (body.charAt(i) == '\\') i++; i++; } }
                     i++;
                 }
             } else if (i < body.length() && body.charAt(i) == '"') {
