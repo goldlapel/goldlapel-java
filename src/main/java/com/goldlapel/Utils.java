@@ -1330,8 +1330,10 @@ public class Utils {
         boolean inString = false;
         for (int i = 0; i < inner.length(); i++) {
             char c = inner.charAt(i);
-            if (c == '"' && (i == 0 || inner.charAt(i - 1) != '\\')) {
-                inString = !inString;
+            if (c == '"') {
+                int bs = 0;
+                for (int j = i - 1; j >= 0 && inner.charAt(j) == '\\'; j--) bs++;
+                if (bs % 2 == 0) inString = !inString;
             } else if (!inString) {
                 if (c == '{') {
                     if (depth == 0) start = i;
@@ -1565,8 +1567,10 @@ public class Utils {
         boolean inString = false;
         for (int i = 0; i < inner.length(); i++) {
             char c = inner.charAt(i);
-            if (c == '"' && (i == 0 || inner.charAt(i - 1) != '\\')) {
-                inString = !inString;
+            if (c == '"') {
+                int bs = 0;
+                for (int j = i - 1; j >= 0 && inner.charAt(j) == '\\'; j--) bs++;
+                if (bs % 2 == 0) inString = !inString;
             } else if (!inString) {
                 if (c == '{' || c == '[') depth++;
                 else if (c == '}' || c == ']') depth--;
