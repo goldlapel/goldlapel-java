@@ -276,6 +276,19 @@ public class GoldLapel {
         return Utils.docDeleteOne(requireConn(), collection, filterJson);
     }
 
+    public Map<String, Object> docFindOneAndUpdate(String collection, String filterJson,
+            String updateJson) throws SQLException {
+        return Utils.docFindOneAndUpdate(requireConn(), collection, filterJson, updateJson);
+    }
+
+    public Map<String, Object> docFindOneAndDelete(String collection, String filterJson) throws SQLException {
+        return Utils.docFindOneAndDelete(requireConn(), collection, filterJson);
+    }
+
+    public List<String> docDistinct(String collection, String field, String filterJson) throws SQLException {
+        return Utils.docDistinct(requireConn(), collection, field, filterJson);
+    }
+
     public long docCount(String collection, String filterJson) throws SQLException {
         return Utils.docCount(requireConn(), collection, filterJson);
     }

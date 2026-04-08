@@ -1530,4 +1530,536 @@ class DocTest {
                     () -> Utils.docRemoveCap(conn, "1bad"));
         }
     }
+
+
+    // -------------------------------------------------------------------------
+    // Logical operators ($or, $and, $not) in buildFilter
+    // -------------------------------------------------------------------------
+
+    @Nested class LogicalOperatorTest {
+
+        @Test
+        void orOperator() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"$or\": [{\"status\": \"active\"}, {\"status\": \"pending\"}]}");
+            assertEquals("(data @> ?::jsonb OR data @> ?::jsonb)", r.whereClause);
+            assertEquals(2, r.params.size());
+            assertEquals("{\"status\": \"active\"}", r.params.get(0));
+            assertEquals("{\"status\": \"pending\"}", r.params.get(1));
+        }
+
+        @Test
+        void andOperator() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"$and\": [{\"age\": {\"$gte\": 18}}, {\"age\": {\"$lt\": 65}}]}");
+            assertEquals("((data->>'age')::numeric >= ? AND (data->>'age')::numeric < ?)", r.whereClause);
+            assertEquals(2, r.params.size());
+            assertEquals(18.0, r.params.get(0));
+            assertEquals(65.0, r.params.get(1));
+        }
+
+        @Test
+        void notOperator() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"$not\": {\"status\": \"deleted\"}}");
+            assertEquals("NOT (data @> ?::jsonb)", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("{\"status\": \"deleted\"}", r.params.get(0));
+        }
+
+        @Test
+        void notWithComparisonOperator() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"$not\": {\"age\": {\"$lt\": 18}}}");
+            assertEquals("NOT ((data->>'age')::numeric < ?)", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals(18.0, r.params.get(0));
+        }
+
+        @Test
+        void orWithMixedFilters() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"$or\": [{\"name\": \"alice\"}, {\"age\": {\"$gt\": 30}}]}");
+            assertEquals("(data @> ?::jsonb OR (data->>'age')::numeric > ?)", r.whereClause);
+            assertEquals(2, r.params.size());
+            assertEquals("{\"name\": \"alice\"}", r.params.get(0));
+            assertEquals(30.0, r.params.get(1));
+        }
+
+        @Test
+        void logicalWithOtherClauses() {
+            Utils.FilterResult r = Utils.buildFilter(
+                "{\"active\": true, \"$or\": [{\"role\": \"admin\"}, {\"role\": \"moderator\"}]}");
+            assertTrue(r.whereClause.contains("data @> ?::jsonb"));
+            assertTrue(r.whereClause.contains("(data @> ?::jsonb OR data @> ?::jsonb)"));
+            assertEquals(3, r.params.size());
+        }
+
+        @Test
+        void docFindWithOr() throws SQLException {
+            emptyResultSet("id", "data", "created_at", "updated_at");
+            Utils.docFind(conn, "users",
+                "{\"$or\": [{\"role\": \"admin\"}, {\"role\": \"editor\"}]}",
+                null, null, null);
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("WHERE (data @> ?::jsonb OR data @> ?::jsonb)"));
+        }
+
+        @Test
+        void docCountWithNot() throws SQLException {
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(true);
+            when(rs.getLong(1)).thenReturn(10L);
+
+            long count = Utils.docCount(conn, "users",
+                "{\"$not\": {\"banned\": true}}");
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("WHERE NOT (data @> ?::jsonb)"));
+            assertEquals(10L, count);
+        }
+
+        @Test
+        void notWithNonObjectThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.buildFilter("{\"$not\": [1, 2]}"));
+        }
+
+        @Test
+        void orWithEmptyArrayThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.buildFilter("{\"$or\": []}"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // buildUpdate unit tests
+    // -------------------------------------------------------------------------
+
+    @Nested class BuildUpdateTest {
+
+        @Test
+        void plainMerge() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"name\": \"alice\"}");
+            assertEquals("data || ?::jsonb", r.expr);
+            assertEquals(1, r.params.size());
+            assertEquals("{\"name\": \"alice\"}", r.params.get(0));
+        }
+
+        @Test
+        void setOperator() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"$set\": {\"name\": \"bob\", \"age\": 30}}");
+            assertEquals("(data || ?::jsonb)", r.expr);
+            assertEquals(1, r.params.size());
+            assertEquals("{\"name\": \"bob\", \"age\": 30}", r.params.get(0));
+        }
+
+        @Test
+        void unsetSingleField() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"$unset\": {\"temp\": \"\"}}");
+            assertEquals("(data - ?)", r.expr);
+            assertEquals(1, r.params.size());
+            assertEquals("temp", r.params.get(0));
+        }
+
+        @Test
+        void unsetNestedField() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"$unset\": {\"meta.tmp\": \"\"}}");
+            assertEquals("(data #- ?::text[])", r.expr);
+            assertEquals(1, r.params.size());
+            assertEquals("{meta,tmp}", r.params.get(0));
+        }
+
+        @Test
+        void incOperator() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"$inc\": {\"score\": 5}}");
+            assertTrue(r.expr.contains("jsonb_set(data, ?::text[], to_jsonb(COALESCE((data->>'score')::numeric, 0) + ?))"));
+            assertEquals(2, r.params.size());
+            assertEquals("{score}", r.params.get(0));
+            assertEquals(5.0, r.params.get(1));
+        }
+
+        @Test
+        void mulOperator() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"$mul\": {\"price\": 1.1}}");
+            assertTrue(r.expr.contains("jsonb_set(data, ?::text[], to_jsonb(COALESCE((data->>'price')::numeric, 0) * ?))"));
+            assertEquals(2, r.params.size());
+            assertEquals("{price}", r.params.get(0));
+            assertEquals(1.1, r.params.get(1));
+        }
+
+        @Test
+        void renameOperator() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"$rename\": {\"oldName\": \"newName\"}}");
+            assertTrue(r.expr.contains("jsonb_set((data - ?), ?::text[], data->'oldName')"));
+            assertEquals(2, r.params.size());
+            assertEquals("oldName", r.params.get(0));
+            assertEquals("{newName}", r.params.get(1));
+        }
+
+        @Test
+        void renameNestedField() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"$rename\": {\"meta.old\": \"meta.fresh\"}}");
+            assertTrue(r.expr.contains("#- ?::text[]"));
+            assertTrue(r.expr.contains("jsonb_set("));
+            assertTrue(r.expr.contains("data->'meta'->'old'"));
+            assertEquals(2, r.params.size());
+            assertEquals("{meta,old}", r.params.get(0));
+            assertEquals("{meta,fresh}", r.params.get(1));
+        }
+
+        @Test
+        void pushOperator() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"$push\": {\"tags\": \"new\"}}");
+            assertTrue(r.expr.contains("jsonb_set(data, ?::text[], COALESCE(data->'tags', '[]'::jsonb) || to_jsonb(?::text))"));
+            assertEquals(2, r.params.size());
+            assertEquals("{tags}", r.params.get(0));
+            assertEquals("new", r.params.get(1));
+        }
+
+        @Test
+        void pushNumeric() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"$push\": {\"scores\": 42}}");
+            assertTrue(r.expr.contains("COALESCE(data->'scores', '[]'::jsonb) || to_jsonb(?::numeric)"));
+            assertEquals(2, r.params.size());
+            assertEquals("{scores}", r.params.get(0));
+            assertEquals("42", r.params.get(1));
+        }
+
+        @Test
+        void pullOperator() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"$pull\": {\"tags\": \"old\"}}");
+            assertTrue(r.expr.contains("jsonb_set(data, ?::text[]"));
+            assertTrue(r.expr.contains("SELECT jsonb_agg(elem) FROM jsonb_array_elements(data->'tags') AS elem"));
+            assertTrue(r.expr.contains("WHERE elem != to_jsonb(?::text)"));
+            assertEquals(2, r.params.size());
+            assertEquals("{tags}", r.params.get(0));
+            assertEquals("old", r.params.get(1));
+        }
+
+        @Test
+        void addToSetOperator() {
+            Utils.UpdateResult r = Utils.buildUpdate("{\"$addToSet\": {\"tags\": \"unique\"}}");
+            assertTrue(r.expr.contains("jsonb_set(data, ?::text[]"));
+            assertTrue(r.expr.contains("CASE WHEN COALESCE(data->'tags', '[]'::jsonb) @> to_jsonb(?::text)"));
+            assertTrue(r.expr.contains("ELSE COALESCE(data->'tags', '[]'::jsonb) || to_jsonb(?::text) END"));
+            assertEquals(3, r.params.size());
+            assertEquals("{tags}", r.params.get(0));
+            assertEquals("unique", r.params.get(1));
+            assertEquals("unique", r.params.get(2));
+        }
+
+        @Test
+        void combinedSetAndInc() {
+            Utils.UpdateResult r = Utils.buildUpdate(
+                "{\"$set\": {\"name\": \"bob\"}, \"$inc\": {\"visits\": 1}}");
+            assertTrue(r.expr.contains("|| ?::jsonb"));
+            assertTrue(r.expr.contains("jsonb_set("));
+            assertTrue(r.expr.contains("COALESCE((data->>'visits')::numeric, 0) + ?"));
+            assertEquals(3, r.params.size());
+        }
+
+        @Test
+        void emptyObjectReturnsPlainMerge() {
+            Utils.UpdateResult r = Utils.buildUpdate("{}");
+            assertEquals("data || ?::jsonb", r.expr);
+        }
+
+        @Test
+        void nullUpdateThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.buildUpdate(null));
+        }
+
+        @Test
+        void unsupportedOperatorThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.buildUpdate("{\"$unknown\": {\"x\": 1}}"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Update operators in doc* methods (integration-level)
+    // -------------------------------------------------------------------------
+
+    @Nested class UpdateOperatorIntegrationTest {
+
+        @Test
+        void docUpdateWithSet() throws SQLException {
+            allowUpdate(2);
+            int count = Utils.docUpdate(conn, "users",
+                "{\"active\": true}", "{\"$set\": {\"role\": \"admin\"}}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("SET data = (data || ?::jsonb), updated_at = NOW()"));
+            assertTrue(sql.contains("WHERE data @> ?::jsonb"));
+            verify(ps).setString(1, "{\"role\": \"admin\"}");
+            verify(ps).setString(2, "{\"active\": true}");
+            assertEquals(2, count);
+        }
+
+        @Test
+        void docUpdateOneWithInc() throws SQLException {
+            allowUpdate(1);
+            int count = Utils.docUpdateOne(conn, "users",
+                "{\"name\": \"alice\"}", "{\"$inc\": {\"score\": 10}}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("jsonb_set(data, ?::text[], to_jsonb(COALESCE((data->>'score')::numeric, 0) + ?))"));
+            assertTrue(sql.contains("WHERE id = (SELECT id FROM users WHERE data @> ?::jsonb LIMIT 1)"));
+            verify(ps).setString(1, "{score}");
+            verify(ps).setDouble(2, 10.0);
+            verify(ps).setString(3, "{\"name\": \"alice\"}");
+            assertEquals(1, count);
+        }
+
+        @Test
+        void docUpdateWithPush() throws SQLException {
+            allowUpdate(1);
+            Utils.docUpdate(conn, "users", "{\"name\": \"bob\"}",
+                "{\"$push\": {\"tags\": \"vip\"}}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("jsonb_set(data, ?::text[], COALESCE(data->'tags', '[]'::jsonb) || to_jsonb(?::text))"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // docFindOneAndUpdate
+    // -------------------------------------------------------------------------
+
+    @Nested class DocFindOneAndUpdateTest {
+
+        @Test
+        void sqlAndParams() throws SQLException {
+            singleRowResultSet("id", "data", "created_at", "updated_at");
+            when(rs.getObject(1)).thenReturn(1L);
+            when(rs.getObject(2)).thenReturn("{\"name\":\"alice\",\"score\":100}");
+
+            Map<String, Object> result = Utils.docFindOneAndUpdate(conn, "users",
+                "{\"name\":\"alice\"}", "{\"$inc\": {\"score\": 10}}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("UPDATE users SET data ="));
+            assertTrue(sql.contains("updated_at = NOW()"));
+            assertTrue(sql.contains("WHERE id = (SELECT id FROM users WHERE"));
+            assertTrue(sql.contains("LIMIT 1)"));
+            assertTrue(sql.contains("RETURNING id, data, created_at, updated_at"));
+            assertNotNull(result);
+            assertEquals(1L, result.get("id"));
+        }
+
+        @Test
+        void plainMergeUpdate() throws SQLException {
+            singleRowResultSet("id", "data", "created_at", "updated_at");
+            when(rs.getObject(1)).thenReturn(1L);
+
+            Utils.docFindOneAndUpdate(conn, "users",
+                "{\"name\":\"alice\"}", "{\"score\": 99}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("SET data = data || ?::jsonb"));
+            assertTrue(sql.contains("RETURNING id, data, created_at, updated_at"));
+        }
+
+        @Test
+        void returnsNullWhenNoMatch() throws SQLException {
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(false);
+
+            Map<String, Object> result = Utils.docFindOneAndUpdate(conn, "users",
+                "{\"name\":\"nobody\"}", "{\"x\": 1}");
+            assertNull(result);
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.docFindOneAndUpdate(conn, "bad table", "{}", "{}"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // docFindOneAndDelete
+    // -------------------------------------------------------------------------
+
+    @Nested class DocFindOneAndDeleteTest {
+
+        @Test
+        void sqlAndParams() throws SQLException {
+            singleRowResultSet("id", "data", "created_at", "updated_at");
+            when(rs.getObject(1)).thenReturn(42L);
+            when(rs.getObject(2)).thenReturn("{\"name\":\"bob\"}");
+
+            Map<String, Object> result = Utils.docFindOneAndDelete(conn, "users",
+                "{\"name\":\"bob\"}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("DELETE FROM users WHERE id ="));
+            assertTrue(sql.contains("SELECT id FROM users WHERE data @> ?::jsonb LIMIT 1"));
+            assertTrue(sql.contains("RETURNING id, data, created_at, updated_at"));
+            verify(ps).setString(1, "{\"name\":\"bob\"}");
+            assertNotNull(result);
+            assertEquals(42L, result.get("id"));
+        }
+
+        @Test
+        void returnsNullWhenNoMatch() throws SQLException {
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(false);
+
+            Map<String, Object> result = Utils.docFindOneAndDelete(conn, "users",
+                "{\"name\":\"nobody\"}");
+            assertNull(result);
+        }
+
+        @Test
+        void noFilterDeletesFirst() throws SQLException {
+            singleRowResultSet("id", "data", "created_at", "updated_at");
+            when(rs.getObject(1)).thenReturn(1L);
+
+            Utils.docFindOneAndDelete(conn, "users", null);
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("WHERE TRUE LIMIT 1"));
+            assertTrue(sql.contains("RETURNING"));
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.docFindOneAndDelete(conn, "1bad", "{}"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // docDistinct
+    // -------------------------------------------------------------------------
+
+    @Nested class DocDistinctTest {
+
+        @Test
+        void sqlWithFilter() throws SQLException {
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(true, true, false);
+            when(rs.getString(1)).thenReturn("admin", "user");
+
+            List<String> result = Utils.docDistinct(conn, "users", "role",
+                "{\"active\": true}");
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("SELECT DISTINCT data->>'role' FROM users"));
+            assertTrue(sql.contains("WHERE data->>'role' IS NOT NULL"));
+            assertTrue(sql.contains("AND data @> ?::jsonb"));
+            verify(ps).setString(1, "{\"active\": true}");
+            assertEquals(2, result.size());
+            assertEquals("admin", result.get(0));
+            assertEquals("user", result.get(1));
+        }
+
+        @Test
+        void sqlWithoutFilter() throws SQLException {
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(true, false);
+            when(rs.getString(1)).thenReturn("red");
+
+            List<String> result = Utils.docDistinct(conn, "items", "color", null);
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("SELECT DISTINCT data->>'color' FROM items"));
+            assertTrue(sql.contains("WHERE data->>'color' IS NOT NULL"));
+            assertFalse(sql.contains("AND"));
+            assertEquals(1, result.size());
+            assertEquals("red", result.get(0));
+        }
+
+        @Test
+        void nestedFieldPath() throws SQLException {
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(false);
+
+            Utils.docDistinct(conn, "users", "address.city", null);
+
+            verify(conn).prepareStatement(sqlCaptor.capture());
+            String sql = sqlCaptor.getValue();
+            assertTrue(sql.contains("SELECT DISTINCT data->'address'->>'city' FROM users"));
+            assertTrue(sql.contains("WHERE data->'address'->>'city' IS NOT NULL"));
+        }
+
+        @Test
+        void emptyResultReturnsEmptyList() throws SQLException {
+            when(conn.prepareStatement(anyString())).thenReturn(ps);
+            when(ps.executeQuery()).thenReturn(rs);
+            when(rs.next()).thenReturn(false);
+
+            List<String> result = Utils.docDistinct(conn, "users", "name", null);
+            assertTrue(result.isEmpty());
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                () -> Utils.docDistinct(conn, "bad table", "name", null));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Helper method unit tests
+    // -------------------------------------------------------------------------
+
+    @Nested class HelperMethodTest {
+
+        @Test
+        void fieldPathJsonSimple() {
+            assertEquals("data->'name'", Utils.fieldPathJson("name"));
+        }
+
+        @Test
+        void fieldPathJsonNested() {
+            assertEquals("data->'address'->'city'", Utils.fieldPathJson("address.city"));
+        }
+
+        @Test
+        void fieldPathJsonDeep() {
+            assertEquals("data->'a'->'b'->'c'", Utils.fieldPathJson("a.b.c"));
+        }
+
+        @Test
+        void jsonbPathSimple() {
+            assertEquals("{name}", Utils.jsonbPath("name"));
+        }
+
+        @Test
+        void jsonbPathNested() {
+            assertEquals("{address,city}", Utils.jsonbPath("address.city"));
+        }
+
+        @Test
+        void jsonbPathDeep() {
+            assertEquals("{a,b,c}", Utils.jsonbPath("a.b.c"));
+        }
+    }
 }

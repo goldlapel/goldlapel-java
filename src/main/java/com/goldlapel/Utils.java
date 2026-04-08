@@ -1234,12 +1234,27 @@ public class Utils {
     private static final Set<String> SUPPORTED_FILTER_OPS =
         Set.of("$gt", "$gte", "$lt", "$lte", "$eq", "$ne", "$in", "$nin", "$exists", "$regex");
 
+    private static final Set<String> LOGICAL_OPS = Set.of("$or", "$and", "$not");
+
+    private static final Set<String> UPDATE_OPS =
+        Set.of("$set", "$unset", "$inc", "$mul", "$rename", "$push", "$pull", "$addToSet");
+
     static class FilterResult {
         final String whereClause;
         final List<Object> params;
 
         FilterResult(String whereClause, List<Object> params) {
             this.whereClause = whereClause;
+            this.params = params;
+        }
+    }
+
+    static class UpdateResult {
+        final String expr;
+        final List<Object> params;
+
+        UpdateResult(String expr, List<Object> params) {
+            this.expr = expr;
             this.params = params;
         }
     }
@@ -1262,6 +1277,77 @@ public class Utils {
         return sb.toString();
     }
 
+    static String fieldPathJson(String key) {
+        String[] parts = key.split("\\.");
+        for (String part : parts) {
+            if (!FIELD_PART_RE.matcher(part).matches()) {
+                throw new IllegalArgumentException("Invalid field key: " + key);
+            }
+        }
+        StringBuilder sb = new StringBuilder("data");
+        for (String part : parts) {
+            sb.append("->'").append(part).append("'");
+        }
+        return sb.toString();
+    }
+
+    static String jsonbPath(String key) {
+        String[] parts = key.split("\\.");
+        for (String part : parts) {
+            if (!FIELD_PART_RE.matcher(part).matches()) {
+                throw new IllegalArgumentException("Invalid field key: " + key);
+            }
+        }
+        return "{" + String.join(",", parts) + "}";
+    }
+
+    private static String[] toJsonbExpr(String value) {
+        value = value.trim();
+        if (value.equals("true") || value.equals("false")) {
+            return new String[]{"to_jsonb(?::boolean)", value};
+        } else if (isNumericLiteral(value)) {
+            return new String[]{"to_jsonb(?::numeric)", value};
+        } else if (value.startsWith("\"") && value.endsWith("\"")) {
+            return new String[]{"to_jsonb(?::text)", unquote(value)};
+        } else {
+            // JSON object/array — pass as jsonb
+            return new String[]{"?::jsonb", value};
+        }
+    }
+
+    private static List<String> parseJsonObjectArray(String s) {
+        s = s.trim();
+        if (!s.startsWith("[") || !s.endsWith("]")) {
+            throw new IllegalArgumentException("Expected JSON array: " + s);
+        }
+        String inner = s.substring(1, s.length() - 1).trim();
+        if (inner.isEmpty()) {
+            return new ArrayList<>();
+        }
+        List<String> objects = new ArrayList<>();
+        int depth = 0;
+        int start = -1;
+        boolean inString = false;
+        for (int i = 0; i < inner.length(); i++) {
+            char c = inner.charAt(i);
+            if (c == '"' && (i == 0 || inner.charAt(i - 1) != '\\')) {
+                inString = !inString;
+            } else if (!inString) {
+                if (c == '{') {
+                    if (depth == 0) start = i;
+                    depth++;
+                } else if (c == '}') {
+                    depth--;
+                    if (depth == 0 && start >= 0) {
+                        objects.add(inner.substring(start, i + 1));
+                        start = -1;
+                    }
+                }
+            }
+        }
+        return objects;
+    }
+
     static FilterResult buildFilter(String filterJson) {
         if (filterJson == null || filterJson.trim().isEmpty()) {
             return new FilterResult("", new ArrayList<>());
@@ -1277,10 +1363,17 @@ public class Utils {
 
         List<String[]> pairs = splitKeyValuePairs(body);
 
-        // Fast path: if no values contain operator keys, treat the entire
-        // filter as a JSONB containment query and pass through the original string
+        // Fast path: if no values contain operator keys and no logical operators,
+        // treat the entire filter as a JSONB containment query and pass through the original string
         boolean hasOperators = false;
+        boolean hasLogical = false;
         for (String[] kv : pairs) {
+            String key = kv[0].trim().replaceAll("^\"|\"$", "");
+            if (LOGICAL_OPS.contains(key)) {
+                hasLogical = true;
+                hasOperators = true;
+                break;
+            }
             String val = kv[1].trim();
             if (val.startsWith("{") && hasOperatorKeys(val)) {
                 hasOperators = true;
@@ -1319,7 +1412,36 @@ public class Utils {
             String key = kv[0].trim().replaceAll("^\"|\"$", "");
             String val = kv[1].trim();
 
-            if (val.startsWith("{") && hasOperatorKeys(val)) {
+            if (LOGICAL_OPS.contains(key)) {
+                if (key.equals("$not")) {
+                    if (!val.startsWith("{")) {
+                        throw new IllegalArgumentException("$not value must be a filter object");
+                    }
+                    FilterResult sub = buildFilter(val);
+                    if (!sub.whereClause.isEmpty()) {
+                        clauses.add("NOT (" + sub.whereClause + ")");
+                        params.addAll(sub.params);
+                    }
+                } else {
+                    // $or / $and
+                    List<String> subObjects = parseJsonObjectArray(val);
+                    if (subObjects.isEmpty()) {
+                        throw new IllegalArgumentException(key + " value must be a non-empty array");
+                    }
+                    String joiner = key.equals("$or") ? " OR " : " AND ";
+                    List<String> subClauses = new ArrayList<>();
+                    for (String subObj : subObjects) {
+                        FilterResult sub = buildFilter(subObj);
+                        if (!sub.whereClause.isEmpty()) {
+                            subClauses.add(sub.whereClause);
+                            params.addAll(sub.params);
+                        }
+                    }
+                    if (!subClauses.isEmpty()) {
+                        clauses.add("(" + String.join(joiner, subClauses) + ")");
+                    }
+                }
+            } else if (val.startsWith("{") && hasOperatorKeys(val)) {
                 String fieldExpr = fieldPath(key);
                 List<String[]> opPairs = splitKeyValuePairs(
                     val.substring(1, val.length() - 1).trim());
@@ -1517,6 +1639,214 @@ public class Utils {
         return sb.toString();
     }
 
+    static UpdateResult buildUpdate(String updateJson) {
+        if (updateJson == null || updateJson.trim().isEmpty()) {
+            throw new IllegalArgumentException("Update must not be null or empty");
+        }
+        String s = updateJson.trim();
+        if (!s.startsWith("{") || !s.endsWith("}")) {
+            throw new IllegalArgumentException("Update must be a JSON object");
+        }
+        String body = s.substring(1, s.length() - 1).trim();
+        if (body.isEmpty()) {
+            return new UpdateResult("data || ?::jsonb", List.of(s));
+        }
+
+        List<String[]> pairs = splitKeyValuePairs(body);
+
+        // Check if any top-level key starts with $
+        boolean hasUpdateOps = false;
+        for (String[] kv : pairs) {
+            String key = kv[0].trim().replaceAll("^\"|\"$", "");
+            if (key.startsWith("$")) {
+                hasUpdateOps = true;
+                break;
+            }
+        }
+
+        if (!hasUpdateOps) {
+            // Plain merge: data || update::jsonb
+            return new UpdateResult("data || ?::jsonb", List.of(s));
+        }
+
+        String expr = "data";
+        List<Object> params = new ArrayList<>();
+
+        for (String[] kv : pairs) {
+            String opKey = kv[0].trim().replaceAll("^\"|\"$", "");
+            String opVal = kv[1].trim();
+
+            if (!UPDATE_OPS.contains(opKey)) {
+                throw new IllegalArgumentException("Unsupported update operator: " + opKey);
+            }
+
+            switch (opKey) {
+                case "$set": {
+                    expr = "(" + expr + " || ?::jsonb)";
+                    params.add(opVal);
+                    break;
+                }
+                case "$unset": {
+                    // opVal is an object like {"field1": "", "field2": ""}
+                    if (!opVal.startsWith("{") || !opVal.endsWith("}")) {
+                        throw new IllegalArgumentException("$unset value must be an object");
+                    }
+                    List<String[]> unsetPairs = splitKeyValuePairs(
+                        opVal.substring(1, opVal.length() - 1).trim());
+                    for (String[] up : unsetPairs) {
+                        String field = up[0].trim().replaceAll("^\"|\"$", "");
+                        String[] parts = field.split("\\.");
+                        for (String part : parts) {
+                            if (!FIELD_PART_RE.matcher(part).matches()) {
+                                throw new IllegalArgumentException("Invalid field key: " + field);
+                            }
+                        }
+                        if (parts.length == 1) {
+                            expr = "(" + expr + " - ?)";
+                            params.add(field);
+                        } else {
+                            String path = "{" + String.join(",", parts) + "}";
+                            expr = "(" + expr + " #- ?::text[])";
+                            params.add(path);
+                        }
+                    }
+                    break;
+                }
+                case "$inc": {
+                    if (!opVal.startsWith("{") || !opVal.endsWith("}")) {
+                        throw new IllegalArgumentException("$inc value must be an object");
+                    }
+                    List<String[]> incPairs = splitKeyValuePairs(
+                        opVal.substring(1, opVal.length() - 1).trim());
+                    for (String[] ip : incPairs) {
+                        String field = ip[0].trim().replaceAll("^\"|\"$", "");
+                        String amount = ip[1].trim();
+                        String jp = jsonbPath(field);
+                        String fp = fieldPath(field);
+                        expr = "jsonb_set(" + expr + ", ?::text[], to_jsonb(COALESCE((" + fp + ")::numeric, 0) + ?))";
+                        params.add(jp);
+                        params.add(Double.parseDouble(amount));
+                    }
+                    break;
+                }
+                case "$mul": {
+                    if (!opVal.startsWith("{") || !opVal.endsWith("}")) {
+                        throw new IllegalArgumentException("$mul value must be an object");
+                    }
+                    List<String[]> mulPairs = splitKeyValuePairs(
+                        opVal.substring(1, opVal.length() - 1).trim());
+                    for (String[] mp : mulPairs) {
+                        String field = mp[0].trim().replaceAll("^\"|\"$", "");
+                        String factor = mp[1].trim();
+                        String jp = jsonbPath(field);
+                        String fp = fieldPath(field);
+                        expr = "jsonb_set(" + expr + ", ?::text[], to_jsonb(COALESCE((" + fp + ")::numeric, 0) * ?))";
+                        params.add(jp);
+                        params.add(Double.parseDouble(factor));
+                    }
+                    break;
+                }
+                case "$rename": {
+                    if (!opVal.startsWith("{") || !opVal.endsWith("}")) {
+                        throw new IllegalArgumentException("$rename value must be an object");
+                    }
+                    List<String[]> renamePairs = splitKeyValuePairs(
+                        opVal.substring(1, opVal.length() - 1).trim());
+                    for (String[] rp : renamePairs) {
+                        String oldName = rp[0].trim().replaceAll("^\"|\"$", "");
+                        String newName = rp[1].trim().replaceAll("^\"|\"$", "");
+                        for (String part : oldName.split("\\.")) {
+                            if (!FIELD_PART_RE.matcher(part).matches()) {
+                                throw new IllegalArgumentException("Invalid field key: " + oldName);
+                            }
+                        }
+                        for (String part : newName.split("\\.")) {
+                            if (!FIELD_PART_RE.matcher(part).matches()) {
+                                throw new IllegalArgumentException("Invalid field key: " + newName);
+                            }
+                        }
+                        String oldJson = fieldPathJson(oldName);
+                        String newJp = jsonbPath(newName);
+                        if (oldName.contains(".")) {
+                            String oldPath = "{" + String.join(",", oldName.split("\\.")) + "}";
+                            expr = "jsonb_set((" + expr + " #- ?::text[]), ?::text[], " + oldJson + ")";
+                            params.add(oldPath);
+                            params.add(newJp);
+                        } else {
+                            expr = "jsonb_set((" + expr + " - ?), ?::text[], " + oldJson + ")";
+                            params.add(oldName);
+                            params.add(newJp);
+                        }
+                    }
+                    break;
+                }
+                case "$push": {
+                    if (!opVal.startsWith("{") || !opVal.endsWith("}")) {
+                        throw new IllegalArgumentException("$push value must be an object");
+                    }
+                    List<String[]> pushPairs = splitKeyValuePairs(
+                        opVal.substring(1, opVal.length() - 1).trim());
+                    for (String[] pp : pushPairs) {
+                        String field = pp[0].trim().replaceAll("^\"|\"$", "");
+                        String value = pp[1].trim();
+                        String jp = jsonbPath(field);
+                        String fj = fieldPathJson(field);
+                        String[] valExpr = toJsonbExpr(value);
+                        expr = "jsonb_set(" + expr + ", ?::text[], COALESCE(" + fj + ", '[]'::jsonb) || " + valExpr[0] + ")";
+                        params.add(jp);
+                        params.add(valExpr[1]);
+                    }
+                    break;
+                }
+                case "$pull": {
+                    if (!opVal.startsWith("{") || !opVal.endsWith("}")) {
+                        throw new IllegalArgumentException("$pull value must be an object");
+                    }
+                    List<String[]> pullPairs = splitKeyValuePairs(
+                        opVal.substring(1, opVal.length() - 1).trim());
+                    for (String[] pp : pullPairs) {
+                        String field = pp[0].trim().replaceAll("^\"|\"$", "");
+                        String value = pp[1].trim();
+                        String jp = jsonbPath(field);
+                        String fj = fieldPathJson(field);
+                        String[] valExpr = toJsonbExpr(value);
+                        expr = "jsonb_set(" + expr + ", ?::text[], " +
+                            "COALESCE((SELECT jsonb_agg(elem) FROM jsonb_array_elements(" + fj + ") AS elem " +
+                            "WHERE elem != " + valExpr[0] + "), '[]'::jsonb))";
+                        params.add(jp);
+                        params.add(valExpr[1]);
+                    }
+                    break;
+                }
+                case "$addToSet": {
+                    if (!opVal.startsWith("{") || !opVal.endsWith("}")) {
+                        throw new IllegalArgumentException("$addToSet value must be an object");
+                    }
+                    List<String[]> asPairs = splitKeyValuePairs(
+                        opVal.substring(1, opVal.length() - 1).trim());
+                    for (String[] ap : asPairs) {
+                        String field = ap[0].trim().replaceAll("^\"|\"$", "");
+                        String value = ap[1].trim();
+                        String jp = jsonbPath(field);
+                        String fj = fieldPathJson(field);
+                        String[] valExpr = toJsonbExpr(value);
+                        expr = "jsonb_set(" + expr + ", ?::text[], " +
+                            "CASE WHEN COALESCE(" + fj + ", '[]'::jsonb) @> " + valExpr[0] + " " +
+                            "THEN " + fj + " " +
+                            "ELSE COALESCE(" + fj + ", '[]'::jsonb) || " + valExpr[0] + " END)";
+                        params.add(jp);
+                        // $addToSet uses the value expression 3 times but only needs params for ? placeholders
+                        params.add(valExpr[1]);
+                        params.add(valExpr[1]);
+                    }
+                    break;
+                }
+            }
+        }
+
+        return new UpdateResult(expr, params);
+    }
+
     private static void setFilterParam(PreparedStatement ps, int idx, Object param) throws SQLException {
         if (param instanceof Double) {
             ps.setDouble(idx, (Double) param);
@@ -1685,21 +2015,25 @@ public class Utils {
 
     /**
      * Update documents matching a filter. Like MongoDB updateMany().
-     * updateJson is merged into matching documents using || (JSONB concatenation).
+     * Supports MongoDB-style update operators ($set, $inc, $unset, $mul, $rename,
+     * $push, $pull, $addToSet) as well as plain merge (JSONB concatenation).
      * Returns the number of updated rows.
      */
     public static int docUpdate(Connection conn, String collection, String filterJson,
             String updateJson) throws SQLException {
         validateIdentifier(collection);
         FilterResult filter = buildFilter(filterJson);
+        UpdateResult update = buildUpdate(updateJson);
         StringBuilder sql = new StringBuilder(
-            "UPDATE " + collection + " SET data = data || ?::jsonb, updated_at = NOW()");
+            "UPDATE " + collection + " SET data = " + update.expr + ", updated_at = NOW()");
         if (!filter.whereClause.isEmpty()) {
             sql.append(" WHERE ").append(filter.whereClause);
         }
         try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             int idx = 1;
-            ps.setString(idx++, updateJson);
+            for (Object param : update.params) {
+                setFilterParam(ps, idx++, param);
+            }
             for (Object param : filter.params) {
                 setFilterParam(ps, idx++, param);
             }
@@ -1709,19 +2043,23 @@ public class Utils {
 
     /**
      * Update one document matching a filter. Like MongoDB updateOne().
-     * updateJson is merged into the first matching document using || (JSONB concatenation).
+     * Supports MongoDB-style update operators ($set, $inc, $unset, $mul, $rename,
+     * $push, $pull, $addToSet) as well as plain merge (JSONB concatenation).
      * Returns the number of updated rows (0 or 1).
      */
     public static int docUpdateOne(Connection conn, String collection, String filterJson,
             String updateJson) throws SQLException {
         validateIdentifier(collection);
         FilterResult filter = buildFilter(filterJson);
+        UpdateResult update = buildUpdate(updateJson);
         String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
-        String sql = "UPDATE " + collection + " SET data = data || ?::jsonb, updated_at = NOW() " +
+        String sql = "UPDATE " + collection + " SET data = " + update.expr + ", updated_at = NOW() " +
             "WHERE id = (SELECT id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1)";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int idx = 1;
-            ps.setString(idx++, updateJson);
+            for (Object param : update.params) {
+                setFilterParam(ps, idx++, param);
+            }
             for (Object param : filter.params) {
                 setFilterParam(ps, idx++, param);
             }
@@ -1767,6 +2105,93 @@ public class Utils {
                 setFilterParam(ps, idx++, param);
             }
             return ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Find one document, update it, and return the updated document.
+     * Like MongoDB findOneAndUpdate().
+     * Returns the updated row, or null if no match found.
+     */
+    public static Map<String, Object> docFindOneAndUpdate(Connection conn, String collection,
+            String filterJson, String updateJson) throws SQLException {
+        validateIdentifier(collection);
+        FilterResult filter = buildFilter(filterJson);
+        UpdateResult update = buildUpdate(updateJson);
+        String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
+        String sql = "UPDATE " + collection + " SET data = " + update.expr + ", updated_at = NOW() " +
+            "WHERE id = (SELECT id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1) " +
+            "RETURNING id, data, created_at, updated_at";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int idx = 1;
+            for (Object param : update.params) {
+                setFilterParam(ps, idx++, param);
+            }
+            for (Object param : filter.params) {
+                setFilterParam(ps, idx++, param);
+            }
+            ResultSet rs = ps.executeQuery();
+            if (!rs.next()) {
+                return null;
+            }
+            return rowToMap(rs);
+        }
+    }
+
+    /**
+     * Find one document, delete it, and return the deleted document.
+     * Like MongoDB findOneAndDelete().
+     * Returns the deleted row, or null if no match found.
+     */
+    public static Map<String, Object> docFindOneAndDelete(Connection conn, String collection,
+            String filterJson) throws SQLException {
+        validateIdentifier(collection);
+        FilterResult filter = buildFilter(filterJson);
+        String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
+        String sql = "DELETE FROM " + collection + " WHERE id = " +
+            "(SELECT id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1) " +
+            "RETURNING id, data, created_at, updated_at";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int idx = 1;
+            for (Object param : filter.params) {
+                setFilterParam(ps, idx++, param);
+            }
+            ResultSet rs = ps.executeQuery();
+            if (!rs.next()) {
+                return null;
+            }
+            return rowToMap(rs);
+        }
+    }
+
+    /**
+     * Get distinct values for a field across documents. Like MongoDB distinct().
+     * Returns a list of distinct string values, excluding nulls.
+     * Optional filterJson restricts which documents are considered.
+     */
+    public static List<String> docDistinct(Connection conn, String collection,
+            String field, String filterJson) throws SQLException {
+        validateIdentifier(collection);
+        String fieldExpr = fieldPath(field);
+        FilterResult filter = buildFilter(filterJson);
+        StringBuilder sql = new StringBuilder("SELECT DISTINCT " + fieldExpr + " FROM " + collection);
+        List<String> whereParts = new ArrayList<>();
+        whereParts.add(fieldExpr + " IS NOT NULL");
+        if (!filter.whereClause.isEmpty()) {
+            whereParts.add(filter.whereClause);
+        }
+        sql.append(" WHERE ").append(String.join(" AND ", whereParts));
+        try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            for (Object param : filter.params) {
+                setFilterParam(ps, idx++, param);
+            }
+            ResultSet rs = ps.executeQuery();
+            List<String> results = new ArrayList<>();
+            while (rs.next()) {
+                results.add(rs.getString(1));
+            }
+            return results;
         }
     }
 
