@@ -21,6 +21,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.util.function.BiConsumer;
 
 public class GoldLapel {
 
@@ -78,6 +80,7 @@ public class GoldLapel {
     private Process process;
     private String proxyUrl;
     Connection wrappedConn;
+    private Connection instanceConn;
 
     public GoldLapel(String upstream) {
         this(upstream, new Options());
@@ -161,6 +164,19 @@ public class GoldLapel {
 
         proxyUrl = makeProxyUrl(upstream, port);
 
+        try {
+            String jdbcUrl = proxyUrl;
+            if (jdbcUrl.startsWith("postgres://")) {
+                jdbcUrl = "jdbc:postgresql://" + jdbcUrl.substring("postgres://".length());
+            } else if (jdbcUrl.startsWith("postgresql://")) {
+                jdbcUrl = "jdbc:postgresql://" + jdbcUrl.substring("postgresql://".length());
+            }
+            instanceConn = DriverManager.getConnection(jdbcUrl);
+        } catch (SQLException e) {
+            // Connection creation is best-effort; callers can still use proxyUrl directly
+            instanceConn = null;
+        }
+
         if (dashboardPort > 0) {
             System.out.println("goldlapel → :" + port + " (proxy) | http://127.0.0.1:" + dashboardPort + " (dashboard)");
         } else {
@@ -171,6 +187,10 @@ public class GoldLapel {
     }
 
     public void stopProxy() {
+        if (instanceConn != null) {
+            try { instanceConn.close(); } catch (SQLException ignored) {}
+            instanceConn = null;
+        }
         Process proc = process;
         process = null;
         proxyUrl = null;
@@ -205,6 +225,303 @@ public class GoldLapel {
 
     public boolean isRunning() {
         return process != null && process.isAlive();
+    }
+
+    public Connection connection() {
+        if (instanceConn == null) {
+            throw new IllegalStateException(
+                "No connection available. Call startProxy() first, and ensure a PostgreSQL JDBC driver is on the classpath.");
+        }
+        return instanceConn;
+    }
+
+    private Connection requireConn() {
+        return connection();
+    }
+
+    // ── Instance methods (delegate to Utils with stored connection) ─────
+
+    // Document store
+
+    public Map<String, Object> docInsert(String collection, String documentJson) throws SQLException {
+        return Utils.docInsert(requireConn(), collection, documentJson);
+    }
+
+    public List<Map<String, Object>> docInsertMany(String collection, List<String> documents) throws SQLException {
+        return Utils.docInsertMany(requireConn(), collection, documents);
+    }
+
+    public List<Map<String, Object>> docFind(String collection, String filterJson,
+            String sortJson, Integer limit, Integer skip) throws SQLException {
+        return Utils.docFind(requireConn(), collection, filterJson, sortJson, limit, skip);
+    }
+
+    public Map<String, Object> docFindOne(String collection, String filterJson) throws SQLException {
+        return Utils.docFindOne(requireConn(), collection, filterJson);
+    }
+
+    public int docUpdate(String collection, String filterJson, String updateJson) throws SQLException {
+        return Utils.docUpdate(requireConn(), collection, filterJson, updateJson);
+    }
+
+    public int docUpdateOne(String collection, String filterJson, String updateJson) throws SQLException {
+        return Utils.docUpdateOne(requireConn(), collection, filterJson, updateJson);
+    }
+
+    public int docDelete(String collection, String filterJson) throws SQLException {
+        return Utils.docDelete(requireConn(), collection, filterJson);
+    }
+
+    public int docDeleteOne(String collection, String filterJson) throws SQLException {
+        return Utils.docDeleteOne(requireConn(), collection, filterJson);
+    }
+
+    public long docCount(String collection, String filterJson) throws SQLException {
+        return Utils.docCount(requireConn(), collection, filterJson);
+    }
+
+    public void docCreateIndex(String collection, List<String> keys) throws SQLException {
+        Utils.docCreateIndex(requireConn(), collection, keys);
+    }
+
+    public List<Map<String, Object>> docAggregate(String collection, String pipelineJson) throws SQLException {
+        return Utils.docAggregate(requireConn(), collection, pipelineJson);
+    }
+
+    // Search
+
+    public List<Map<String, Object>> search(String table, String column, String query,
+            int limit, String lang, boolean highlight) throws SQLException {
+        return Utils.search(requireConn(), table, column, query, limit, lang, highlight);
+    }
+
+    public List<Map<String, Object>> search(String table, String[] columns, String query,
+            int limit, String lang, boolean highlight) throws SQLException {
+        return Utils.search(requireConn(), table, columns, query, limit, lang, highlight);
+    }
+
+    public List<Map<String, Object>> searchFuzzy(String table, String column, String query,
+            int limit, double threshold) throws SQLException {
+        return Utils.searchFuzzy(requireConn(), table, column, query, limit, threshold);
+    }
+
+    public List<Map<String, Object>> searchPhonetic(String table, String column, String query,
+            int limit) throws SQLException {
+        return Utils.searchPhonetic(requireConn(), table, column, query, limit);
+    }
+
+    public List<Map<String, Object>> similar(String table, String column, double[] vector,
+            int limit) throws SQLException {
+        return Utils.similar(requireConn(), table, column, vector, limit);
+    }
+
+    public List<Map<String, Object>> suggest(String table, String column, String prefix,
+            int limit) throws SQLException {
+        return Utils.suggest(requireConn(), table, column, prefix, limit);
+    }
+
+    public List<Map<String, Object>> facets(String table, String column, int limit) throws SQLException {
+        return Utils.facets(requireConn(), table, column, limit);
+    }
+
+    public List<Map<String, Object>> facets(String table, String column, int limit,
+            String query, String queryColumn, String lang) throws SQLException {
+        return Utils.facets(requireConn(), table, column, limit, query, queryColumn, lang);
+    }
+
+    public List<Map<String, Object>> facets(String table, String column, int limit,
+            String query, String[] queryColumns, String lang) throws SQLException {
+        return Utils.facets(requireConn(), table, column, limit, query, queryColumns, lang);
+    }
+
+    public List<Map<String, Object>> aggregate(String table, String column, String func) throws SQLException {
+        return Utils.aggregate(requireConn(), table, column, func);
+    }
+
+    public List<Map<String, Object>> aggregate(String table, String column, String func,
+            String groupBy, int limit) throws SQLException {
+        return Utils.aggregate(requireConn(), table, column, func, groupBy, limit);
+    }
+
+    public void createSearchConfig(String name) throws SQLException {
+        Utils.createSearchConfig(requireConn(), name);
+    }
+
+    public void createSearchConfig(String name, String copyFrom) throws SQLException {
+        Utils.createSearchConfig(requireConn(), name, copyFrom);
+    }
+
+    // PubSub and queues
+
+    public void publish(String channel, String message) throws SQLException {
+        Utils.publish(requireConn(), channel, message);
+    }
+
+    public Thread subscribe(String channel, BiConsumer<String, String> callback) throws SQLException {
+        return Utils.subscribe(requireConn(), channel, callback);
+    }
+
+    public Thread subscribe(String channel, BiConsumer<String, String> callback,
+            boolean blocking) throws SQLException {
+        return Utils.subscribe(requireConn(), channel, callback, blocking);
+    }
+
+    public void enqueue(String queueTable, String payloadJson) throws SQLException {
+        Utils.enqueue(requireConn(), queueTable, payloadJson);
+    }
+
+    public String dequeue(String queueTable) throws SQLException {
+        return Utils.dequeue(requireConn(), queueTable);
+    }
+
+    // Counters
+
+    public long incr(String table, String key, long amount) throws SQLException {
+        return Utils.incr(requireConn(), table, key, amount);
+    }
+
+    public long getCounter(String table, String key) throws SQLException {
+        return Utils.getCounter(requireConn(), table, key);
+    }
+
+    // Hashes
+
+    public void hset(String table, String key, String field, String valueJson) throws SQLException {
+        Utils.hset(requireConn(), table, key, field, valueJson);
+    }
+
+    public String hget(String table, String key, String field) throws SQLException {
+        return Utils.hget(requireConn(), table, key, field);
+    }
+
+    public String hgetall(String table, String key) throws SQLException {
+        return Utils.hgetall(requireConn(), table, key);
+    }
+
+    public boolean hdel(String table, String key, String field) throws SQLException {
+        return Utils.hdel(requireConn(), table, key, field);
+    }
+
+    // Sorted sets
+
+    public void zadd(String table, String member, double score) throws SQLException {
+        Utils.zadd(requireConn(), table, member, score);
+    }
+
+    public double zincrby(String table, String member, double amount) throws SQLException {
+        return Utils.zincrby(requireConn(), table, member, amount);
+    }
+
+    public List<Map.Entry<String, Double>> zrange(String table, int start, int stop,
+            boolean desc) throws SQLException {
+        return Utils.zrange(requireConn(), table, start, stop, desc);
+    }
+
+    public Long zrank(String table, String member, boolean desc) throws SQLException {
+        return Utils.zrank(requireConn(), table, member, desc);
+    }
+
+    public Double zscore(String table, String member) throws SQLException {
+        return Utils.zscore(requireConn(), table, member);
+    }
+
+    public boolean zrem(String table, String member) throws SQLException {
+        return Utils.zrem(requireConn(), table, member);
+    }
+
+    // Geo
+
+    public List<Map<String, Object>> georadius(String table, String geomColumn, double lon,
+            double lat, double radiusMeters, int limit) throws SQLException {
+        return Utils.georadius(requireConn(), table, geomColumn, lon, lat, radiusMeters, limit);
+    }
+
+    public void geoadd(String table, String nameColumn, String geomColumn, String name,
+            double lon, double lat) throws SQLException {
+        Utils.geoadd(requireConn(), table, nameColumn, geomColumn, name, lon, lat);
+    }
+
+    public Double geodist(String table, String geomColumn, String nameColumn,
+            String nameA, String nameB) throws SQLException {
+        return Utils.geodist(requireConn(), table, geomColumn, nameColumn, nameA, nameB);
+    }
+
+    // Misc
+
+    public long countDistinct(String table, String column) throws SQLException {
+        return Utils.countDistinct(requireConn(), table, column);
+    }
+
+    public String script(String luaCode, String... args) throws SQLException {
+        return Utils.script(requireConn(), luaCode, args);
+    }
+
+    // Streams
+
+    public long streamAdd(String stream, String payload) throws SQLException {
+        return Utils.streamAdd(requireConn(), stream, payload);
+    }
+
+    public void streamCreateGroup(String stream, String group) throws SQLException {
+        Utils.streamCreateGroup(requireConn(), stream, group);
+    }
+
+    public List<Map<String, Object>> streamRead(String stream, String group,
+            String consumer, int count) throws SQLException {
+        return Utils.streamRead(requireConn(), stream, group, consumer, count);
+    }
+
+    public boolean streamAck(String stream, String group, long messageId) throws SQLException {
+        return Utils.streamAck(requireConn(), stream, group, messageId);
+    }
+
+    public List<Map<String, Object>> streamClaim(String stream, String group,
+            String consumer, long minIdleMs) throws SQLException {
+        return Utils.streamClaim(requireConn(), stream, group, consumer, minIdleMs);
+    }
+
+    // Percolator
+
+    public void percolateAdd(String name, String queryId, String query) throws SQLException {
+        Utils.percolateAdd(requireConn(), name, queryId, query);
+    }
+
+    public void percolateAdd(String name, String queryId, String query,
+            String lang, String metadataJson) throws SQLException {
+        Utils.percolateAdd(requireConn(), name, queryId, query, lang, metadataJson);
+    }
+
+    public List<Map<String, Object>> percolate(String name, String text) throws SQLException {
+        return Utils.percolate(requireConn(), name, text);
+    }
+
+    public List<Map<String, Object>> percolate(String name, String text,
+            int limit, String lang) throws SQLException {
+        return Utils.percolate(requireConn(), name, text, limit, lang);
+    }
+
+    public boolean percolateDelete(String name, String queryId) throws SQLException {
+        return Utils.percolateDelete(requireConn(), name, queryId);
+    }
+
+    // Analysis
+
+    public List<Map<String, Object>> analyze(String text) throws SQLException {
+        return Utils.analyze(requireConn(), text);
+    }
+
+    public List<Map<String, Object>> analyze(String text, String lang) throws SQLException {
+        return Utils.analyze(requireConn(), text, lang);
+    }
+
+    public Map<String, Object> explainScore(String table, String column, String query,
+            String idColumn, Object idValue) throws SQLException {
+        return Utils.explainScore(requireConn(), table, column, query, idColumn, idValue);
+    }
+
+    public Map<String, Object> explainScore(String table, String column, String query,
+            String idColumn, Object idValue, String lang) throws SQLException {
+        return Utils.explainScore(requireConn(), table, column, query, idColumn, idValue, lang);
     }
 
     public static Set<String> configKeys() {
