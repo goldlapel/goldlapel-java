@@ -1218,4 +1218,277 @@ public class Utils {
             return row;
         }
     }
+
+    // =========================================================================
+    // Document store (MongoDB-like CRUD on JSONB)
+    // =========================================================================
+
+    private static void ensureCollection(Connection conn, String collection) throws SQLException {
+        validateIdentifier(collection);
+        try (Statement st = conn.createStatement()) {
+            st.execute(
+                "CREATE TABLE IF NOT EXISTS " + collection + " (" +
+                "id BIGSERIAL PRIMARY KEY, " +
+                "data JSONB NOT NULL, " +
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), " +
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+            );
+        }
+    }
+
+    private static Map<String, Object> rowToMap(ResultSet rs) throws SQLException {
+        ResultSetMetaData meta = rs.getMetaData();
+        int colCount = meta.getColumnCount();
+        Map<String, Object> row = new LinkedHashMap<>();
+        for (int i = 1; i <= colCount; i++) {
+            row.put(meta.getColumnLabel(i), rs.getObject(i));
+        }
+        return row;
+    }
+
+    /**
+     * Insert a document into a collection. Like MongoDB insertOne().
+     * Creates the collection table if it doesn't exist.
+     * Returns the inserted row (id, data, created_at, updated_at).
+     */
+    public static Map<String, Object> docInsert(Connection conn, String collection,
+            String documentJson) throws SQLException {
+        ensureCollection(conn, collection);
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO " + collection + " (data) VALUES (?::jsonb) " +
+                "RETURNING id, data, created_at, updated_at")) {
+            ps.setString(1, documentJson);
+            ResultSet rs = ps.executeQuery();
+            rs.next();
+            return rowToMap(rs);
+        }
+    }
+
+    /**
+     * Insert multiple documents into a collection. Like MongoDB insertMany().
+     * Creates the collection table if it doesn't exist.
+     * Returns the list of inserted rows.
+     */
+    public static List<Map<String, Object>> docInsertMany(Connection conn, String collection,
+            List<String> documents) throws SQLException {
+        ensureCollection(conn, collection);
+        List<Map<String, Object>> results = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO " + collection + " (data) VALUES (?::jsonb) " +
+                "RETURNING id, data, created_at, updated_at")) {
+            for (String doc : documents) {
+                ps.setString(1, doc);
+                ResultSet rs = ps.executeQuery();
+                rs.next();
+                results.add(rowToMap(rs));
+            }
+        }
+        return results;
+    }
+
+    /**
+     * Parse a MongoDB-like sort JSON object into an ORDER BY clause.
+     * Input: {"name": 1, "age": -1} => "data->>'name' ASC, data->>'age' DESC"
+     * Each key must be a valid identifier. Values: 1 for ASC, -1 for DESC.
+     * Returns empty string if sortJson is null or empty.
+     */
+    static String parseSortClause(String sortJson) {
+        if (sortJson == null || sortJson.trim().isEmpty()) {
+            return "";
+        }
+        // Minimal JSON object parser for {"key": 1, "key2": -1}
+        String body = sortJson.trim();
+        if (!body.startsWith("{") || !body.endsWith("}")) {
+            throw new IllegalArgumentException("Sort must be a JSON object");
+        }
+        body = body.substring(1, body.length() - 1).trim();
+        if (body.isEmpty()) {
+            return "";
+        }
+        StringBuilder orderBy = new StringBuilder();
+        String[] pairs = body.split(",");
+        for (String pair : pairs) {
+            String[] kv = pair.split(":");
+            if (kv.length != 2) {
+                throw new IllegalArgumentException("Invalid sort entry: " + pair.trim());
+            }
+            String key = kv[0].trim().replaceAll("^\"|\"$", "");
+            validateIdentifier(key);
+            int dir = Integer.parseInt(kv[1].trim());
+            if (dir != 1 && dir != -1) {
+                throw new IllegalArgumentException("Sort direction must be 1 or -1, got: " + dir);
+            }
+            if (orderBy.length() > 0) {
+                orderBy.append(", ");
+            }
+            orderBy.append("data->>'").append(key).append("' ").append(dir == 1 ? "ASC" : "DESC");
+        }
+        return orderBy.toString();
+    }
+
+    /**
+     * Find documents matching a filter. Like MongoDB find().
+     * filterJson is a JSONB containment filter (uses @> operator).
+     * sortJson is a MongoDB-like sort object: {"field": 1} for ASC, {"field": -1} for DESC.
+     * limit and skip control pagination. Pass null for no limit/skip.
+     * Returns a list of matching rows.
+     */
+    public static List<Map<String, Object>> docFind(Connection conn, String collection,
+            String filterJson, String sortJson, Integer limit, Integer skip) throws SQLException {
+        validateIdentifier(collection);
+        StringBuilder sql = new StringBuilder("SELECT id, data, created_at, updated_at FROM " + collection);
+        boolean hasFilter = filterJson != null && !filterJson.trim().isEmpty();
+        if (hasFilter) {
+            sql.append(" WHERE data @> ?::jsonb");
+        }
+        String orderClause = parseSortClause(sortJson);
+        if (!orderClause.isEmpty()) {
+            sql.append(" ORDER BY ").append(orderClause);
+        }
+        if (limit != null) {
+            sql.append(" LIMIT ?");
+        }
+        if (skip != null) {
+            sql.append(" OFFSET ?");
+        }
+        try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            if (hasFilter) {
+                ps.setString(idx++, filterJson);
+            }
+            if (limit != null) {
+                ps.setInt(idx++, limit);
+            }
+            if (skip != null) {
+                ps.setInt(idx++, skip);
+            }
+            ResultSet rs = ps.executeQuery();
+            List<Map<String, Object>> results = new ArrayList<>();
+            while (rs.next()) {
+                results.add(rowToMap(rs));
+            }
+            return results;
+        }
+    }
+
+    /**
+     * Find one document matching a filter. Like MongoDB findOne().
+     * Returns the first matching row, or null if none found.
+     */
+    public static Map<String, Object> docFindOne(Connection conn, String collection,
+            String filterJson) throws SQLException {
+        List<Map<String, Object>> results = docFind(conn, collection, filterJson, null, 1, null);
+        return results.isEmpty() ? null : results.get(0);
+    }
+
+    /**
+     * Update documents matching a filter. Like MongoDB updateMany().
+     * updateJson is merged into matching documents using || (JSONB concatenation).
+     * Returns the number of updated rows.
+     */
+    public static int docUpdate(Connection conn, String collection, String filterJson,
+            String updateJson) throws SQLException {
+        validateIdentifier(collection);
+        try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE " + collection + " SET data = data || ?::jsonb, updated_at = NOW() " +
+                "WHERE data @> ?::jsonb")) {
+            ps.setString(1, updateJson);
+            ps.setString(2, filterJson);
+            return ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Update one document matching a filter. Like MongoDB updateOne().
+     * updateJson is merged into the first matching document using || (JSONB concatenation).
+     * Returns the number of updated rows (0 or 1).
+     */
+    public static int docUpdateOne(Connection conn, String collection, String filterJson,
+            String updateJson) throws SQLException {
+        validateIdentifier(collection);
+        try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE " + collection + " SET data = data || ?::jsonb, updated_at = NOW() " +
+                "WHERE id = (SELECT id FROM " + collection + " WHERE data @> ?::jsonb LIMIT 1)")) {
+            ps.setString(1, updateJson);
+            ps.setString(2, filterJson);
+            return ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Delete documents matching a filter. Like MongoDB deleteMany().
+     * Returns the number of deleted rows.
+     */
+    public static int docDelete(Connection conn, String collection,
+            String filterJson) throws SQLException {
+        validateIdentifier(collection);
+        try (PreparedStatement ps = conn.prepareStatement(
+                "DELETE FROM " + collection + " WHERE data @> ?::jsonb")) {
+            ps.setString(1, filterJson);
+            return ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Delete one document matching a filter. Like MongoDB deleteOne().
+     * Returns the number of deleted rows (0 or 1).
+     */
+    public static int docDeleteOne(Connection conn, String collection,
+            String filterJson) throws SQLException {
+        validateIdentifier(collection);
+        try (PreparedStatement ps = conn.prepareStatement(
+                "DELETE FROM " + collection + " WHERE id = " +
+                "(SELECT id FROM " + collection + " WHERE data @> ?::jsonb LIMIT 1)")) {
+            ps.setString(1, filterJson);
+            return ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Count documents matching a filter. Like MongoDB countDocuments().
+     * Pass null filterJson to count all documents.
+     * Returns the count.
+     */
+    public static long docCount(Connection conn, String collection,
+            String filterJson) throws SQLException {
+        validateIdentifier(collection);
+        boolean hasFilter = filterJson != null && !filterJson.trim().isEmpty();
+        String sql = hasFilter
+            ? "SELECT COUNT(*) FROM " + collection + " WHERE data @> ?::jsonb"
+            : "SELECT COUNT(*) FROM " + collection;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            if (hasFilter) {
+                ps.setString(1, filterJson);
+            }
+            ResultSet rs = ps.executeQuery();
+            rs.next();
+            return rs.getLong(1);
+        }
+    }
+
+    /**
+     * Create an index on JSONB keys in a collection. Like MongoDB createIndex().
+     * keys is a list of JSONB field names to include in the index.
+     * Uses btree expression index on (data->>'field') for each key.
+     */
+    public static void docCreateIndex(Connection conn, String collection,
+            List<String> keys) throws SQLException {
+        validateIdentifier(collection);
+        if (keys == null || keys.isEmpty()) {
+            throw new IllegalArgumentException("Index keys must not be empty");
+        }
+        StringBuilder indexCols = new StringBuilder();
+        StringBuilder indexName = new StringBuilder("idx_" + collection);
+        for (int i = 0; i < keys.size(); i++) {
+            String key = keys.get(i);
+            validateIdentifier(key);
+            if (i > 0) indexCols.append(", ");
+            indexCols.append("(data->>'").append(key).append("')");
+            indexName.append("_").append(key);
+        }
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE INDEX IF NOT EXISTS " + indexName +
+                " ON " + collection + " (" + indexCols + ")");
+        }
+    }
 }
