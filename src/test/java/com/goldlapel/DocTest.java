@@ -1135,6 +1135,71 @@ class DocTest {
             assertThrows(IllegalArgumentException.class,
                 () -> Utils.buildFilter("{\"x\": {\"$unknown\": 1}}"));
         }
+
+        @Test
+        void dotNotationPlainContainment() {
+            Utils.FilterResult r = Utils.buildFilter("{\"address.city\": \"NYC\"}");
+            assertEquals("data @> ?::jsonb", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("{\"address\": {\"city\": \"NYC\"}}", r.params.get(0));
+        }
+
+        @Test
+        void dotNotationMultiLevel() {
+            Utils.FilterResult r = Utils.buildFilter("{\"a.b.c\": 1}");
+            assertEquals("data @> ?::jsonb", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("{\"a\": {\"b\": {\"c\": 1}}}", r.params.get(0));
+        }
+
+        @Test
+        void dotNotationSharedPrefix() {
+            Utils.FilterResult r = Utils.buildFilter("{\"a.b\": 1, \"a.c\": 2}");
+            assertEquals("data @> ?::jsonb", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("{\"a\": {\"b\": 1, \"c\": 2}}", r.params.get(0));
+        }
+
+        @Test
+        void dotNotationMixedWithPlainKey() {
+            Utils.FilterResult r = Utils.buildFilter("{\"name\": \"Alice\", \"address.city\": \"NYC\"}");
+            assertEquals("data @> ?::jsonb", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("{\"name\": \"Alice\", \"address\": {\"city\": \"NYC\"}}", r.params.get(0));
+        }
+
+        @Test
+        void dotNotationInMixedContainmentAndOperator() {
+            Utils.FilterResult r = Utils.buildFilter("{\"address.city\": \"NYC\", \"age\": {\"$gte\": 18}}");
+            assertEquals("data @> ?::jsonb AND (data->>'age')::numeric >= ?", r.whereClause);
+            assertEquals(2, r.params.size());
+            assertEquals("{\"address\": {\"city\": \"NYC\"}}", r.params.get(0));
+            assertEquals(18.0, r.params.get(1));
+        }
+
+        @Test
+        void dotNotationWithBooleanValue() {
+            Utils.FilterResult r = Utils.buildFilter("{\"settings.notifications.email\": true}");
+            assertEquals("data @> ?::jsonb", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("{\"settings\": {\"notifications\": {\"email\": true}}}", r.params.get(0));
+        }
+
+        @Test
+        void dotNotationMultipleSeparatePaths() {
+            Utils.FilterResult r = Utils.buildFilter("{\"address.city\": \"NYC\", \"profile.verified\": true}");
+            assertEquals("data @> ?::jsonb", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("{\"address\": {\"city\": \"NYC\"}, \"profile\": {\"verified\": true}}", r.params.get(0));
+        }
+
+        @Test
+        void dotNotationWithNumericValue() {
+            Utils.FilterResult r = Utils.buildFilter("{\"metrics.score\": 99}");
+            assertEquals("data @> ?::jsonb", r.whereClause);
+            assertEquals(1, r.params.size());
+            assertEquals("{\"metrics\": {\"score\": 99}}", r.params.get(0));
+        }
     }
 
 

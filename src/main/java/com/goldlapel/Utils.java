@@ -1288,8 +1288,26 @@ public class Utils {
             }
         }
         if (!hasOperators) {
+            // Check if any keys contain dots — if so, expand to nested objects
+            boolean hasDots = false;
+            for (String[] kv : pairs) {
+                String key = kv[0].trim().replaceAll("^\"|\"$", "");
+                if (key.contains(".")) {
+                    hasDots = true;
+                    break;
+                }
+            }
             List<Object> params = new ArrayList<>();
-            params.add(s);
+            if (hasDots) {
+                Map<String, String> containment = new LinkedHashMap<>();
+                for (String[] kv : pairs) {
+                    String key = kv[0].trim().replaceAll("^\"|\"$", "");
+                    containment.put(key, kv[1].trim());
+                }
+                params.add(rebuildJsonObject(containment));
+            } else {
+                params.add(s);
+            }
             return new FilterResult("data @> ?::jsonb", params);
         }
 
@@ -1441,9 +1459,42 @@ public class Utils {
     }
 
     private static String rebuildJsonObject(Map<String, String> pairs) {
+        // Expand dot-notation keys into nested objects before serializing.
+        // e.g. {"address.city": "\"NYC\""} -> {"address": {"city": "NYC"}}
+        // Multiple keys sharing a prefix merge:
+        // {"a.b": "1", "a.c": "2"} -> {"a": {"b": 1, "c": 2}}
+        Map<String, Object> tree = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : pairs.entrySet()) {
+            String key = entry.getKey();
+            String val = entry.getValue();
+            String[] parts = key.split("\\.");
+            if (parts.length == 1) {
+                tree.put(key, val);
+            } else {
+                // Walk/create nested maps for intermediate parts
+                Map<String, Object> current = tree;
+                for (int i = 0; i < parts.length - 1; i++) {
+                    Object existing = current.get(parts[i]);
+                    if (existing instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> nested = (Map<String, Object>) existing;
+                        current = nested;
+                    } else {
+                        Map<String, Object> nested = new LinkedHashMap<>();
+                        current.put(parts[i], nested);
+                        current = nested;
+                    }
+                }
+                current.put(parts[parts.length - 1], val);
+            }
+        }
+        return serializeJsonTree(tree);
+    }
+
+    private static String serializeJsonTree(Map<String, Object> tree) {
         StringBuilder sb = new StringBuilder("{");
         boolean first = true;
-        for (Map.Entry<String, String> entry : pairs.entrySet()) {
+        for (Map.Entry<String, Object> entry : tree.entrySet()) {
             if (!first) sb.append(", ");
             first = false;
             String key = entry.getKey();
@@ -1452,7 +1503,15 @@ public class Utils {
             } else {
                 sb.append(key);
             }
-            sb.append(": ").append(entry.getValue());
+            sb.append(": ");
+            Object val = entry.getValue();
+            if (val instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> nested = (Map<String, Object>) val;
+                sb.append(serializeJsonTree(nested));
+            } else {
+                sb.append(val);
+            }
         }
         sb.append("}");
         return sb.toString();
