@@ -1944,16 +1944,36 @@ public class Utils {
     }
 
     private static void ensureCollection(Connection conn, String collection) throws SQLException {
+        ensureCollection(conn, collection, false);
+    }
+
+    private static void ensureCollection(Connection conn, String collection, boolean unlogged) throws SQLException {
         validateIdentifier(collection);
+        String prefix = unlogged ? "CREATE UNLOGGED TABLE" : "CREATE TABLE";
         try (Statement st = conn.createStatement()) {
             st.execute(
-                "CREATE TABLE IF NOT EXISTS " + collection + " (" +
+                prefix + " IF NOT EXISTS " + collection + " (" +
                 "id BIGSERIAL PRIMARY KEY, " +
                 "data JSONB NOT NULL, " +
                 "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), " +
                 "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
             );
         }
+    }
+
+    /**
+     * Explicitly create a collection table. Like MongoDB createCollection().
+     * Optionally creates an UNLOGGED table for high-throughput ephemeral data.
+     * UNLOGGED tables are not crash-safe but significantly faster for writes.
+     */
+    public static void docCreateCollection(Connection conn, String collection,
+            boolean unlogged) throws SQLException {
+        validateIdentifier(collection);
+        ensureCollection(conn, collection, unlogged);
+    }
+
+    public static void docCreateCollection(Connection conn, String collection) throws SQLException {
+        docCreateCollection(conn, collection, false);
     }
 
     private static Map<String, Object> rowToMap(ResultSet rs) throws SQLException {

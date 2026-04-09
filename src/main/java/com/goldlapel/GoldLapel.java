@@ -327,6 +327,14 @@ public class GoldLapel {
         Utils.docRemoveTtlIndex(requireConn(), collection);
     }
 
+    public void docCreateCollection(String collection, boolean unlogged) throws SQLException {
+        Utils.docCreateCollection(requireConn(), collection, unlogged);
+    }
+
+    public void docCreateCollection(String collection) throws SQLException {
+        Utils.docCreateCollection(requireConn(), collection);
+    }
+
     public void docCreateCapped(String collection, int maxDocuments) throws SQLException {
         Utils.docCreateCapped(requireConn(), collection, maxDocuments);
     }

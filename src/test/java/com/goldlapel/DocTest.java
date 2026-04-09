@@ -1462,6 +1462,52 @@ class DocTest {
 
 
     // -------------------------------------------------------------------------
+    // docCreateCollection
+    // -------------------------------------------------------------------------
+
+    @Nested class DocCreateCollectionTest {
+
+        @Test
+        void createsRegularTableByDefault() throws SQLException {
+            when(conn.createStatement()).thenReturn(stmt);
+
+            Utils.docCreateCollection(conn, "users");
+
+            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
+            verify(stmt).execute(ddlCaptor.capture());
+            String sql = ddlCaptor.getValue();
+
+            assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS users"));
+            assertFalse(sql.contains("UNLOGGED"));
+            assertTrue(sql.contains("BIGSERIAL PRIMARY KEY"));
+            assertTrue(sql.contains("data JSONB NOT NULL"));
+            assertTrue(sql.contains("created_at TIMESTAMPTZ"));
+            assertTrue(sql.contains("updated_at TIMESTAMPTZ"));
+        }
+
+        @Test
+        void createsUnloggedTable() throws SQLException {
+            when(conn.createStatement()).thenReturn(stmt);
+
+            Utils.docCreateCollection(conn, "ephemeral", true);
+
+            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
+            verify(stmt).execute(ddlCaptor.capture());
+            String sql = ddlCaptor.getValue();
+
+            assertTrue(sql.contains("CREATE UNLOGGED TABLE IF NOT EXISTS ephemeral"));
+            assertFalse(sql.startsWith("CREATE TABLE"));
+        }
+
+        @Test
+        void invalidCollectionThrows() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.docCreateCollection(conn, "bad table"));
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
     // docCreateCapped
     // -------------------------------------------------------------------------
 
