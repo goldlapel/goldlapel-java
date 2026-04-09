@@ -110,8 +110,8 @@ class InstanceMethodsTest {
         @Test
         void delegatesToUtils() throws SQLException {
             allowCreateStatement();
-            singleRowResultSet("id", "data", "created_at", "updated_at");
-            when(rs.getObject(1)).thenReturn(1L);
+            singleRowResultSet("_id", "data", "created_at", "updated_at");
+            when(rs.getObject(1)).thenReturn("uuid-1");
             when(rs.getObject(2)).thenReturn("{\"name\":\"alice\"}");
 
             Map<String, Object> result = gl.docInsert("users", "{\"name\":\"alice\"}");
@@ -121,7 +121,7 @@ class InstanceMethodsTest {
             assertTrue(sql.contains("INSERT INTO users"));
             assertTrue(sql.contains("VALUES (?::jsonb)"));
             assertNotNull(result);
-            assertEquals(1L, result.get("id"));
+            assertEquals("uuid-1", result.get("_id"));
         }
     }
 
@@ -134,12 +134,12 @@ class InstanceMethodsTest {
 
         @Test
         void delegatesToUtils() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             List<Map<String, Object>> results = gl.docFind("users", "{\"active\":true}", null, 10, null);
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
-            assertTrue(sql.contains("SELECT id, data, created_at, updated_at FROM users"));
+            assertTrue(sql.contains("SELECT _id, data, created_at, updated_at FROM users"));
             assertTrue(sql.contains("WHERE data @> ?::jsonb"));
             assertTrue(sql.contains("LIMIT ?"));
         }

@@ -137,8 +137,8 @@ class DocTest {
         @Test
         void sqlAndParams() throws SQLException {
             allowCreateStatement();
-            singleRowResultSet("id", "data", "created_at", "updated_at");
-            when(rs.getObject(1)).thenReturn(1L);
+            singleRowResultSet("_id", "data", "created_at", "updated_at");
+            when(rs.getObject(1)).thenReturn("uuid-1");
             when(rs.getObject(2)).thenReturn("{\"name\":\"alice\"}");
 
             Map<String, Object> result = Utils.docInsert(conn, "users", "{\"name\":\"alice\"}");
@@ -147,17 +147,17 @@ class DocTest {
             String sql = sqlCaptor.getValue();
             assertTrue(sql.contains("INSERT INTO users"));
             assertTrue(sql.contains("VALUES (?::jsonb)"));
-            assertTrue(sql.contains("RETURNING id, data, created_at, updated_at"));
+            assertTrue(sql.contains("RETURNING _id, data, created_at, updated_at"));
             verify(ps).setString(1, "{\"name\":\"alice\"}");
             assertNotNull(result);
-            assertEquals(1L, result.get("id"));
+            assertEquals("uuid-1", result.get("_id"));
         }
 
         @Test
         void createsTable() throws SQLException {
             allowCreateStatement();
-            singleRowResultSet("id", "data", "created_at", "updated_at");
-            when(rs.getObject(1)).thenReturn(1L);
+            singleRowResultSet("_id", "data", "created_at", "updated_at");
+            when(rs.getObject(1)).thenReturn("uuid-1");
 
             Utils.docInsert(conn, "users", "{\"a\":1}");
 
@@ -166,7 +166,7 @@ class DocTest {
             String ddl = ddlCaptor.getValue();
             assertTrue(ddl.contains("CREATE TABLE IF NOT EXISTS users"));
             assertTrue(ddl.contains("data JSONB NOT NULL"));
-            assertTrue(ddl.contains("BIGSERIAL PRIMARY KEY"));
+            assertTrue(ddl.contains("UUID PRIMARY KEY DEFAULT gen_random_uuid()"));
         }
 
         @Test
@@ -191,11 +191,11 @@ class DocTest {
             when(rs.next()).thenReturn(true);
             when(rs.getMetaData()).thenReturn(meta);
             when(meta.getColumnCount()).thenReturn(4);
-            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
             when(meta.getColumnLabel(3)).thenReturn("created_at");
             when(meta.getColumnLabel(4)).thenReturn("updated_at");
-            when(rs.getObject(1)).thenReturn(1L, 2L);
+            when(rs.getObject(1)).thenReturn("uuid-1", "uuid-2");
 
             List<String> docs = Arrays.asList("{\"a\":1}", "{\"b\":2}");
             List<Map<String, Object>> results = Utils.docInsertMany(conn, "items", docs);
@@ -229,12 +229,12 @@ class DocTest {
 
         @Test
         void sqlWithFilterSortLimitSkip() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docFind(conn, "users", "{\"active\":true}", "{\"name\": 1}", 10, 5);
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
-            assertTrue(sql.contains("SELECT id, data, created_at, updated_at FROM users"));
+            assertTrue(sql.contains("SELECT _id, data, created_at, updated_at FROM users"));
             assertTrue(sql.contains("WHERE data @> ?::jsonb"));
             assertTrue(sql.contains("ORDER BY data->>'name' ASC"));
             assertTrue(sql.contains("LIMIT ?"));
@@ -247,12 +247,12 @@ class DocTest {
 
         @Test
         void sqlNoFilter() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docFind(conn, "users", null, null, null, null);
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
-            assertTrue(sql.contains("SELECT id, data, created_at, updated_at FROM users"));
+            assertTrue(sql.contains("SELECT _id, data, created_at, updated_at FROM users"));
             assertFalse(sql.contains("WHERE"));
             assertFalse(sql.contains("ORDER BY"));
             assertFalse(sql.contains("LIMIT"));
@@ -261,7 +261,7 @@ class DocTest {
 
         @Test
         void sqlFilterOnly() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docFind(conn, "users", "{\"x\":1}", null, null, null);
 
             verify(conn).prepareStatement(sqlCaptor.capture());
@@ -277,15 +277,15 @@ class DocTest {
             when(rs.next()).thenReturn(true, true, false);
             when(rs.getMetaData()).thenReturn(meta);
             when(meta.getColumnCount()).thenReturn(2);
-            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
-            when(rs.getObject(1)).thenReturn(1L, 2L);
+            when(rs.getObject(1)).thenReturn("uuid-1", "uuid-2");
             when(rs.getObject(2)).thenReturn("{\"a\":1}", "{\"b\":2}");
 
             List<Map<String, Object>> results = Utils.docFind(conn, "users", null, null, null, null);
             assertEquals(2, results.size());
-            assertEquals(1L, results.get(0).get("id"));
-            assertEquals(2L, results.get(1).get("id"));
+            assertEquals("uuid-1", results.get(0).get("_id"));
+            assertEquals("uuid-2", results.get(1).get("_id"));
         }
 
         @Test
@@ -309,26 +309,26 @@ class DocTest {
             when(rs.next()).thenReturn(true, false);
             when(rs.getMetaData()).thenReturn(meta);
             when(meta.getColumnCount()).thenReturn(2);
-            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
-            when(rs.getObject(1)).thenReturn(42L);
+            when(rs.getObject(1)).thenReturn("uuid-42");
             when(rs.getObject(2)).thenReturn("{\"name\":\"bob\"}");
 
             Map<String, Object> result = Utils.docFindOne(conn, "users", "{\"name\":\"bob\"}");
             assertNotNull(result);
-            assertEquals(42L, result.get("id"));
+            assertEquals("uuid-42", result.get("_id"));
         }
 
         @Test
         void returnsNullWhenEmpty() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Map<String, Object> result = Utils.docFindOne(conn, "users", "{\"x\":1}");
             assertNull(result);
         }
 
         @Test
         void delegatesToDocFind() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docFindOne(conn, "users", "{\"a\":1}");
 
             verify(conn).prepareStatement(sqlCaptor.capture());
@@ -383,7 +383,7 @@ class DocTest {
             String sql = sqlCaptor.getValue();
             assertTrue(sql.contains("UPDATE users SET data = data || ?::jsonb"));
             assertTrue(sql.contains("updated_at = NOW()"));
-            assertTrue(sql.contains("WHERE id = (SELECT id FROM users WHERE data @> ?::jsonb LIMIT 1)"));
+            assertTrue(sql.contains("WHERE _id = (SELECT _id FROM users WHERE data @> ?::jsonb LIMIT 1)"));
             verify(ps).setString(1, "{\"age\":30}");
             verify(ps).setString(2, "{\"name\":\"alice\"}");
             assertEquals(1, count);
@@ -443,7 +443,7 @@ class DocTest {
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
-            assertTrue(sql.contains("DELETE FROM users WHERE id = (SELECT id FROM users WHERE data @> ?::jsonb LIMIT 1)"));
+            assertTrue(sql.contains("DELETE FROM users WHERE _id = (SELECT _id FROM users WHERE data @> ?::jsonb LIMIT 1)"));
             verify(ps).setString(1, "{\"name\":\"bob\"}");
             assertEquals(1, count);
         }
@@ -587,13 +587,13 @@ class DocTest {
 
         @Test
         void matchOnly() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docAggregate(conn, "users",
                 "[{\"$match\": {\"active\":true}}]");
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
-            assertTrue(sql.contains("SELECT id, data, created_at, updated_at FROM users"));
+            assertTrue(sql.contains("SELECT _id, data, created_at, updated_at FROM users"));
             assertTrue(sql.contains("WHERE data @> ?::jsonb"));
             assertFalse(sql.contains("GROUP BY"));
             verify(ps).setString(1, "{\"active\":true}");
@@ -601,7 +601,7 @@ class DocTest {
 
         @Test
         void sortContextBeforeGroup() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docAggregate(conn, "users",
                 "[{\"$sort\": {\"name\": 1}}]");
 
@@ -656,12 +656,12 @@ class DocTest {
 
         @Test
         void emptyPipeline() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docAggregate(conn, "users", "[]");
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
-            assertTrue(sql.contains("SELECT id, data, created_at, updated_at FROM users"));
+            assertTrue(sql.contains("SELECT _id, data, created_at, updated_at FROM users"));
             assertFalse(sql.contains("WHERE"));
             assertFalse(sql.contains("GROUP BY"));
         }
@@ -816,7 +816,7 @@ class DocTest {
 
         @Test
         void unwindString() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docAggregate(conn, "orders",
                 "[{\"$unwind\": \"$items\"}]");
 
@@ -827,7 +827,7 @@ class DocTest {
 
         @Test
         void unwindObject() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docAggregate(conn, "orders",
                 "[{\"$unwind\": {\"path\": \"$tags\"}}]");
 
@@ -870,7 +870,7 @@ class DocTest {
 
         @Test
         void lookupBasic() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at", "items");
+            emptyResultSet("_id", "data", "created_at", "updated_at", "items");
             Utils.docAggregate(conn, "orders",
                 "[{\"$lookup\": {\"from\": \"products\", \"localField\": \"productId\", " +
                 "\"foreignField\": \"pid\", \"as\": \"items\"}}]");
@@ -885,7 +885,7 @@ class DocTest {
 
         @Test
         void lookupWithMatch() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at", "details");
+            emptyResultSet("_id", "data", "created_at", "updated_at", "details");
             Utils.docAggregate(conn, "orders",
                 "[{\"$match\": {\"status\": \"active\"}}, " +
                 "{\"$lookup\": {\"from\": \"inventory\", \"localField\": \"sku\", " +
@@ -1216,7 +1216,7 @@ class DocTest {
 
         @Test
         void docFindWithGt() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docFind(conn, "users", "{\"age\": {\"$gt\": 21}}", null, null, null);
 
             verify(conn).prepareStatement(sqlCaptor.capture());
@@ -1329,8 +1329,8 @@ class DocTest {
                 .filter(s -> s.contains("CREATE OR REPLACE FUNCTION"))
                 .findFirst().orElse("");
             assertTrue(funcDdl.contains("pg_notify('orders_changes'"));
-            assertTrue(funcDdl.contains("OLD.id::text"));
-            assertTrue(funcDdl.contains("NEW.id::text"));
+            assertTrue(funcDdl.contains("OLD._id::text"));
+            assertTrue(funcDdl.contains("NEW._id::text"));
             assertTrue(funcDdl.contains("NEW.data"));
 
             t.interrupt();
@@ -1479,7 +1479,7 @@ class DocTest {
 
             assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS users"));
             assertFalse(sql.contains("UNLOGGED"));
-            assertTrue(sql.contains("BIGSERIAL PRIMARY KEY"));
+            assertTrue(sql.contains("UUID PRIMARY KEY DEFAULT gen_random_uuid()"));
             assertTrue(sql.contains("data JSONB NOT NULL"));
             assertTrue(sql.contains("created_at TIMESTAMPTZ"));
             assertTrue(sql.contains("updated_at TIMESTAMPTZ"));
@@ -1526,7 +1526,7 @@ class DocTest {
             assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE TABLE IF NOT EXISTS logs")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE OR REPLACE FUNCTION logs_cap_fn()")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("- 1000, 0)")));
-            assertTrue(ddls.stream().anyMatch(s -> s.contains("ORDER BY created_at ASC, id ASC")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("ORDER BY created_at ASC, _id ASC")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP TRIGGER IF EXISTS logs_cap_trg ON logs")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE TRIGGER logs_cap_trg")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("AFTER INSERT")));
@@ -1645,7 +1645,7 @@ class DocTest {
 
         @Test
         void docFindWithOr() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docFind(conn, "users",
                 "{\"$or\": [{\"role\": \"admin\"}, {\"role\": \"editor\"}]}",
                 null, null, null);
@@ -1861,7 +1861,7 @@ class DocTest {
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
             assertTrue(sql.contains("jsonb_set(data, ?::text[], to_jsonb(COALESCE((data->>'score')::numeric, 0) + ?))"));
-            assertTrue(sql.contains("WHERE id = (SELECT id FROM users WHERE data @> ?::jsonb LIMIT 1)"));
+            assertTrue(sql.contains("WHERE _id = (SELECT _id FROM users WHERE data @> ?::jsonb LIMIT 1)"));
             verify(ps).setString(1, "{score}");
             verify(ps).setDouble(2, 10.0);
             verify(ps).setString(3, "{\"name\": \"alice\"}");
@@ -1889,8 +1889,8 @@ class DocTest {
 
         @Test
         void sqlAndParams() throws SQLException {
-            singleRowResultSet("id", "data", "created_at", "updated_at");
-            when(rs.getObject(1)).thenReturn(1L);
+            singleRowResultSet("_id", "data", "created_at", "updated_at");
+            when(rs.getObject(1)).thenReturn("uuid-1");
             when(rs.getObject(2)).thenReturn("{\"name\":\"alice\",\"score\":100}");
 
             Map<String, Object> result = Utils.docFindOneAndUpdate(conn, "users",
@@ -1900,17 +1900,17 @@ class DocTest {
             String sql = sqlCaptor.getValue();
             assertTrue(sql.contains("UPDATE users SET data ="));
             assertTrue(sql.contains("updated_at = NOW()"));
-            assertTrue(sql.contains("WHERE id = (SELECT id FROM users WHERE"));
+            assertTrue(sql.contains("WHERE _id = (SELECT _id FROM users WHERE"));
             assertTrue(sql.contains("LIMIT 1)"));
-            assertTrue(sql.contains("RETURNING id, data, created_at, updated_at"));
+            assertTrue(sql.contains("RETURNING _id, data, created_at, updated_at"));
             assertNotNull(result);
-            assertEquals(1L, result.get("id"));
+            assertEquals("uuid-1", result.get("_id"));
         }
 
         @Test
         void plainMergeUpdate() throws SQLException {
-            singleRowResultSet("id", "data", "created_at", "updated_at");
-            when(rs.getObject(1)).thenReturn(1L);
+            singleRowResultSet("_id", "data", "created_at", "updated_at");
+            when(rs.getObject(1)).thenReturn("uuid-1");
 
             Utils.docFindOneAndUpdate(conn, "users",
                 "{\"name\":\"alice\"}", "{\"score\": 99}");
@@ -1918,7 +1918,7 @@ class DocTest {
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
             assertTrue(sql.contains("SET data = data || ?::jsonb"));
-            assertTrue(sql.contains("RETURNING id, data, created_at, updated_at"));
+            assertTrue(sql.contains("RETURNING _id, data, created_at, updated_at"));
         }
 
         @Test
@@ -1948,8 +1948,8 @@ class DocTest {
 
         @Test
         void sqlAndParams() throws SQLException {
-            singleRowResultSet("id", "data", "created_at", "updated_at");
-            when(rs.getObject(1)).thenReturn(42L);
+            singleRowResultSet("_id", "data", "created_at", "updated_at");
+            when(rs.getObject(1)).thenReturn("uuid-42");
             when(rs.getObject(2)).thenReturn("{\"name\":\"bob\"}");
 
             Map<String, Object> result = Utils.docFindOneAndDelete(conn, "users",
@@ -1957,12 +1957,12 @@ class DocTest {
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
-            assertTrue(sql.contains("DELETE FROM users WHERE id ="));
-            assertTrue(sql.contains("SELECT id FROM users WHERE data @> ?::jsonb LIMIT 1"));
-            assertTrue(sql.contains("RETURNING id, data, created_at, updated_at"));
+            assertTrue(sql.contains("DELETE FROM users WHERE _id ="));
+            assertTrue(sql.contains("SELECT _id FROM users WHERE data @> ?::jsonb LIMIT 1"));
+            assertTrue(sql.contains("RETURNING _id, data, created_at, updated_at"));
             verify(ps).setString(1, "{\"name\":\"bob\"}");
             assertNotNull(result);
-            assertEquals(42L, result.get("id"));
+            assertEquals("uuid-42", result.get("_id"));
         }
 
         @Test
@@ -1978,8 +1978,8 @@ class DocTest {
 
         @Test
         void noFilterDeletesFirst() throws SQLException {
-            singleRowResultSet("id", "data", "created_at", "updated_at");
-            when(rs.getObject(1)).thenReturn(1L);
+            singleRowResultSet("_id", "data", "created_at", "updated_at");
+            when(rs.getObject(1)).thenReturn("uuid-1");
 
             Utils.docFindOneAndDelete(conn, "users", null);
 
@@ -2174,7 +2174,7 @@ class DocTest {
 
         @Test
         void integrationWithDocFind() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docFind(conn, "items",
                 "{\"scores\": {\"$elemMatch\": {\"$gt\": 80, \"$lt\": 90}}}",
                 null, null, null);
@@ -2273,7 +2273,7 @@ class DocTest {
 
         @Test
         void integrationWithDocFind() throws SQLException {
-            emptyResultSet("id", "data", "created_at", "updated_at");
+            emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docFind(conn, "articles",
                 "{\"$text\": {\"$search\": \"postgres\"}}",
                 null, null, null);
@@ -2315,9 +2315,9 @@ class DocTest {
             when(rs.next()).thenReturn(true, true, false);
             when(rs.getMetaData()).thenReturn(meta);
             when(meta.getColumnCount()).thenReturn(2);
-            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
-            when(rs.getObject(1)).thenReturn(1L, 2L);
+            when(rs.getObject(1)).thenReturn("uuid-1", "uuid-2");
             when(rs.getObject(2)).thenReturn("{\"a\":1}", "{\"b\":2}");
 
             Iterator<Map<String, Object>> it = Utils.docFindCursor(
@@ -2325,11 +2325,11 @@ class DocTest {
 
             assertTrue(it.hasNext());
             Map<String, Object> row1 = it.next();
-            assertEquals(1L, row1.get("id"));
+            assertEquals("uuid-1", row1.get("_id"));
 
             assertTrue(it.hasNext());
             Map<String, Object> row2 = it.next();
-            assertEquals(2L, row2.get("id"));
+            assertEquals("uuid-2", row2.get("_id"));
 
             assertFalse(it.hasNext());
         }
@@ -2342,7 +2342,7 @@ class DocTest {
             when(rs.next()).thenReturn(false);
             when(rs.getMetaData()).thenReturn(meta);
             when(meta.getColumnCount()).thenReturn(2);
-            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
 
             Utils.docFindCursor(conn, "items", null, null, null, null, 50);
@@ -2358,7 +2358,7 @@ class DocTest {
             when(rs.next()).thenReturn(false);
             when(rs.getMetaData()).thenReturn(meta);
             when(meta.getColumnCount()).thenReturn(2);
-            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
 
             Utils.docFindCursor(conn, "users",
@@ -2380,7 +2380,7 @@ class DocTest {
             when(rs.next()).thenReturn(false);
             when(rs.getMetaData()).thenReturn(meta);
             when(meta.getColumnCount()).thenReturn(2);
-            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
 
             Utils.docFindCursor(conn, "items", null, null, null, null, 100);
@@ -2396,7 +2396,7 @@ class DocTest {
             when(rs.next()).thenReturn(true, false);
             when(rs.getMetaData()).thenReturn(meta);
             when(meta.getColumnCount()).thenReturn(2);
-            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
             when(rs.getObject(1)).thenReturn(1L);
             when(rs.getObject(2)).thenReturn("{\"a\":1}");
@@ -2418,7 +2418,7 @@ class DocTest {
             when(rs.next()).thenReturn(false);
             when(rs.getMetaData()).thenReturn(meta);
             when(meta.getColumnCount()).thenReturn(2);
-            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
 
             Iterator<Map<String, Object>> it = Utils.docFindCursor(
@@ -2435,7 +2435,7 @@ class DocTest {
             when(rs.next()).thenReturn(false);
             when(rs.getMetaData()).thenReturn(meta);
             when(meta.getColumnCount()).thenReturn(2);
-            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
 
             Iterator<Map<String, Object>> it = Utils.docFindCursor(
@@ -2458,7 +2458,7 @@ class DocTest {
             when(rs.next()).thenReturn(false);
             when(rs.getMetaData()).thenReturn(meta);
             when(meta.getColumnCount()).thenReturn(2);
-            when(meta.getColumnLabel(1)).thenReturn("id");
+            when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
 
             Utils.docFindCursor(conn, "items", null, null, null, null, 100);

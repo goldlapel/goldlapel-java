@@ -1953,7 +1953,7 @@ public class Utils {
         try (Statement st = conn.createStatement()) {
             st.execute(
                 prefix + " IF NOT EXISTS " + collection + " (" +
-                "id BIGSERIAL PRIMARY KEY, " +
+                "_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), " +
                 "data JSONB NOT NULL, " +
                 "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), " +
                 "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
@@ -1989,14 +1989,14 @@ public class Utils {
     /**
      * Insert a document into a collection. Like MongoDB insertOne().
      * Creates the collection table if it doesn't exist.
-     * Returns the inserted row (id, data, created_at, updated_at).
+     * Returns the inserted row (_id, data, created_at, updated_at).
      */
     public static Map<String, Object> docInsert(Connection conn, String collection,
             String documentJson) throws SQLException {
         ensureCollection(conn, collection);
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO " + collection + " (data) VALUES (?::jsonb) " +
-                "RETURNING id, data, created_at, updated_at")) {
+                "RETURNING _id, data, created_at, updated_at")) {
             ps.setString(1, documentJson);
             ResultSet rs = ps.executeQuery();
             rs.next();
@@ -2015,7 +2015,7 @@ public class Utils {
         List<Map<String, Object>> results = new ArrayList<>();
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO " + collection + " (data) VALUES (?::jsonb) " +
-                "RETURNING id, data, created_at, updated_at")) {
+                "RETURNING _id, data, created_at, updated_at")) {
             for (String doc : documents) {
                 ps.setString(1, doc);
                 ResultSet rs = ps.executeQuery();
@@ -2077,7 +2077,7 @@ public class Utils {
             String filterJson, String sortJson, Integer limit, Integer skip) throws SQLException {
         validateIdentifier(collection);
         FilterResult filter = buildFilter(filterJson);
-        StringBuilder sql = new StringBuilder("SELECT id, data, created_at, updated_at FROM " + collection);
+        StringBuilder sql = new StringBuilder("SELECT _id, data, created_at, updated_at FROM " + collection);
         if (!filter.whereClause.isEmpty()) {
             sql.append(" WHERE ").append(filter.whereClause);
         }
@@ -2126,7 +2126,7 @@ public class Utils {
             int batchSize) throws SQLException {
         validateIdentifier(collection);
         FilterResult filter = buildFilter(filterJson);
-        StringBuilder sql = new StringBuilder("SELECT id, data, created_at, updated_at FROM " + collection);
+        StringBuilder sql = new StringBuilder("SELECT _id, data, created_at, updated_at FROM " + collection);
         if (!filter.whereClause.isEmpty()) {
             sql.append(" WHERE ").append(filter.whereClause);
         }
@@ -2255,7 +2255,7 @@ public class Utils {
         UpdateResult update = buildUpdate(updateJson);
         String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
         String sql = "UPDATE " + collection + " SET data = " + update.expr + ", updated_at = NOW() " +
-            "WHERE id = (SELECT id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1)";
+            "WHERE _id = (SELECT _id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1)";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int idx = 1;
             for (Object param : update.params) {
@@ -2298,8 +2298,8 @@ public class Utils {
         validateIdentifier(collection);
         FilterResult filter = buildFilter(filterJson);
         String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
-        String sql = "DELETE FROM " + collection + " WHERE id = " +
-            "(SELECT id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1)";
+        String sql = "DELETE FROM " + collection + " WHERE _id = " +
+            "(SELECT _id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1)";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int idx = 1;
             for (Object param : filter.params) {
@@ -2321,8 +2321,8 @@ public class Utils {
         UpdateResult update = buildUpdate(updateJson);
         String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
         String sql = "UPDATE " + collection + " SET data = " + update.expr + ", updated_at = NOW() " +
-            "WHERE id = (SELECT id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1) " +
-            "RETURNING id, data, created_at, updated_at";
+            "WHERE _id = (SELECT _id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1) " +
+            "RETURNING _id, data, created_at, updated_at";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int idx = 1;
             for (Object param : update.params) {
@@ -2349,9 +2349,9 @@ public class Utils {
         validateIdentifier(collection);
         FilterResult filter = buildFilter(filterJson);
         String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
-        String sql = "DELETE FROM " + collection + " WHERE id = " +
-            "(SELECT id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1) " +
-            "RETURNING id, data, created_at, updated_at";
+        String sql = "DELETE FROM " + collection + " WHERE _id = " +
+            "(SELECT _id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1) " +
+            "RETURNING _id, data, created_at, updated_at";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int idx = 1;
             for (Object param : filter.params) {
@@ -2571,7 +2571,7 @@ public class Utils {
                 sql.append(selectExprs.get(i));
             }
         } else {
-            sql.append("SELECT id, data, created_at, updated_at");
+            sql.append("SELECT _id, data, created_at, updated_at");
             // Append any lookup expressions not consumed by $project
             for (String lookupExpr : lookupExprs.values()) {
                 sql.append(", ").append(lookupExpr);
@@ -3043,7 +3043,7 @@ public class Utils {
      * with each change event as a JSON string.
      *
      * The callback receives (channel, payload) where payload is a JSON object
-     * with "op" (INSERT/UPDATE/DELETE), "id" (row id), and "data" (for non-DELETE).
+     * with "op" (INSERT/UPDATE/DELETE), "_id" (row id), and "data" (for non-DELETE).
      *
      * Returns a daemon Thread that polls for notifications. Interrupt the thread
      * or close the connection to stop watching.
@@ -3062,11 +3062,11 @@ public class Utils {
                 "BEGIN " +
                 "IF TG_OP = 'DELETE' THEN " +
                 "PERFORM pg_notify('" + channel + "', " +
-                "json_build_object('op', TG_OP, 'id', OLD.id::text)::text); " +
+                "json_build_object('op', TG_OP, '_id', OLD._id::text)::text); " +
                 "RETURN OLD; " +
                 "ELSE " +
                 "PERFORM pg_notify('" + channel + "', " +
-                "json_build_object('op', TG_OP, 'id', NEW.id::text, 'data', NEW.data)::text); " +
+                "json_build_object('op', TG_OP, '_id', NEW._id::text, 'data', NEW.data)::text); " +
                 "RETURN NEW; " +
                 "END IF; " +
                 "END; $$"
@@ -3230,9 +3230,9 @@ public class Utils {
                 "CREATE OR REPLACE FUNCTION " + funcName + "() " +
                 "RETURNS TRIGGER LANGUAGE plpgsql AS $$ " +
                 "BEGIN " +
-                "DELETE FROM " + collection + " WHERE id IN (" +
-                "SELECT id FROM " + collection + " " +
-                "ORDER BY created_at ASC, id ASC " +
+                "DELETE FROM " + collection + " WHERE _id IN (" +
+                "SELECT _id FROM " + collection + " " +
+                "ORDER BY created_at ASC, _id ASC " +
                 "LIMIT GREATEST((SELECT COUNT(*) FROM " + collection + ") - " + maxDocuments + ", 0)" +
                 "); " +
                 "RETURN NEW; " +
