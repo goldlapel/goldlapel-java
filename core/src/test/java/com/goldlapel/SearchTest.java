@@ -165,7 +165,6 @@ class SearchTest {
 
         @Test
         void sqlAndParams() throws SQLException {
-            allowCreateStatement();
             emptyResultSet("_score");
             Utils.searchFuzzy(conn, "products", "name", "postgrse", 10, 0.3);
 
@@ -181,15 +180,6 @@ class SearchTest {
             verify(ps).setString(2, "postgrse"); // similarity for WHERE
             verify(ps).setDouble(3, 0.3);        // threshold
             verify(ps).setInt(4, 10);             // limit
-        }
-
-        @Test
-        void createsExtension() throws SQLException {
-            allowCreateStatement();
-            emptyResultSet("_score");
-            Utils.searchFuzzy(conn, "products", "name", "q", 10, 0.3);
-
-            verify(stmt).execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
         }
 
         @Test
@@ -214,7 +204,6 @@ class SearchTest {
 
         @Test
         void sqlAndParams() throws SQLException {
-            allowCreateStatement();
             emptyResultSet("_score");
             Utils.searchPhonetic(conn, "users", "last_name", "Smith", 20);
 
@@ -229,16 +218,6 @@ class SearchTest {
             verify(ps).setString(1, "Smith"); // similarity
             verify(ps).setString(2, "Smith"); // soundex comparison
             verify(ps).setInt(3, 20);         // limit
-        }
-
-        @Test
-        void createsBothExtensions() throws SQLException {
-            allowCreateStatement();
-            emptyResultSet("_score");
-            Utils.searchPhonetic(conn, "users", "last_name", "Smith", 20);
-
-            verify(stmt).execute("CREATE EXTENSION IF NOT EXISTS fuzzystrmatch");
-            verify(stmt).execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
         }
 
         @Test
@@ -257,7 +236,6 @@ class SearchTest {
 
         @Test
         void sqlAndParams() throws SQLException {
-            allowCreateStatement();
             emptyResultSet("_score");
             double[] vector = {0.1, 0.2, 0.3};
             Utils.similar(conn, "embeddings", "embedding", vector, 5);
@@ -274,17 +252,7 @@ class SearchTest {
         }
 
         @Test
-        void createsVectorExtension() throws SQLException {
-            allowCreateStatement();
-            emptyResultSet("_score");
-            Utils.similar(conn, "embeddings", "embedding", new double[]{1.0}, 1);
-
-            verify(stmt).execute("CREATE EXTENSION IF NOT EXISTS vector");
-        }
-
-        @Test
         void singleElementVector() throws SQLException {
-            allowCreateStatement();
             emptyResultSet("_score");
             Utils.similar(conn, "embeddings", "vec", new double[]{42.0}, 1);
 
@@ -313,7 +281,6 @@ class SearchTest {
 
         @Test
         void sqlAndParams() throws SQLException {
-            allowCreateStatement();
             emptyResultSet("_score");
             Utils.suggest(conn, "products", "name", "post", 10);
 
@@ -328,15 +295,6 @@ class SearchTest {
             verify(ps).setString(1, "post");   // similarity arg
             verify(ps).setString(2, "post%");  // ILIKE pattern with % suffix
             verify(ps).setInt(3, 10);          // limit
-        }
-
-        @Test
-        void createsPgTrgmExtension() throws SQLException {
-            allowCreateStatement();
-            emptyResultSet("_score");
-            Utils.suggest(conn, "products", "name", "a", 5);
-
-            verify(stmt).execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
         }
 
         @Test
