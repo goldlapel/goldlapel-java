@@ -243,9 +243,6 @@ public class Utils {
     public static void geoadd(Connection conn, String table, String nameColumn,
             String geomColumn, String name, double lon, double lat) throws SQLException {
         try (java.sql.Statement st = conn.createStatement()) {
-            st.execute("CREATE EXTENSION IF NOT EXISTS postgis");
-        }
-        try (java.sql.Statement st = conn.createStatement()) {
             st.execute(
                 "CREATE TABLE IF NOT EXISTS " + table + " (" +
                 "id BIGSERIAL PRIMARY KEY, " +
@@ -588,9 +585,6 @@ public class Utils {
     }
 
     public static String script(Connection conn, String luaCode, String... args) throws SQLException {
-        try (Statement stmt = conn.createStatement()) {
-            stmt.execute("CREATE EXTENSION IF NOT EXISTS pllua");
-        }
         String funcName = "_gl_lua_" + Long.toHexString(Double.doubleToLongBits(Math.random())).substring(0, 8);
         StringBuilder params = new StringBuilder();
         for (int i = 0; i < args.length; i++) {
@@ -705,9 +699,6 @@ public class Utils {
             String column, String query, int limit, double threshold) throws SQLException {
         validateIdentifier(table);
         validateIdentifier(column);
-        try (Statement st = conn.createStatement()) {
-            st.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        }
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT *, similarity(" + column + ", ?) AS _score " +
                 "FROM " + table + " " +
@@ -741,12 +732,6 @@ public class Utils {
             String column, String query, int limit) throws SQLException {
         validateIdentifier(table);
         validateIdentifier(column);
-        try (Statement st = conn.createStatement()) {
-            st.execute("CREATE EXTENSION IF NOT EXISTS fuzzystrmatch");
-        }
-        try (Statement st = conn.createStatement()) {
-            st.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        }
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT *, similarity(" + column + ", ?) AS _score " +
                 "FROM " + table + " " +
@@ -779,9 +764,6 @@ public class Utils {
             String column, double[] vector, int limit) throws SQLException {
         validateIdentifier(table);
         validateIdentifier(column);
-        try (Statement st = conn.createStatement()) {
-            st.execute("CREATE EXTENSION IF NOT EXISTS vector");
-        }
         StringBuilder vecLiteral = new StringBuilder("[");
         for (int i = 0; i < vector.length; i++) {
             if (i > 0) vecLiteral.append(",");
@@ -818,9 +800,6 @@ public class Utils {
             String column, String prefix, int limit) throws SQLException {
         validateIdentifier(table);
         validateIdentifier(column);
-        try (Statement st = conn.createStatement()) {
-            st.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        }
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT *, similarity(" + column + ", ?) AS _score " +
                 "FROM " + table + " " +
