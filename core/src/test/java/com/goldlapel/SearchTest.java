@@ -699,7 +699,7 @@ class SearchTest {
 
             // Index creation
             String createIndex = ddls.stream().filter(s -> s.contains("CREATE INDEX")).findFirst().orElse("");
-            assertTrue(createIndex.contains("USING GIN (tsquery)"));
+            assertTrue(createIndex.contains("USING GIST (tsquery)"));
         }
     }
 

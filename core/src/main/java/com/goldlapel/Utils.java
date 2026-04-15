@@ -1031,7 +1031,7 @@ public class Utils {
             );
         }
         try (Statement st = conn.createStatement()) {
-            st.execute("CREATE INDEX IF NOT EXISTS " + name + "_tsq_idx ON " + name + " USING GIN (tsquery)");
+            st.execute("CREATE INDEX IF NOT EXISTS " + name + "_tsq_idx ON " + name + " USING GIST (tsquery)");
         }
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO " + name + " (query_id, query_text, tsquery, lang, metadata) " +
