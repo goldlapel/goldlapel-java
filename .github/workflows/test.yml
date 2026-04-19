@@ -1,0 +1,57 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Download latest goldlapel binary
+        run: |
+          LATEST=$(gh release list --repo goldlapel/goldlapel --limit 1 --json tagName -q '.[0].tagName')
+          gh release download "$LATEST" --repo goldlapel/goldlapel --pattern "goldlapel-linux-x86_64" --dir /tmp
+          chmod +x /tmp/goldlapel-linux-x86_64
+          echo "GOLDLAPEL_BINARY=/tmp/goldlapel-linux-x86_64" >> $GITHUB_ENV
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run tests
+        # Skip GPG signing during CI test runs (release workflow handles signing).
+        # -pl/-am would be needed if we wanted per-module tests; root-level `mvn
+        # test` covers all four modules (core, spring-boot, reactor, rxjava3).
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: postgres
+        run: ./mvnw test -Dgpg.skip=true
