@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.goldlapel</groupId>
+        <artifactId>goldlapel-parent</artifactId>
+        <version>0.0.0</version>
+    </parent>
+
+    <artifactId>goldlapel-rxjava3</artifactId>
+    <name>Gold Lapel RxJava 3</name>
+    <description>RxJava 3 façade over Gold Lapel's reactive API — Single / Flowable / Completable returns (Java 11+)</description>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <rxjava.version>3.1.8</rxjava.version>
+        <reactor-adapter.version>3.5.2</reactor-adapter.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Pull the Reactor BOM so reactor-core lines up with the reactor
+                 module, and reactor-adapter uses compatible reactor types. -->
+            <dependency>
+                <groupId>io.projectreactor</groupId>
+                <artifactId>reactor-bom</artifactId>
+                <version>2023.0.6</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- Reactive wrapper — we wrap its Mono/Flux returns in RxJava types. -->
+        <dependency>
+            <groupId>com.goldlapel</groupId>
+            <artifactId>goldlapel-reactor</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!-- RxJava 3 — Single, Flowable, Completable, Maybe. -->
+        <dependency>
+            <groupId>io.reactivex.rxjava3</groupId>
+            <artifactId>rxjava</artifactId>
+            <version>${rxjava.version}</version>
+        </dependency>
+
+        <!-- Reactor ↔ RxJava bridge. Provides RxJava3Adapter.monoToSingle /
+             monoToCompletable / fluxToFlowable / monoToMaybe. -->
+        <dependency>
+            <groupId>io.projectreactor.addons</groupId>
+            <artifactId>reactor-adapter</artifactId>
+            <version>${reactor-adapter.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>5.11.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <version>5.11.0</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

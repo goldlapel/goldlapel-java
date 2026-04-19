@@ -17,6 +17,7 @@
         <module>core</module>
         <module>spring-boot</module>
         <module>reactor</module>
+        <module>rxjava3</module>
     </modules>
 
     <licenses>
