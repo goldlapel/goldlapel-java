@@ -588,13 +588,14 @@ class ClientOptionTest {
     }
 
     @Test
-    void inheritedEnvClientBeatsOption(@TempDir Path tmp) throws Exception {
-        // Documents ACTUAL precedence: the wrapper uses
-        // ProcessBuilder.environment().putIfAbsent("GOLDLAPEL_CLIENT", client),
-        // which means an inherited env var from the parent JVM wins over the
-        // option. This is a deliberate escape hatch (ops can stamp a client
-        // identifier without touching application code) — if this test fails
-        // someone changed the precedence; update both the code and this test.
+    void optionBeatsInheritedEnvClient(@TempDir Path tmp) throws Exception {
+        // Documents precedence: the wrapper uses
+        // ProcessBuilder.environment().put("GOLDLAPEL_CLIENT", client),
+        // so the config-lambda value wins over any inherited GOLDLAPEL_CLIENT
+        // from the parent JVM. Matches Spring Boot / Micronaut / Quarkus
+        // semantics (explicit config > env > defaults) — code that runs is
+        // what the developer wrote. If this test fails someone changed the
+        // precedence; update both the code and this test.
         org.junit.jupiter.api.Assumptions.assumeTrue(isPosix(), "POSIX-only test (needs /bin/sh)");
         Path out = tmp.resolve("client.txt");
         Path script = writeDumpScript(tmp, out);
@@ -611,8 +612,8 @@ class ClientOptionTest {
                 // expected
             }
             assertTrue(Files.exists(out));
-            // putIfAbsent → inherited parent env wins over option
-            assertEquals("from-parent-env", Files.readString(out).trim());
+            // put → config-lambda value wins over inherited parent env
+            assertEquals("from-opts", Files.readString(out).trim());
         } finally {
             ClientOptionTest.setEnv("GOLDLAPEL_BINARY", origBin);
             ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", origClient);

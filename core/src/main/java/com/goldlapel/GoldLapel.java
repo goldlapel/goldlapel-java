@@ -185,7 +185,9 @@ public class GoldLapel implements AutoCloseable {
 
         try {
             ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.environment().putIfAbsent("GOLDLAPEL_CLIENT", client);
+            // Explicit config wins over inherited env (matches Spring Boot /
+            // Micronaut / Quarkus precedence: explicit config > env > defaults).
+            pb.environment().put("GOLDLAPEL_CLIENT", client);
             pb.redirectInput(ProcessBuilder.Redirect.PIPE);
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
             pb.redirectError(ProcessBuilder.Redirect.PIPE);
