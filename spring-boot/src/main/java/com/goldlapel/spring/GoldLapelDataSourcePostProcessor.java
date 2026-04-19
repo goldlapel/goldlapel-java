@@ -34,7 +34,7 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
         this.nextPort = properties.getPort();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             for (GoldLapel proxy : proxies) {
-                proxy.stopProxy();
+                proxy.stop();
             }
         }));
     }
@@ -63,22 +63,20 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
 
         String extraArgsStr = properties.getExtraArgs();
         Map<String, String> configMap = properties.getConfig();
+        final int assignedPort = port;
 
-        GoldLapel.Options options = new GoldLapel.Options().port(port);
-
-        if (configMap != null && !configMap.isEmpty()) {
-            options.config(normalizeCamelCase(configMap));
-        }
-
-        if (extraArgsStr != null && !extraArgsStr.isEmpty()) {
-            options.extraArgs(extraArgsStr.split(","));
-        }
-
-        options.client("spring-boot");
-        GoldLapel proxy = new GoldLapel(upstream, options);
-        String proxyUrl;
+        GoldLapel proxy;
         try {
-            proxyUrl = proxy.startProxy();
+            proxy = GoldLapel.start(upstream, opts -> {
+                opts.setPort(assignedPort);
+                if (configMap != null && !configMap.isEmpty()) {
+                    opts.setConfig(normalizeCamelCase(configMap));
+                }
+                if (extraArgsStr != null && !extraArgsStr.isEmpty()) {
+                    opts.setExtraArgs(extraArgsStr.split(","));
+                }
+                opts.setClient("spring-boot");
+            });
         } catch (RuntimeException e) {
             String safeUpstream = upstream.replaceAll("://.*@", "://***@");
             throw new RuntimeException(
@@ -87,7 +85,7 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
         }
 
         proxies.add(proxy);
-        String proxyJdbcUrl = JDBC_PREFIX + proxyUrl;
+        String proxyJdbcUrl = JDBC_PREFIX + proxy.getUrl();
         setJdbcUrl(ds, proxyJdbcUrl);
 
         log.info("Gold Lapel proxy started — {} now routes through localhost:{}", beanName, port);

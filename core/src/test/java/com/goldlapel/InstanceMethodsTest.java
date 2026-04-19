@@ -37,10 +37,10 @@ class InstanceMethodsTest {
 
     @BeforeEach
     void setUp() {
-        gl = new GoldLapel("postgresql://user:pass@host:5432/db");
+        gl = new GoldLapel("postgresql://user:pass@host:5432/db", new GoldLapelOptions());
         // Inject mock connection via reflection
         try {
-            java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("instanceConn");
+            java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("internalConn");
             f.setAccessible(true);
             f.set(gl, conn);
         } catch (Exception e) {
@@ -93,10 +93,10 @@ class InstanceMethodsTest {
 
         @Test
         void throwsWhenNoConnection() {
-            GoldLapel gl2 = new GoldLapel("postgresql://localhost:5432/db");
+            GoldLapel gl2 = new GoldLapel("postgresql://localhost:5432/db", new GoldLapelOptions());
             IllegalStateException ex = assertThrows(IllegalStateException.class, gl2::connection);
             assertTrue(ex.getMessage().contains("No connection available"));
-            assertTrue(ex.getMessage().contains("startProxy()"));
+            assertTrue(ex.getMessage().contains("GoldLapel.start()"));
         }
     }
 
@@ -381,7 +381,7 @@ class InstanceMethodsTest {
 
         @BeforeEach
         void setUp() {
-            bare = new GoldLapel("postgresql://localhost:5432/db");
+            bare = new GoldLapel("postgresql://localhost:5432/db", new GoldLapelOptions());
         }
 
         @Test

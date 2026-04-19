@@ -243,41 +243,85 @@ class WaitForPortTest {
 
 class GoldLapelClassTest {
 
+    // Helper: construct a GoldLapel without starting the proxy. Uses the
+    // package-private constructor to avoid spawning the Rust binary in unit tests.
+    static GoldLapel newUnstarted(String upstream) {
+        return new GoldLapel(upstream, new GoldLapelOptions());
+    }
+
+    static GoldLapel newUnstarted(String upstream, GoldLapelOptions opts) {
+        return new GoldLapel(upstream, opts);
+    }
+
     @Test
     void defaultPort() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb");
         assertEquals(7932, gl.getPort());
     }
 
     @Test
     void customPort() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb",
-            new GoldLapel.Options().port(9000));
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setPort(9000);
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
         assertEquals(9000, gl.getPort());
     }
 
     @Test
     void notRunningInitially() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb");
         assertFalse(gl.isRunning());
         assertNull(gl.getUrl());
     }
 
     @Test
     void stopIsNoOpWhenNotStarted() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
-        gl.stopProxy();
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb");
+        gl.stop();
         assertFalse(gl.isRunning());
         assertNull(gl.getUrl());
     }
 
     @Test
     void stopIsIdempotent() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
-        gl.stopProxy();
-        gl.stopProxy();
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb");
+        gl.stop();
+        gl.stop();
         assertFalse(gl.isRunning());
         assertNull(gl.getUrl());
+    }
+
+    @Test
+    void closeCallsStop() {
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb");
+        gl.close();
+        assertFalse(gl.isRunning());
+        assertNull(gl.getUrl());
+    }
+
+    @Test
+    void logLevelAppendedToExtraArgs() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("debug");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Arrays.asList("--log-level", "debug"), args);
+    }
+
+    @Test
+    void logLevelCombinedWithExtraArgs() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setExtraArgs("--foo", "bar");
+        opts.setLogLevel("info");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Arrays.asList("--foo", "bar", "--log-level", "info"), args);
     }
 }
 
@@ -286,7 +330,7 @@ class DashboardUrlTest {
 
     @Test
     void defaultDashboardPort() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
         assertEquals(7933, GoldLapel.DEFAULT_DASHBOARD_PORT);
     }
 
@@ -294,8 +338,9 @@ class DashboardUrlTest {
     void customDashboardPort() {
         Map<String, Object> config = new HashMap<>();
         config.put("dashboardPort", 8080);
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb",
-            new GoldLapel.Options().config(config));
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setConfig(config);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         assertNull(gl.getDashboardUrl()); // not running, so null
     }
 
@@ -303,14 +348,15 @@ class DashboardUrlTest {
     void disabledDashboardPort() {
         Map<String, Object> config = new HashMap<>();
         config.put("dashboardPort", 0);
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb",
-            new GoldLapel.Options().config(config));
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setConfig(config);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         assertNull(gl.getDashboardUrl());
     }
 
     @Test
     void dashboardUrlNullWhenNotRunning() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
         assertFalse(gl.isRunning());
         assertNull(gl.getDashboardUrl());
     }
@@ -319,29 +365,14 @@ class DashboardUrlTest {
     void dashboardPortExtractedFromConfig() {
         Map<String, Object> config = new HashMap<>();
         config.put("dashboardPort", 9999);
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb",
-            new GoldLapel.Options().config(config));
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setConfig(config);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         // Verify port was extracted (dashboardUrl includes it when running)
         // Since not running, getDashboardUrl() returns null — verify via config pass-through
         List<String> args = GoldLapel.configToArgs(config);
         assertTrue(args.contains("--dashboard-port"));
         assertTrue(args.contains("9999"));
-    }
-}
-
-
-class ModuleFunctionsTest {
-
-    @Test
-    void proxyUrlNullWhenNotStarted() {
-        GoldLapel.stop();
-        assertNull(GoldLapel.proxyUrl());
-    }
-
-    @Test
-    void dashboardUrlNullWhenNotStarted() {
-        GoldLapel.stop();
-        assertNull(GoldLapel.dashboardUrl());
     }
 }
 
@@ -509,11 +540,11 @@ class ConfigToArgsTest {
         config.put("mode", "waiter");
         config.put("disablePool", true);
 
-        GoldLapel.Options opts = new GoldLapel.Options()
-            .port(9000)
-            .config(config);
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setPort(9000);
+        opts.setConfig(config);
 
-        assertEquals(9000, opts.port);
-        assertSame(config, opts.config());
+        assertEquals(9000, opts.getPort());
+        assertSame(config, opts.getConfig());
     }
 }

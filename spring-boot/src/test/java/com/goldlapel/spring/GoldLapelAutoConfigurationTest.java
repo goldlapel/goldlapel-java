@@ -1,11 +1,13 @@
 package com.goldlapel.spring;
 
 import com.goldlapel.GoldLapel;
+import com.goldlapel.GoldLapelOptions;
 import com.goldlapel.NativeCache;
 import com.zaxxer.hikari.HikariDataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.MockedConstruction;
+import org.mockito.MockedStatic;
+import org.mockito.invocation.InvocationOnMock;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.FilteredClassLoader;
@@ -15,10 +17,22 @@ import javax.sql.DataSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.when;
 
+/**
+ * Unit tests for the Spring Boot integration. {@code GoldLapel.start(...)} is
+ * mocked out (it would otherwise spawn a real subprocess); the test verifies
+ * that the post-processor resolves upstreams, assigns ports, rewrites JDBC
+ * URLs, and forwards the configured options correctly.
+ */
 class GoldLapelAutoConfigurationTest {
 
     private final ApplicationContextRunner dataSourceRunner = new ApplicationContextRunner()
@@ -34,10 +48,36 @@ class GoldLapelAutoConfigurationTest {
         NativeCache.reset();
     }
 
+    /**
+     * Build a MockedStatic that intercepts {@code GoldLapel.start(String, Consumer)}.
+     * Each call spins up a mock GoldLapel whose {@code getUrl()} returns the URL
+     * produced by {@code urlForUpstream.apply(upstream)}. The captured options
+     * list receives the effective GoldLapelOptions for each call.
+     */
+    private static MockedStatic<GoldLapel> stubStart(
+            java.util.function.Function<String, String> urlForUpstream,
+            List<GoldLapelOptions> capturedOptions) {
+        MockedStatic<GoldLapel> stat = mockStatic(GoldLapel.class);
+        stat.when(() -> GoldLapel.start(anyString(), any())).thenAnswer((InvocationOnMock inv) -> {
+            String upstream = inv.getArgument(0);
+            @SuppressWarnings("unchecked")
+            Consumer<GoldLapelOptions> cfg = inv.getArgument(1);
+            GoldLapelOptions opts = new GoldLapelOptions();
+            if (cfg != null) cfg.accept(opts);
+            capturedOptions.add(opts);
+            GoldLapel gl = mock(GoldLapel.class);
+            when(gl.getUrl()).thenReturn(urlForUpstream.apply(upstream));
+            when(gl.getPort()).thenReturn(opts.getPort() != null ? opts.getPort() : 7932);
+            return gl;
+        });
+        return stat;
+    }
+
     @Test
     void autoConfiguresAndRewritesDataSource() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:7932/testdb"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
 
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
@@ -48,8 +88,7 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(ds).isInstanceOf(CachedDataSource.class);
                         HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/testdb");
-                        assertThat(mocked.constructed()).hasSize(1);
-                        verify(mocked.constructed().get(0)).startProxy();
+                        assertThat(captured).hasSize(1);
                     });
         }
     }
@@ -62,7 +101,10 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void skipsNonPostgresDataSource() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class)) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> stat = stubStart(
+                u -> "postgresql://localhost:7932/db", captured)) {
+
             HikariDataSource ds = new HikariDataSource();
             ds.setJdbcUrl("jdbc:h2:mem:testdb");
 
@@ -73,14 +115,15 @@ class GoldLapelAutoConfigurationTest {
 
             assertThat(result).isSameAs(ds);
             assertThat(ds.getJdbcUrl()).isEqualTo("jdbc:h2:mem:testdb");
-            assertThat(mocked.constructed()).isEmpty();
+            stat.verify(() -> GoldLapel.start(anyString(), any()), times(0));
         }
     }
 
     @Test
     void customPortAndExtraArgs() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:9999/testdb"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:9999/testdb", captured)) {
 
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
@@ -92,6 +135,10 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(ds).isInstanceOf(CachedDataSource.class);
                         HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:9999/testdb");
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).getPort()).isEqualTo(9999);
+                        assertThat(captured.get(0).getExtraArgs())
+                                .containsExactly("--threshold-duration-ms", "200");
                     });
         }
     }
@@ -105,15 +152,12 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void multipleDataSourcesGetSeparateProxies() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> {
-                    String upstream = (String) context.arguments().get(0);
-                    if (upstream.contains("5432")) {
-                        when(mock.startProxy()).thenReturn("postgresql://localhost:7932/db1");
-                    } else {
-                        when(mock.startProxy()).thenReturn("postgresql://localhost:7933/db2");
-                    }
-                })) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> u.contains("5432")
+                        ? "postgresql://localhost:7932/db1"
+                        : "postgresql://localhost:7933/db2",
+                captured)) {
 
             HikariDataSource ds1 = new HikariDataSource();
             ds1.setJdbcUrl("jdbc:postgresql://host1:5432/db1");
@@ -127,15 +171,11 @@ class GoldLapelAutoConfigurationTest {
             Object result1 = processor.postProcessAfterInitialization(ds1, "primaryDataSource");
             Object result2 = processor.postProcessAfterInitialization(ds2, "analyticsDataSource");
 
-            assertThat(mocked.constructed()).hasSize(2);
+            assertThat(captured).hasSize(2);
             assertThat(ds1.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/db1");
             assertThat(ds2.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7933/db2");
 
-            verify(mocked.constructed().get(0)).startProxy();
-            verify(mocked.constructed().get(1)).startProxy();
-
             assertThat(processor.getProxies()).hasSize(2);
-
             assertThat(result1).isInstanceOf(CachedDataSource.class);
             assertThat(result2).isInstanceOf(CachedDataSource.class);
 
@@ -147,8 +187,9 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void duplicateUpstreamReusesPort() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:7932/db"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/db", captured)) {
 
             HikariDataSource ds1 = new HikariDataSource();
             ds1.setJdbcUrl("jdbc:postgresql://host:5432/db");
@@ -170,12 +211,9 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void configMapPassedToOptions() {
-        List<MockedConstruction.Context> capturedContexts = new ArrayList<>();
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> {
-                    capturedContexts.add(context);
-                    when(mock.startProxy()).thenReturn("postgresql://localhost:7932/testdb");
-                })) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
 
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
@@ -188,22 +226,20 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(ds).isInstanceOf(CachedDataSource.class);
                         HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/testdb");
-                        assertThat(mocked.constructed()).hasSize(1);
-                        verify(mocked.constructed().get(0)).startProxy();
 
-                        // Verify GoldLapel was constructed with Options containing the config map
-                        assertThat(capturedContexts).hasSize(1);
-                        GoldLapel.Options options = (GoldLapel.Options) capturedContexts.get(0).arguments().get(1);
-                        assertThat(options.config()).containsEntry("mode", "waiter");
-                        assertThat(options.config()).containsEntry("poolSize", "30");
+                        assertThat(captured).hasSize(1);
+                        Map<String, Object> cfg = captured.get(0).getConfig();
+                        assertThat(cfg).containsEntry("mode", "waiter");
+                        assertThat(cfg).containsEntry("poolSize", "30");
                     });
         }
     }
 
     @Test
     void configMapWithCamelCaseKeysFromYaml() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:7932/testdb"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
 
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
@@ -215,16 +251,16 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(ds).isInstanceOf(CachedDataSource.class);
                         HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/testdb");
-                        assertThat(mocked.constructed()).hasSize(1);
-                        verify(mocked.constructed().get(0)).startProxy();
+                        assertThat(captured).hasSize(1);
                     });
         }
     }
 
     @Test
     void configMapWithPortAndExtraArgs() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:9000/testdb"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:9000/testdb", captured)) {
 
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
@@ -237,16 +273,17 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(ds).isInstanceOf(CachedDataSource.class);
                         HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:9000/testdb");
-                        assertThat(mocked.constructed()).hasSize(1);
-                        verify(mocked.constructed().get(0)).startProxy();
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).getPort()).isEqualTo(9000);
                     });
         }
     }
 
     @Test
     void emptyConfigMapDoesNotSetConfig() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:7932/testdb"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
 
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
@@ -256,8 +293,9 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(ds).isInstanceOf(CachedDataSource.class);
                         HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/testdb");
-                        assertThat(mocked.constructed()).hasSize(1);
-                        verify(mocked.constructed().get(0)).startProxy();
+                        assertThat(captured).hasSize(1);
+                        // Empty config map means setConfig was not called
+                        assertThat(captured.get(0).getConfig()).isNull();
                     });
         }
     }
@@ -345,8 +383,9 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void wrapsDataSourceWithCachedDataSource() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:7932/testdb"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
 
             HikariDataSource ds = new HikariDataSource();
             ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
@@ -365,8 +404,9 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void nativeCacheDisabledReturnsBareDataSource() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:7932/testdb"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
 
             HikariDataSource ds = new HikariDataSource();
             ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
@@ -384,8 +424,9 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void nativeCacheDisabledViaProperty() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:7932/testdb"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
 
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
@@ -402,8 +443,9 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void defaultInvalidationPortIsProxyPortPlusTwo() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:7932/testdb"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
 
             HikariDataSource ds = new HikariDataSource();
             ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
@@ -424,8 +466,9 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void customInvalidationPort() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:7932/testdb"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
 
             HikariDataSource ds = new HikariDataSource();
             ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
@@ -444,8 +487,9 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void customInvalidationPortViaProperty() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:7932/testdb"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
 
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
@@ -502,8 +546,9 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void worksWithNonHikariDataSource() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class,
-                (mock, context) -> when(mock.startProxy()).thenReturn("postgresql://localhost:7932/db"))) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/db", captured)) {
 
             DataSourceWithGetUrl ds = new DataSourceWithGetUrl("jdbc:postgresql://host:5432/db");
 
@@ -513,8 +558,7 @@ class GoldLapelAutoConfigurationTest {
 
             Object result = processor.postProcessAfterInitialization(ds, "dataSource");
 
-            assertThat(mocked.constructed()).hasSize(1);
-            verify(mocked.constructed().get(0)).startProxy();
+            assertThat(captured).hasSize(1);
             assertThat(ds.getUrl()).isEqualTo("jdbc:postgresql://localhost:7932/db");
             assertThat(result).isSameAs(ds);
         }
@@ -522,7 +566,9 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void skipsNonDataSourceBeans() {
-        try (MockedConstruction<GoldLapel> mocked = mockConstruction(GoldLapel.class)) {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> stat = stubStart(
+                u -> "postgresql://localhost:7932/db", captured)) {
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(
                     new GoldLapelProperties());
 
@@ -530,7 +576,7 @@ class GoldLapelAutoConfigurationTest {
             Object result = processor.postProcessAfterInitialization(bean, "myBean");
 
             assertThat(result).isSameAs(bean);
-            assertThat(mocked.constructed()).isEmpty();
+            stat.verify(() -> GoldLapel.start(anyString(), any()), times(0));
         }
     }
 
