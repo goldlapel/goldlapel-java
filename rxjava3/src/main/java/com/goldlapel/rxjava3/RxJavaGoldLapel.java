@@ -7,6 +7,7 @@ import com.goldlapel.reactor.ReactiveGoldLapel;
 import io.r2dbc.spi.ConnectionFactory;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Flowable;
+import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.core.Single;
 import reactor.adapter.rxjava.RxJava3Adapter;
 
@@ -26,10 +27,17 @@ import java.util.function.Function;
  * <table>
  *   <caption>Type mapping</caption>
  *   <tr><th>Reactor</th><th>RxJava 3</th></tr>
- *   <tr><td>{@code Mono<T>}</td><td>{@code Single<T>}</td></tr>
+ *   <tr><td>{@code Mono<T>} (always-emits)</td><td>{@code Single<T>}</td></tr>
+ *   <tr><td>{@code Mono<T>} (may be empty)</td><td>{@code Maybe<T>}</td></tr>
  *   <tr><td>{@code Mono<Void>}</td><td>{@code Completable}</td></tr>
  *   <tr><td>{@code Flux<T>}</td><td>{@code Flowable<T>}</td></tr>
  * </table>
+ *
+ * <p>The underlying JDBC helpers ({@code hget}, {@code zscore}, {@code docFindOne},
+ * etc.) return {@code null} when a row is not found. In Reactor those surface
+ * as an empty {@code Mono}; here they map to {@code Maybe<T>} so "not found"
+ * is a clean {@code onComplete} rather than a {@link java.util.NoSuchElementException}
+ * that {@code monoToSingle} would raise.
  *
  * <p>This exists for ergonomics — RxJava-first codebases can write
  * {@code gl.search(...).subscribe(...)} instead of sprinkling
@@ -147,11 +155,12 @@ public final class RxJavaGoldLapel implements AutoCloseable {
         return RxJava3Adapter.fluxToFlowable(inner.docFind(collection, filterJson, sortJson, limit, skip, conn));
     }
 
-    public Single<Map<String, Object>> docFindOne(String collection, String filterJson) {
-        return RxJava3Adapter.monoToSingle(inner.docFindOne(collection, filterJson));
+    /** {@code Maybe} — empty when no document matches. */
+    public Maybe<Map<String, Object>> docFindOne(String collection, String filterJson) {
+        return RxJava3Adapter.monoToMaybe(inner.docFindOne(collection, filterJson));
     }
-    public Single<Map<String, Object>> docFindOne(String collection, String filterJson, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.docFindOne(collection, filterJson, conn));
+    public Maybe<Map<String, Object>> docFindOne(String collection, String filterJson, Connection conn) {
+        return RxJava3Adapter.monoToMaybe(inner.docFindOne(collection, filterJson, conn));
     }
 
     public Flowable<Map<String, Object>> docFindCursor(String collection, String filterJson,
@@ -193,20 +202,22 @@ public final class RxJavaGoldLapel implements AutoCloseable {
         return RxJava3Adapter.monoToSingle(inner.docDeleteOne(collection, filterJson, conn));
     }
 
-    public Single<Map<String, Object>> docFindOneAndUpdate(String collection, String filterJson,
+    /** {@code Maybe} — empty when no document matches. */
+    public Maybe<Map<String, Object>> docFindOneAndUpdate(String collection, String filterJson,
             String updateJson) {
-        return RxJava3Adapter.monoToSingle(inner.docFindOneAndUpdate(collection, filterJson, updateJson));
+        return RxJava3Adapter.monoToMaybe(inner.docFindOneAndUpdate(collection, filterJson, updateJson));
     }
-    public Single<Map<String, Object>> docFindOneAndUpdate(String collection, String filterJson,
+    public Maybe<Map<String, Object>> docFindOneAndUpdate(String collection, String filterJson,
             String updateJson, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.docFindOneAndUpdate(collection, filterJson, updateJson, conn));
+        return RxJava3Adapter.monoToMaybe(inner.docFindOneAndUpdate(collection, filterJson, updateJson, conn));
     }
 
-    public Single<Map<String, Object>> docFindOneAndDelete(String collection, String filterJson) {
-        return RxJava3Adapter.monoToSingle(inner.docFindOneAndDelete(collection, filterJson));
+    /** {@code Maybe} — empty when no document matches. */
+    public Maybe<Map<String, Object>> docFindOneAndDelete(String collection, String filterJson) {
+        return RxJava3Adapter.monoToMaybe(inner.docFindOneAndDelete(collection, filterJson));
     }
-    public Single<Map<String, Object>> docFindOneAndDelete(String collection, String filterJson, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.docFindOneAndDelete(collection, filterJson, conn));
+    public Maybe<Map<String, Object>> docFindOneAndDelete(String collection, String filterJson, Connection conn) {
+        return RxJava3Adapter.monoToMaybe(inner.docFindOneAndDelete(collection, filterJson, conn));
     }
 
     public Flowable<String> docDistinct(String collection, String field, String filterJson) {
@@ -427,11 +438,12 @@ public final class RxJavaGoldLapel implements AutoCloseable {
         return RxJava3Adapter.monoToCompletable(inner.enqueue(queueTable, payloadJson, conn));
     }
 
-    public Single<String> dequeue(String queueTable) {
-        return RxJava3Adapter.monoToSingle(inner.dequeue(queueTable));
+    /** {@code Maybe} — empty when the queue is empty. */
+    public Maybe<String> dequeue(String queueTable) {
+        return RxJava3Adapter.monoToMaybe(inner.dequeue(queueTable));
     }
-    public Single<String> dequeue(String queueTable, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.dequeue(queueTable, conn));
+    public Maybe<String> dequeue(String queueTable, Connection conn) {
+        return RxJava3Adapter.monoToMaybe(inner.dequeue(queueTable, conn));
     }
 
     // ── Counters ──────────────────────────────────────────────
@@ -459,18 +471,20 @@ public final class RxJavaGoldLapel implements AutoCloseable {
         return RxJava3Adapter.monoToCompletable(inner.hset(table, key, field, valueJson, conn));
     }
 
-    public Single<String> hget(String table, String key, String field) {
-        return RxJava3Adapter.monoToSingle(inner.hget(table, key, field));
+    /** {@code Maybe} — empty when the field is absent. */
+    public Maybe<String> hget(String table, String key, String field) {
+        return RxJava3Adapter.monoToMaybe(inner.hget(table, key, field));
     }
-    public Single<String> hget(String table, String key, String field, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.hget(table, key, field, conn));
+    public Maybe<String> hget(String table, String key, String field, Connection conn) {
+        return RxJava3Adapter.monoToMaybe(inner.hget(table, key, field, conn));
     }
 
-    public Single<String> hgetall(String table, String key) {
-        return RxJava3Adapter.monoToSingle(inner.hgetall(table, key));
+    /** {@code Maybe} — empty when the key is absent. */
+    public Maybe<String> hgetall(String table, String key) {
+        return RxJava3Adapter.monoToMaybe(inner.hgetall(table, key));
     }
-    public Single<String> hgetall(String table, String key, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.hgetall(table, key, conn));
+    public Maybe<String> hgetall(String table, String key, Connection conn) {
+        return RxJava3Adapter.monoToMaybe(inner.hgetall(table, key, conn));
     }
 
     public Single<Boolean> hdel(String table, String key, String field) {
@@ -503,18 +517,20 @@ public final class RxJavaGoldLapel implements AutoCloseable {
         return RxJava3Adapter.fluxToFlowable(inner.zrange(table, start, stop, desc, conn));
     }
 
-    public Single<Long> zrank(String table, String member, boolean desc) {
-        return RxJava3Adapter.monoToSingle(inner.zrank(table, member, desc));
+    /** {@code Maybe} — empty when the member is not in the set. */
+    public Maybe<Long> zrank(String table, String member, boolean desc) {
+        return RxJava3Adapter.monoToMaybe(inner.zrank(table, member, desc));
     }
-    public Single<Long> zrank(String table, String member, boolean desc, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.zrank(table, member, desc, conn));
+    public Maybe<Long> zrank(String table, String member, boolean desc, Connection conn) {
+        return RxJava3Adapter.monoToMaybe(inner.zrank(table, member, desc, conn));
     }
 
-    public Single<Double> zscore(String table, String member) {
-        return RxJava3Adapter.monoToSingle(inner.zscore(table, member));
+    /** {@code Maybe} — empty when the member is not in the set. */
+    public Maybe<Double> zscore(String table, String member) {
+        return RxJava3Adapter.monoToMaybe(inner.zscore(table, member));
     }
-    public Single<Double> zscore(String table, String member, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.zscore(table, member, conn));
+    public Maybe<Double> zscore(String table, String member, Connection conn) {
+        return RxJava3Adapter.monoToMaybe(inner.zscore(table, member, conn));
     }
 
     public Single<Boolean> zrem(String table, String member) {
@@ -544,13 +560,14 @@ public final class RxJavaGoldLapel implements AutoCloseable {
         return RxJava3Adapter.monoToCompletable(inner.geoadd(table, nameColumn, geomColumn, name, lon, lat, conn));
     }
 
-    public Single<Double> geodist(String table, String geomColumn, String nameColumn,
+    /** {@code Maybe} — empty when either endpoint is missing from the table. */
+    public Maybe<Double> geodist(String table, String geomColumn, String nameColumn,
             String nameA, String nameB) {
-        return RxJava3Adapter.monoToSingle(inner.geodist(table, geomColumn, nameColumn, nameA, nameB));
+        return RxJava3Adapter.monoToMaybe(inner.geodist(table, geomColumn, nameColumn, nameA, nameB));
     }
-    public Single<Double> geodist(String table, String geomColumn, String nameColumn,
+    public Maybe<Double> geodist(String table, String geomColumn, String nameColumn,
             String nameA, String nameB, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.geodist(table, geomColumn, nameColumn, nameA, nameB, conn));
+        return RxJava3Adapter.monoToMaybe(inner.geodist(table, geomColumn, nameColumn, nameA, nameB, conn));
     }
 
     // ── Misc ──────────────────────────────────────────────────
@@ -569,8 +586,8 @@ public final class RxJavaGoldLapel implements AutoCloseable {
      * {@link ReactiveGoldLapel#using(Connection, Function)} directly on
      * {@link #reactor()}.
      */
-    public Single<String> script(String luaCode, String... args) {
-        return RxJava3Adapter.monoToSingle(inner.script(luaCode, args));
+    public Maybe<String> script(String luaCode, String... args) {
+        return RxJava3Adapter.monoToMaybe(inner.script(luaCode, args));
     }
 
     // ── Streams ───────────────────────────────────────────────
@@ -666,20 +683,21 @@ public final class RxJavaGoldLapel implements AutoCloseable {
         return RxJava3Adapter.fluxToFlowable(inner.analyze(text, lang, conn));
     }
 
-    public Single<Map<String, Object>> explainScore(String table, String column, String query,
+    /** {@code Maybe} — empty when the row is not found. */
+    public Maybe<Map<String, Object>> explainScore(String table, String column, String query,
             String idColumn, Object idValue) {
-        return RxJava3Adapter.monoToSingle(inner.explainScore(table, column, query, idColumn, idValue));
+        return RxJava3Adapter.monoToMaybe(inner.explainScore(table, column, query, idColumn, idValue));
     }
-    public Single<Map<String, Object>> explainScore(String table, String column, String query,
+    public Maybe<Map<String, Object>> explainScore(String table, String column, String query,
             String idColumn, Object idValue, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.explainScore(table, column, query, idColumn, idValue, conn));
+        return RxJava3Adapter.monoToMaybe(inner.explainScore(table, column, query, idColumn, idValue, conn));
     }
-    public Single<Map<String, Object>> explainScore(String table, String column, String query,
+    public Maybe<Map<String, Object>> explainScore(String table, String column, String query,
             String idColumn, Object idValue, String lang) {
-        return RxJava3Adapter.monoToSingle(inner.explainScore(table, column, query, idColumn, idValue, lang));
+        return RxJava3Adapter.monoToMaybe(inner.explainScore(table, column, query, idColumn, idValue, lang));
     }
-    public Single<Map<String, Object>> explainScore(String table, String column, String query,
+    public Maybe<Map<String, Object>> explainScore(String table, String column, String query,
             String idColumn, Object idValue, String lang, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.explainScore(table, column, query, idColumn, idValue, lang, conn));
+        return RxJava3Adapter.monoToMaybe(inner.explainScore(table, column, query, idColumn, idValue, lang, conn));
     }
 }
