@@ -16,6 +16,7 @@
     <modules>
         <module>core</module>
         <module>spring-boot</module>
+        <module>reactor</module>
     </modules>
 
     <licenses>
