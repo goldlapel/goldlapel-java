@@ -57,20 +57,73 @@ class GoldLapelAutoConfigurationTest {
     private static MockedStatic<GoldLapel> stubStart(
             java.util.function.Function<String, String> urlForUpstream,
             List<GoldLapelOptions> capturedOptions) {
+        return stubStart(urlForUpstream, capturedOptions, null);
+    }
+
+    /**
+     * Same as the 2-arg variant, but also captures each upstream URL passed to
+     * {@code GoldLapel.start(...)}, so tests can assert on what got forwarded
+     * to the binary (e.g. to verify separate username/password made it in).
+     */
+    private static MockedStatic<GoldLapel> stubStart(
+            java.util.function.Function<String, String> urlForUpstream,
+            List<GoldLapelOptions> capturedOptions,
+            List<String> capturedUpstreams) {
         MockedStatic<GoldLapel> stat = mockStatic(GoldLapel.class);
         stat.when(() -> GoldLapel.start(anyString(), any())).thenAnswer((InvocationOnMock inv) -> {
             String upstream = inv.getArgument(0);
+            if (capturedUpstreams != null) capturedUpstreams.add(upstream);
             @SuppressWarnings("unchecked")
             Consumer<GoldLapelOptions> cfg = inv.getArgument(1);
             GoldLapelOptions opts = new GoldLapelOptions();
             if (cfg != null) cfg.accept(opts);
             capturedOptions.add(opts);
             GoldLapel gl = mock(GoldLapel.class);
-            when(gl.getUrl()).thenReturn(urlForUpstream.apply(upstream));
+            String proxyUrl = urlForUpstream.apply(upstream);
+            when(gl.getUrl()).thenReturn(proxyUrl);
+            // Mirror the real GoldLapel: split the proxy URL into JDBC form + user/password
+            String[] parsed = parseProxyUrl(proxyUrl);
+            when(gl.getJdbcUrl()).thenReturn(parsed[0]);
+            when(gl.getJdbcUser()).thenReturn(parsed[1]);
+            when(gl.getJdbcPassword()).thenReturn(parsed[2]);
             when(gl.getPort()).thenReturn(opts.getPort() != null ? opts.getPort() : 7932);
             return gl;
         });
         return stat;
+    }
+
+    // Test-local parser that mirrors GoldLapel.toJdbcConnectionInfo(String):
+    // returns [jdbcUrl, user, password] with user/password URL-decoded.
+    private static String[] parseProxyUrl(String url) {
+        String stripped;
+        if (url.startsWith("postgres://")) {
+            stripped = url.substring("postgres://".length());
+        } else if (url.startsWith("postgresql://")) {
+            stripped = url.substring("postgresql://".length());
+        } else {
+            stripped = url;
+        }
+        int pathStart = -1;
+        for (char c : new char[]{'/', '?', '#'}) {
+            int idx = stripped.indexOf(c);
+            if (idx >= 0 && (pathStart < 0 || idx < pathStart)) pathStart = idx;
+        }
+        String authority = pathStart < 0 ? stripped : stripped.substring(0, pathStart);
+        String rest = pathStart < 0 ? "" : stripped.substring(pathStart);
+        String user = null, password = null;
+        int at = authority.lastIndexOf('@');
+        if (at >= 0) {
+            String userinfo = authority.substring(0, at);
+            int colon = userinfo.indexOf(':');
+            if (colon >= 0) {
+                user = java.net.URLDecoder.decode(userinfo.substring(0, colon), java.nio.charset.StandardCharsets.UTF_8);
+                password = java.net.URLDecoder.decode(userinfo.substring(colon + 1), java.nio.charset.StandardCharsets.UTF_8);
+            } else {
+                user = java.net.URLDecoder.decode(userinfo, java.nio.charset.StandardCharsets.UTF_8);
+            }
+            authority = authority.substring(at + 1);
+        }
+        return new String[]{"jdbc:postgresql://" + authority + rest, user, password};
     }
 
     @Test
@@ -562,6 +615,154 @@ class GoldLapelAutoConfigurationTest {
             assertThat(ds.getUrl()).isEqualTo("jdbc:postgresql://localhost:7932/db");
             assertThat(result).isSameAs(ds);
         }
+    }
+
+    // --- Regression: userinfo handling (Bug 2 & Bug 3 in wrapper-v0.2-factory-api) ---
+
+    @Test
+    void inlineUserinfoGetsStrippedFromRewrittenJdbcUrl() {
+        // Bug 2 regression: when the source URL has inline userinfo, the
+        // post-processor MUST split it out before handing the URL back to the
+        // DataSource — the PG JDBC driver reads user@host as the hostname.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                // GoldLapel preserves inline userinfo in getUrl(), mirroring the upstream
+                u -> "postgresql://alice:s3cret@localhost:7932/db", captured)) {
+
+            HikariDataSource ds = new HikariDataSource();
+            ds.setJdbcUrl("jdbc:postgresql://alice:s3cret@upstream-host:5432/db");
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            props.setNativeCache(false);
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+
+            processor.postProcessAfterInitialization(ds, "dataSource");
+
+            // URL on DataSource: no inline userinfo (JDBC-safe)
+            assertThat(ds.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/db");
+            assertThat(ds.getJdbcUrl()).doesNotContain("@");
+            // Creds pushed into the DataSource's separate user/password fields
+            assertThat(ds.getUsername()).isEqualTo("alice");
+            assertThat(ds.getPassword()).isEqualTo("s3cret");
+        }
+    }
+
+    @Test
+    void separateUsernamePasswordInjectedIntoUpstream() {
+        // Bug 3 regression: when the source URL has no userinfo but the
+        // DataSource carries username/password as separate properties (the
+        // idiomatic Spring pattern), those creds MUST be injected into the
+        // upstream URL handed to the Rust binary — otherwise the binary has
+        // no creds for its bookkeeping connection.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        List<String> capturedUpstreams = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://alice:s3cret@localhost:7932/db", captured, capturedUpstreams)) {
+
+            HikariDataSource ds = new HikariDataSource();
+            ds.setJdbcUrl("jdbc:postgresql://upstream-host:5432/db");
+            ds.setUsername("alice");
+            ds.setPassword("s3cret");
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            props.setNativeCache(false);
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+
+            processor.postProcessAfterInitialization(ds, "dataSource");
+
+            // The upstream passed to GoldLapel.start() carries the creds
+            assertThat(capturedUpstreams).hasSize(1);
+            assertThat(capturedUpstreams.get(0))
+                    .isEqualTo("postgresql://alice:s3cret@upstream-host:5432/db");
+        }
+    }
+
+    @Test
+    void separateCredsPercentEncodedWhenInjected() {
+        // Special characters in user/password must be URL-encoded so they
+        // don't corrupt the upstream URL the Rust binary parses.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        List<String> capturedUpstreams = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/db", captured, capturedUpstreams)) {
+
+            HikariDataSource ds = new HikariDataSource();
+            ds.setJdbcUrl("jdbc:postgresql://host:5432/db");
+            ds.setUsername("alice@corp");
+            ds.setPassword("p@ss:w/rd");
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            props.setNativeCache(false);
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+
+            processor.postProcessAfterInitialization(ds, "dataSource");
+
+            assertThat(capturedUpstreams).hasSize(1);
+            // @ -> %40, : -> %3A, / -> %2F
+            assertThat(capturedUpstreams.get(0))
+                    .isEqualTo("postgresql://alice%40corp:p%40ss%3Aw%2Frd@host:5432/db");
+        }
+    }
+
+    @Test
+    void inlineUserinfoTakesPrecedenceOverSeparateCreds() {
+        // If both inline userinfo AND separate username/password are present,
+        // inline wins — don't double-inject.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        List<String> capturedUpstreams = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/db", captured, capturedUpstreams)) {
+
+            HikariDataSource ds = new HikariDataSource();
+            ds.setJdbcUrl("jdbc:postgresql://inline:inlinepw@host:5432/db");
+            ds.setUsername("other");
+            ds.setPassword("otherpw");
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            props.setNativeCache(false);
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+
+            processor.postProcessAfterInitialization(ds, "dataSource");
+
+            assertThat(capturedUpstreams).hasSize(1);
+            assertThat(capturedUpstreams.get(0))
+                    .isEqualTo("postgresql://inline:inlinepw@host:5432/db");
+        }
+    }
+
+    @Test
+    void upstreamHasUserinfoDetection() {
+        assertThat(GoldLapelDataSourcePostProcessor.upstreamHasUserinfo(
+                "postgresql://alice:pw@host:5432/db")).isTrue();
+        assertThat(GoldLapelDataSourcePostProcessor.upstreamHasUserinfo(
+                "postgresql://alice@host/db")).isTrue();
+        assertThat(GoldLapelDataSourcePostProcessor.upstreamHasUserinfo(
+                "postgresql://host:5432/db")).isFalse();
+        assertThat(GoldLapelDataSourcePostProcessor.upstreamHasUserinfo(
+                "postgresql://host/db?param=a@b")).isFalse();
+        assertThat(GoldLapelDataSourcePostProcessor.upstreamHasUserinfo(
+                "postgresql://host/db#frag@x")).isFalse();
+    }
+
+    @Test
+    void injectUserinfoHandlesNullPassword() {
+        String result = GoldLapelDataSourcePostProcessor.injectUserinfo(
+                "postgresql://host:5432/db", "alice", null);
+        assertThat(result).isEqualTo("postgresql://alice@host:5432/db");
+    }
+
+    @Test
+    void injectUserinfoEncodesSpecialCharacters() {
+        String result = GoldLapelDataSourcePostProcessor.injectUserinfo(
+                "postgresql://host/db", "u ser", "p wd");
+        // Spaces encoded as %20 (not '+'), '@'/':' encoded too
+        assertThat(result).isEqualTo("postgresql://u%20ser:p%20wd@host/db");
+    }
+
+    @Test
+    void invokeStringGetterReturnsNullForMissingMethod() {
+        Object obj = new Object();
+        assertThat(GoldLapelDataSourcePostProcessor.invokeStringGetter(obj, "getUsername")).isNull();
     }
 
     @Test

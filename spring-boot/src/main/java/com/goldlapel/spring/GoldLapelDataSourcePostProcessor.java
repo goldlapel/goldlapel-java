@@ -9,6 +9,8 @@ import org.springframework.beans.factory.config.BeanPostProcessor;
 
 import javax.sql.DataSource;
 import java.lang.reflect.Method;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -56,6 +58,17 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
 
         String upstream = jdbcUrl.substring(JDBC_PREFIX.length());
 
+        // If the DataSource carries credentials as separate properties
+        // (idiomatic Spring: spring.datasource.username / .password), inject
+        // them into the upstream URL so the Rust binary has creds for its
+        // bookkeeping connection. If the URL already has inline userinfo, we
+        // leave it alone — inline creds take precedence.
+        String dsUser = invokeStringGetter(ds, "getUsername");
+        String dsPassword = invokeStringGetter(ds, "getPassword");
+        if (!upstreamHasUserinfo(upstream) && dsUser != null && !dsUser.isEmpty()) {
+            upstream = injectUserinfo(upstream, dsUser, dsPassword);
+        }
+
         // Assign a unique port per unique upstream URL. If two DataSource beans
         // point to the same upstream, they share a proxy. Otherwise each gets
         // its own port so they don't collide.
@@ -85,8 +98,19 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
         }
 
         proxies.add(proxy);
-        String proxyJdbcUrl = JDBC_PREFIX + proxy.getUrl();
-        setJdbcUrl(ds, proxyJdbcUrl);
+        // Use the wrapper's JDBC-safe helpers: the PG JDBC driver rejects
+        // inline userinfo (it reads user@host as the hostname), so we set the
+        // URL without userinfo and push the user/password onto the DataSource
+        // via its separate setters (same reflection pattern as setJdbcUrl).
+        setJdbcUrl(ds, proxy.getJdbcUrl());
+        String jdbcUser = proxy.getJdbcUser();
+        String jdbcPassword = proxy.getJdbcPassword();
+        if (jdbcUser != null) {
+            setStringProperty(ds, "setUsername", jdbcUser);
+        }
+        if (jdbcPassword != null) {
+            setStringProperty(ds, "setPassword", jdbcPassword);
+        }
 
         log.info("Gold Lapel proxy started — {} now routes through localhost:{}", beanName, port);
 
@@ -153,6 +177,75 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
         log.warn("Gold Lapel: could not set JDBC URL on DataSource bean of type {}. " +
                 "The proxy URL may not be applied.",
                 ds.getClass().getName());
+    }
+
+    // Invoke a zero-arg String getter via reflection. Returns null if the
+    // method doesn't exist, isn't accessible, or returns a non-String value.
+    static String invokeStringGetter(Object target, String methodName) {
+        try {
+            Method m = target.getClass().getMethod(methodName);
+            Object result = m.invoke(target);
+            if (result instanceof String s) {
+                return s;
+            }
+        } catch (Exception ignored) {
+            // Method not found or not accessible — fall through
+        }
+        return null;
+    }
+
+    // Invoke a single-String-arg setter via reflection. Silently ignores
+    // missing or inaccessible methods (the bean may simply not support it).
+    private static void setStringProperty(Object target, String methodName, String value) {
+        try {
+            Method m = target.getClass().getMethod(methodName, String.class);
+            m.invoke(target, value);
+        } catch (Exception ignored) {
+            // Method not found or not accessible — silently skip
+        }
+    }
+
+    // True iff the authority portion of the postgres URL contains userinfo
+    // (i.e. a '@' before any /?# path/query delimiter).
+    static boolean upstreamHasUserinfo(String upstream) {
+        int schemeIdx = upstream.indexOf("://");
+        int start = schemeIdx < 0 ? 0 : schemeIdx + 3;
+        int end = upstream.length();
+        for (int i = start; i < end; i++) {
+            char c = upstream.charAt(i);
+            if (c == '/' || c == '?' || c == '#') {
+                end = i;
+                break;
+            }
+        }
+        return upstream.lastIndexOf('@', end - 1) >= start;
+    }
+
+    // Inject userinfo into a postgres URL that lacks it. user and password are
+    // percent-encoded so special characters (e.g. '@', ':', '/', ' ') don't
+    // corrupt the resulting URL. password may be null.
+    static String injectUserinfo(String upstream, String user, String password) {
+        int schemeIdx = upstream.indexOf("://");
+        if (schemeIdx < 0) {
+            // Not a URL we recognize — leave alone rather than mangle it
+            return upstream;
+        }
+        String prefix = upstream.substring(0, schemeIdx + 3);
+        String rest = upstream.substring(schemeIdx + 3);
+        StringBuilder userinfo = new StringBuilder();
+        userinfo.append(percentEncodeUserinfo(user));
+        if (password != null) {
+            userinfo.append(':').append(percentEncodeUserinfo(password));
+        }
+        userinfo.append('@');
+        return prefix + userinfo + rest;
+    }
+
+    // Percent-encode a userinfo component. Uses URLEncoder (form encoding) and
+    // then rewrites '+' as '%20' so spaces decode correctly against RFC 3986
+    // URL parsers (which treat '+' literally in userinfo).
+    private static String percentEncodeUserinfo(String s) {
+        return URLEncoder.encode(s, StandardCharsets.UTF_8).replace("+", "%20");
     }
 
     // Convert kebab-case keys to camelCase and coerce String values to their
