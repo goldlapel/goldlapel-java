@@ -7,13 +7,9 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
-import io.r2dbc.spi.Connection;
-import io.r2dbc.spi.Result;
-
 import java.net.ServerSocket;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
