@@ -480,6 +480,165 @@ class DashboardUrlTest {
 }
 
 
+class ClientOptionTest {
+
+    // Helper: read private client field via reflection
+    private static String clientOf(GoldLapel gl) {
+        try {
+            java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("client");
+            f.setAccessible(true);
+            return (String) f.get(gl);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
+    void defaultClientIsJava() {
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
+        assertEquals("java", clientOf(gl));
+    }
+
+    @Test
+    void clientOptionOverridesDefault() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setClient("my-app");
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        assertEquals("my-app", clientOf(gl));
+    }
+
+    @Test
+    void clientOptionGetterSetter() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        assertNull(opts.getClient());
+        opts.setClient("custom");
+        assertEquals("custom", opts.getClient());
+    }
+
+    // Spawn a shell script that dumps GOLDLAPEL_CLIENT to a file, then exits.
+    // The wrapper's startProxy() will time out (port never opens) and throw —
+    // but by then the script has already captured the env var. This lets us
+    // assert the actual subprocess-visible value, not just the Java-side field.
+    //
+    // Skipped on Windows (no /bin/sh).
+    private static Path writeDumpScript(Path tmp, Path outFile) throws IOException {
+        Path script = tmp.resolve("goldlapel-dump.sh");
+        Files.writeString(script,
+            "#!/bin/sh\n" +
+            "echo \"${GOLDLAPEL_CLIENT:-<unset>}\" > \"" + outFile.toString() + "\"\n" +
+            "exit 1\n"
+        );
+        script.toFile().setExecutable(true);
+        return script;
+    }
+
+    private static boolean isPosix() {
+        return !System.getProperty("os.name", "").toLowerCase().contains("windows");
+    }
+
+    @Test
+    void clientForwardedToSubprocessEnv(@TempDir Path tmp) throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(isPosix(), "POSIX-only test (needs /bin/sh)");
+        Path out = tmp.resolve("client.txt");
+        Path script = writeDumpScript(tmp, out);
+
+        String origBin = System.getenv("GOLDLAPEL_BINARY");
+        String origClient = System.getenv("GOLDLAPEL_CLIENT");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", script.toString());
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", null); // ensure parent env is clean
+            try {
+                GoldLapel.start("postgresql://localhost:5432/mydb", opts -> opts.setClient("from-opts"));
+                fail("start() should have thrown — dump script exits immediately");
+            } catch (RuntimeException expected) {
+                // Expected: port never opens because the script exited.
+            }
+            // Wait briefly for the script's write to flush (process has already exited).
+            assertTrue(Files.exists(out), "dump script should have written output file");
+            assertEquals("from-opts", Files.readString(out).trim());
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", origBin);
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", origClient);
+        }
+    }
+
+    @Test
+    void clientDefaultsToJavaWhenOptionUnset(@TempDir Path tmp) throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(isPosix(), "POSIX-only test (needs /bin/sh)");
+        Path out = tmp.resolve("client.txt");
+        Path script = writeDumpScript(tmp, out);
+
+        String origBin = System.getenv("GOLDLAPEL_BINARY");
+        String origClient = System.getenv("GOLDLAPEL_CLIENT");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", script.toString());
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", null);
+            try {
+                GoldLapel.start("postgresql://localhost:5432/mydb");
+                fail("start() should have thrown — dump script exits immediately");
+            } catch (RuntimeException expected) {
+                // expected
+            }
+            assertTrue(Files.exists(out));
+            assertEquals("java", Files.readString(out).trim());
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", origBin);
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", origClient);
+        }
+    }
+
+    @Test
+    void inheritedEnvClientBeatsOption(@TempDir Path tmp) throws Exception {
+        // Documents ACTUAL precedence: the wrapper uses
+        // ProcessBuilder.environment().putIfAbsent("GOLDLAPEL_CLIENT", client),
+        // which means an inherited env var from the parent JVM wins over the
+        // option. This is a deliberate escape hatch (ops can stamp a client
+        // identifier without touching application code) — if this test fails
+        // someone changed the precedence; update both the code and this test.
+        org.junit.jupiter.api.Assumptions.assumeTrue(isPosix(), "POSIX-only test (needs /bin/sh)");
+        Path out = tmp.resolve("client.txt");
+        Path script = writeDumpScript(tmp, out);
+
+        String origBin = System.getenv("GOLDLAPEL_BINARY");
+        String origClient = System.getenv("GOLDLAPEL_CLIENT");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", script.toString());
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", "from-parent-env");
+            try {
+                GoldLapel.start("postgresql://localhost:5432/mydb", opts -> opts.setClient("from-opts"));
+                fail("start() should have thrown");
+            } catch (RuntimeException expected) {
+                // expected
+            }
+            assertTrue(Files.exists(out));
+            // putIfAbsent → inherited parent env wins over option
+            assertEquals("from-parent-env", Files.readString(out).trim());
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", origBin);
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", origClient);
+        }
+    }
+
+    // Reflective env var manipulation (same approach as FindBinaryTest)
+    @SuppressWarnings("unchecked")
+    static void setEnv(String key, String value) {
+        try {
+            java.util.Map<String, String> env = System.getenv();
+            java.lang.reflect.Field field = env.getClass().getDeclaredField("m");
+            field.setAccessible(true);
+            java.util.Map<String, String> writableEnv = (java.util.Map<String, String>) field.get(env);
+            if (value == null) {
+                writableEnv.remove(key);
+            } else {
+                writableEnv.put(key, value);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to set env var", e);
+        }
+    }
+}
+
+
 class ConfigKeysTest {
 
     @Test
