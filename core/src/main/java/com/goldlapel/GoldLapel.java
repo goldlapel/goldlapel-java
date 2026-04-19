@@ -248,7 +248,11 @@ public class GoldLapel implements AutoCloseable {
             );
         }
         try {
-            internalConn = DriverManager.getConnection(jdbcUrl());
+            JdbcConnectionInfo info = toJdbcConnectionInfo(proxyUrl);
+            java.util.Properties props = new java.util.Properties();
+            if (info.user != null) props.setProperty("user", info.user);
+            if (info.password != null) props.setProperty("password", info.password);
+            internalConn = DriverManager.getConnection(info.url, props);
         } catch (SQLException e) {
             throw new RuntimeException(
                 "Gold Lapel failed to open internal JDBC connection: " + e.getMessage(), e
@@ -256,14 +260,69 @@ public class GoldLapel implements AutoCloseable {
         }
     }
 
-    private String jdbcUrl() {
-        String url = proxyUrl;
+    // Split a postgres:// URL into a JDBC URL + user/password properties.
+    // JDBC's PostgreSQL driver rejects userinfo inline in the URL (it reads
+    // everything before '@' as the hostname), so we split it out explicitly.
+    static JdbcConnectionInfo toJdbcConnectionInfo(String url) {
+        String stripped;
         if (url.startsWith("postgres://")) {
-            return "jdbc:postgresql://" + url.substring("postgres://".length());
+            stripped = url.substring("postgres://".length());
         } else if (url.startsWith("postgresql://")) {
-            return "jdbc:postgresql://" + url.substring("postgresql://".length());
+            stripped = url.substring("postgresql://".length());
+        } else {
+            stripped = url;
         }
-        return "jdbc:postgresql://" + url;
+
+        String user = null;
+        String password = null;
+        // If there's userinfo (something before the last '@' in the authority),
+        // split it out. We use the LAST '@' because '@' can appear in passwords
+        // (common with generated credentials).
+        int pathStart = indexOfAny(stripped, "/?#");
+        String authority = pathStart < 0 ? stripped : stripped.substring(0, pathStart);
+        String rest = pathStart < 0 ? "" : stripped.substring(pathStart);
+        int at = authority.lastIndexOf('@');
+        if (at >= 0) {
+            String userinfo = authority.substring(0, at);
+            int colon = userinfo.indexOf(':');
+            if (colon >= 0) {
+                user = urlDecode(userinfo.substring(0, colon));
+                password = urlDecode(userinfo.substring(colon + 1));
+            } else {
+                user = urlDecode(userinfo);
+            }
+            authority = authority.substring(at + 1);
+        }
+        return new JdbcConnectionInfo("jdbc:postgresql://" + authority + rest, user, password);
+    }
+
+    private static int indexOfAny(String s, String chars) {
+        int min = -1;
+        for (int i = 0; i < chars.length(); i++) {
+            int idx = s.indexOf(chars.charAt(i));
+            if (idx >= 0 && (min < 0 || idx < min)) min = idx;
+        }
+        return min;
+    }
+
+    private static String urlDecode(String s) {
+        try {
+            return java.net.URLDecoder.decode(s, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            // If the string contains invalid %xx sequences, fall back to raw
+            return s;
+        }
+    }
+
+    static class JdbcConnectionInfo {
+        final String url;
+        final String user;
+        final String password;
+        JdbcConnectionInfo(String url, String user, String password) {
+            this.url = url;
+            this.user = user;
+            this.password = password;
+        }
     }
 
     // ── Lifecycle ─────────────────────────────────────────────
@@ -301,9 +360,38 @@ public class GoldLapel implements AutoCloseable {
 
     // ── Accessors ─────────────────────────────────────────────
 
-    /** Proxy URL (e.g. {@code postgresql://user:pass@localhost:7932/mydb}). */
+    /**
+     * Proxy URL in the standard Postgres form
+     * ({@code postgresql://user:pass@localhost:7932/mydb}). Matches the shape
+     * of the upstream URL. For JDBC, use {@link #getJdbcUrl()} — the JDBC
+     * driver rejects inline userinfo.
+     */
     public String getUrl() {
         return proxyUrl;
+    }
+
+    /**
+     * JDBC connection URL for the proxy, suitable for
+     * {@link DriverManager#getConnection(String, java.util.Properties)}. The
+     * returned URL has the {@code jdbc:postgresql://} scheme and no userinfo;
+     * retrieve the user and password separately via
+     * {@link #getJdbcUser()} and {@link #getJdbcPassword()}.
+     */
+    public String getJdbcUrl() {
+        if (proxyUrl == null) return null;
+        return toJdbcConnectionInfo(proxyUrl).url;
+    }
+
+    /** User name parsed from the upstream URL, or {@code null} if absent. */
+    public String getJdbcUser() {
+        if (proxyUrl == null) return null;
+        return toJdbcConnectionInfo(proxyUrl).user;
+    }
+
+    /** Password parsed from the upstream URL, or {@code null} if absent. */
+    public String getJdbcPassword() {
+        if (proxyUrl == null) return null;
+        return toJdbcConnectionInfo(proxyUrl).password;
     }
 
     public int getPort() {

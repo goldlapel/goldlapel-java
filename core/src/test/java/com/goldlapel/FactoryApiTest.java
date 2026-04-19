@@ -198,6 +198,68 @@ class FactoryApiTest {
     }
 
     @Test
+    void toJdbcConnectionInfoStripsUserinfo() {
+        GoldLapel.JdbcConnectionInfo info =
+            GoldLapel.toJdbcConnectionInfo("postgresql://alice:s3cret@db.example.com:7932/mydb");
+        assertEquals("jdbc:postgresql://db.example.com:7932/mydb", info.url);
+        assertEquals("alice", info.user);
+        assertEquals("s3cret", info.password);
+    }
+
+    @Test
+    void toJdbcConnectionInfoHandlesUserOnly() {
+        GoldLapel.JdbcConnectionInfo info =
+            GoldLapel.toJdbcConnectionInfo("postgresql://sgibson@localhost/postgres");
+        assertEquals("jdbc:postgresql://localhost/postgres", info.url);
+        assertEquals("sgibson", info.user);
+        assertNull(info.password);
+    }
+
+    @Test
+    void toJdbcConnectionInfoHandlesNoUserinfo() {
+        GoldLapel.JdbcConnectionInfo info =
+            GoldLapel.toJdbcConnectionInfo("postgresql://localhost:7932/mydb");
+        assertEquals("jdbc:postgresql://localhost:7932/mydb", info.url);
+        assertNull(info.user);
+        assertNull(info.password);
+    }
+
+    @Test
+    void toJdbcConnectionInfoPreservesQueryParams() {
+        GoldLapel.JdbcConnectionInfo info = GoldLapel.toJdbcConnectionInfo(
+            "postgresql://alice:pw@host:7932/mydb?sslmode=require");
+        assertEquals("jdbc:postgresql://host:7932/mydb?sslmode=require", info.url);
+        assertEquals("alice", info.user);
+        assertEquals("pw", info.password);
+    }
+
+    @Test
+    void toJdbcConnectionInfoSplitsOnLastAtInPassword() {
+        // When '@' appears in the password, userinfo is demarcated by the last '@'
+        GoldLapel.JdbcConnectionInfo info = GoldLapel.toJdbcConnectionInfo(
+            "postgresql://alice:p@ss@host:7932/mydb");
+        assertEquals("jdbc:postgresql://host:7932/mydb", info.url);
+        assertEquals("alice", info.user);
+        assertEquals("p@ss", info.password);
+    }
+
+    @Test
+    void toJdbcConnectionInfoDecodesPercentEncoding() {
+        GoldLapel.JdbcConnectionInfo info = GoldLapel.toJdbcConnectionInfo(
+            "postgresql://alice:p%40ss@host:7932/mydb");
+        assertEquals("alice", info.user);
+        assertEquals("p@ss", info.password);
+    }
+
+    @Test
+    void toJdbcConnectionInfoAcceptsPostgresScheme() {
+        GoldLapel.JdbcConnectionInfo info =
+            GoldLapel.toJdbcConnectionInfo("postgres://bob@host/db");
+        assertEquals("jdbc:postgresql://host/db", info.url);
+        assertEquals("bob", info.user);
+    }
+
+    @Test
     void usingScopeVisibleToWrapperMethodWithoutOverride() throws SQLException {
         GoldLapel gl = unstarted();
         Connection internal = mock(Connection.class);

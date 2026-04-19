@@ -20,25 +20,35 @@ Gold Lapel sits between your app and Postgres, watches query patterns, and autom
 import com.goldlapel.GoldLapel;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.util.Properties;
 
 try (GoldLapel gl = GoldLapel.start("postgresql://user:pass@localhost:5432/mydb", opts -> {
         opts.setPort(7932);
         opts.setLogLevel("info");
 })) {
-    // Use the proxy URL with any JDBC driver
-    try (Connection conn = DriverManager.getConnection(gl.getUrl())) {
+    // JDBC: use getJdbcUrl() + user/password properties (the JDBC driver
+    // rejects userinfo inline in the URL).
+    Properties props = new Properties();
+    if (gl.getJdbcUser() != null) props.setProperty("user", gl.getJdbcUser());
+    if (gl.getJdbcPassword() != null) props.setProperty("password", gl.getJdbcPassword());
+    try (Connection conn = DriverManager.getConnection(gl.getJdbcUrl(), props)) {
         var stmt = conn.prepareStatement("SELECT * FROM users WHERE id = ?");
         stmt.setLong(1, 42);
         var rs = stmt.executeQuery();
         // ...
     }
 
-    // Or use the built-in wrapper methods directly
+    // Or use the built-in wrapper methods directly — they reuse the
+    // connection GoldLapel opened at start():
     var hits = gl.search("articles", "body", "postgres tuning", 10, "english", false);
     gl.docInsert("events", "{\"type\":\"signup\"}");
 }
 // try-with-resources auto-stops the proxy
 ```
+
+`gl.getUrl()` returns the URL in the usual Postgres form
+(`postgresql://user:pass@localhost:7932/mydb`) — handy for passing to libpq
+or psql. `gl.getJdbcUrl()` returns the JDBC-ready form without userinfo.
 
 ## API
 
