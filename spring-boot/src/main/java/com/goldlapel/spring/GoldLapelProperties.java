@@ -35,6 +35,23 @@ public class GoldLapelProperties {
         return extraArgs;
     }
 
+    /**
+     * Raw CLI args appended to the Gold Lapel binary invocation, as a
+     * comma-separated list. To include a literal comma inside an arg (e.g. a
+     * regex with counted repetition), escape it with a backslash: {@code \,}.
+     * A literal backslash is written as {@code \\}.
+     *
+     * <p>Example {@code application.yml}:
+     * <pre>
+     *   goldlapel:
+     *     extra-args: "--threshold-duration-ms,200"
+     *     # with an embedded comma:
+     *     extra-args: "--match=\\d{1\,3}"
+     * </pre>
+     *
+     * <p>See {@link GoldLapelDataSourcePostProcessor#parseExtraArgs(String)}
+     * for the full parsing rules.
+     */
     public void setExtraArgs(String extraArgs) {
         this.extraArgs = extraArgs;
     }

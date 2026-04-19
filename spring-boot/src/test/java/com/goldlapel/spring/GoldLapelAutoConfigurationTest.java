@@ -781,6 +781,89 @@ class GoldLapelAutoConfigurationTest {
         assertThat(GoldLapelDataSourcePostProcessor.invokeStringGetter(obj, "getUsername")).isNull();
     }
 
+    // --- extraArgs parsing: backslash-escape convention (H1) ---
+
+    @Test
+    void parseExtraArgsEmpty() {
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs(null)).isEmpty();
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs("")).isEmpty();
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs("   ")).isEmpty();
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs(",,")).isEmpty();
+    }
+
+    @Test
+    void parseExtraArgsPlainSplit() {
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs("a,b"))
+                .containsExactly("a", "b");
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs("--threshold-duration-ms,200"))
+                .containsExactly("--threshold-duration-ms", "200");
+    }
+
+    @Test
+    void parseExtraArgsEscapedComma() {
+        // Single arg containing a literal comma.
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs("a\\,b,c"))
+                .containsExactly("a,b", "c");
+        // Real-world regex-with-quantifier case.
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs("--re=\\d{1\\,3}"))
+                .containsExactly("--re=\\d{1,3}");
+    }
+
+    @Test
+    void parseExtraArgsEscapedBackslash() {
+        // "a\\,b" in Java source = `a\\,b` on the wire -> single arg "a\"
+        // plus "b" after the comma. `\\` collapses to `\`, then `,` splits.
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs("a\\\\,b"))
+                .containsExactly("a\\", "b");
+    }
+
+    @Test
+    void parseExtraArgsTrailingBackslash() {
+        // Lone trailing backslash: no following char, so keep it literal.
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs("a\\"))
+                .containsExactly("a\\");
+    }
+
+    @Test
+    void parseExtraArgsUnrecognizedEscapePreservesBackslash() {
+        // `\x` isn't a recognized escape — keep both chars as-is so users
+        // passing literal backslashes in non-, / non-\\ contexts aren't silently
+        // corrupted.
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs("a\\x,b"))
+                .containsExactly("a\\x", "b");
+    }
+
+    @Test
+    void parseExtraArgsDropsBlankTokens() {
+        // Empty / whitespace-only tokens between commas are dropped.
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs("a,,b"))
+                .containsExactly("a", "b");
+        assertThat(GoldLapelDataSourcePostProcessor.parseExtraArgs("a, ,b"))
+                .containsExactly("a", "b");
+    }
+
+    @Test
+    void extraArgsPropertyWithEscapedCommaForwardedToOptions() {
+        // End-to-end: goldlapel.extra-args property with an escaped comma
+        // survives Spring binding + parseExtraArgs and lands on the options
+        // as a single arg.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            // Property layer sees: --re=\d{1\,3}  (single arg, comma escaped)
+                            "goldlapel.extra-args=--re=\\d{1\\,3}")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).getExtraArgs())
+                                .containsExactly("--re=\\d{1,3}");
+                    });
+        }
+    }
+
     // --- Lifecycle: DisposableBean context-close stops proxies (G1) ---
 
     @Test

@@ -101,8 +101,9 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                 if (configMap != null && !configMap.isEmpty()) {
                     opts.setConfig(normalizeCamelCase(configMap));
                 }
-                if (extraArgsStr != null && !extraArgsStr.isEmpty()) {
-                    opts.setExtraArgs(extraArgsStr.split(","));
+                String[] parsedExtraArgs = parseExtraArgs(extraArgsStr);
+                if (parsedExtraArgs.length > 0) {
+                    opts.setExtraArgs(parsedExtraArgs);
                 }
                 opts.setClient("spring-boot");
             });
@@ -304,6 +305,68 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                     .toList();
         }
         return value;
+    }
+
+    /**
+     * Split a {@code goldlapel.extra-args} string into individual CLI args.
+     *
+     * <p>Args are separated by commas. A comma can be included <em>inside</em>
+     * an arg by escaping it with a backslash ({@code \,}) — handy for values
+     * like regexes with counted repetition (e.g. {@code \d{1\,3}}). A literal
+     * backslash is written as {@code \\}. Empty tokens and pure-whitespace
+     * tokens are dropped. A null or empty input yields an empty array.
+     *
+     * <p>Examples (Java-source: double the backslashes):
+     * <pre>
+     *   "--foo,--bar"        -&gt; ["--foo", "--bar"]
+     *   "--re=\\d{1\\,3}"    -&gt; ["--re=\\d{1,3}"]
+     *   "a\\\\,b"            -&gt; ["a\\", "b"]
+     *   ""                   -&gt; []
+     * </pre>
+     *
+     * <p>In {@code application.yml}, only one level of escaping is needed:
+     * <pre>
+     *   goldlapel:
+     *     extra-args: "--re=\\d{1\,3}"
+     * </pre>
+     */
+    static String[] parseExtraArgs(String input) {
+        if (input == null || input.isEmpty()) {
+            return new String[0];
+        }
+        List<String> out = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            if (c == '\\' && i + 1 < input.length()) {
+                char next = input.charAt(i + 1);
+                if (next == ',' || next == '\\') {
+                    // Recognized escape — consume the backslash and emit the literal.
+                    cur.append(next);
+                    i++;
+                    continue;
+                }
+                // Unrecognized escape: keep the backslash as-is. (Preserves
+                // legacy callers that might pass flags containing a literal
+                // backslash before some other character.)
+                cur.append(c);
+                continue;
+            }
+            if (c == ',') {
+                addIfNotBlank(out, cur.toString());
+                cur.setLength(0);
+                continue;
+            }
+            cur.append(c);
+        }
+        addIfNotBlank(out, cur.toString());
+        return out.toArray(new String[0]);
+    }
+
+    private static void addIfNotBlank(List<String> list, String s) {
+        if (!s.isEmpty() && !s.trim().isEmpty()) {
+            list.add(s);
+        }
     }
 
     static String kebabToCamel(String key) {
