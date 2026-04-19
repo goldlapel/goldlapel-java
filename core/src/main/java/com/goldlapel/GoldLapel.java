@@ -495,6 +495,41 @@ public class GoldLapel implements AutoCloseable {
         }
     }
 
+    /**
+     * Value-returning variant of {@link #using(Connection, Runnable)}: runs
+     * {@code body} with {@code conn} bound as the scoped connection and returns
+     * whatever the body produces. Matches the cross-wrapper consensus where
+     * {@code using} propagates the callback's return value (JS/PHP/Ruby/.NET/Reactor).
+     *
+     * <pre>{@code
+     * long count = gl.using(conn, () -> gl.docCount("events", "{}"));
+     * }</pre>
+     */
+    public <T> T using(Connection conn, ThrowingSupplier<T> body) throws SQLException {
+        if (conn == null) throw new IllegalArgumentException("using(conn, ...): conn must not be null");
+        if (body == null) throw new IllegalArgumentException("using(conn, ...): body must not be null");
+        Connection prev = scopedConn.get();
+        scopedConn.set(conn);
+        try {
+            return body.get();
+        } finally {
+            if (prev == null) {
+                scopedConn.remove();
+            } else {
+                scopedConn.set(prev);
+            }
+        }
+    }
+
+    /**
+     * Supplier variant that may throw {@link SQLException}, for use with
+     * {@link #using(Connection, ThrowingSupplier)}.
+     */
+    @FunctionalInterface
+    public interface ThrowingSupplier<T> {
+        T get() throws SQLException;
+    }
+
     // ── Wrapper methods (each has a no-conn and an explicit-conn overload) ─
 
     // Document store
