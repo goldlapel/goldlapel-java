@@ -415,7 +415,26 @@ class DashboardUrlTest {
     @Test
     void defaultDashboardPort() {
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
-        assertEquals(7933, GoldLapel.DEFAULT_DASHBOARD_PORT);
+        assertEquals(7933, gl.getDashboardPort());
+    }
+
+    @Test
+    void dashboardPortDerivesFromCustomProxyPort() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setPort(17932);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        assertEquals(17933, gl.getDashboardPort());
+    }
+
+    @Test
+    void explicitDashboardPortOverridesDerivation() {
+        Map<String, Object> config = new HashMap<>();
+        config.put("dashboardPort", 9999);
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setPort(17932);
+        opts.setConfig(config);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        assertEquals(9999, gl.getDashboardPort());
     }
 
     @Test

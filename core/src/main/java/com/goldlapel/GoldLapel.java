@@ -50,7 +50,6 @@ import java.util.function.BiConsumer;
 public class GoldLapel implements AutoCloseable {
 
     static final int DEFAULT_PORT = 7932;
-    static final int DEFAULT_DASHBOARD_PORT = 7933;
     static final long STARTUP_TIMEOUT_MS = 10000;
     static final long STARTUP_POLL_INTERVAL_MS = 50;
 
@@ -116,7 +115,7 @@ public class GoldLapel implements AutoCloseable {
         Map<String, Object> cfg = options.getConfig();
         this.dashboardPort = cfg != null && cfg.containsKey("dashboardPort")
             ? ((Number) cfg.get("dashboardPort")).intValue()
-            : DEFAULT_DASHBOARD_PORT;
+            : this.port + 1;
         this.config = cfg;
         List<String> extras = options.getExtraArgs() != null
             ? new ArrayList<>(options.getExtraArgs())
@@ -431,6 +430,11 @@ public class GoldLapel implements AutoCloseable {
 
     public int getPort() {
         return port;
+    }
+
+    // Package-private accessor for tests — not part of the public API.
+    int getDashboardPort() {
+        return dashboardPort;
     }
 
     public String getDashboardUrl() {
