@@ -5,6 +5,7 @@ import com.goldlapel.NativeCache;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 
 import javax.sql.DataSource;
@@ -17,7 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
+public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(GoldLapelDataSourcePostProcessor.class);
     private static final String JDBC_PREFIX = "jdbc:";
@@ -34,11 +35,26 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
     public GoldLapelDataSourcePostProcessor(GoldLapelProperties properties) {
         this.properties = properties;
         this.nextPort = properties.getPort();
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            for (GoldLapel proxy : proxies) {
+    }
+
+    /**
+     * Spring lifecycle: stop all proxies when the application context is
+     * closed. This fires on devtools restart, integration-test context
+     * teardown, and multi-context app shutdown — scenarios where the JVM keeps
+     * running but the context goes away. Using {@link DisposableBean} instead
+     * of {@code Runtime.addShutdownHook} avoids orphaned proxy subprocesses
+     * and port-collision failures on the next context start.
+     */
+    @Override
+    public void destroy() {
+        for (GoldLapel proxy : proxies) {
+            try {
                 proxy.stop();
+            } catch (RuntimeException e) {
+                // One proxy failing to stop shouldn't block the others.
+                log.warn("Gold Lapel: proxy stop() failed during context shutdown", e);
             }
-        }));
+        }
     }
 
     @Override

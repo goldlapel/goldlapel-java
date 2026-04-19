@@ -24,7 +24,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -69,6 +71,19 @@ class GoldLapelAutoConfigurationTest {
             java.util.function.Function<String, String> urlForUpstream,
             List<GoldLapelOptions> capturedOptions,
             List<String> capturedUpstreams) {
+        return stubStart(urlForUpstream, capturedOptions, capturedUpstreams, null);
+    }
+
+    /**
+     * Full-fat stub. Also collects every mock {@code GoldLapel} proxy returned
+     * from {@code start(...)} into {@code capturedProxies}, so tests can verify
+     * {@code stop()} was (or wasn't) invoked on each of them.
+     */
+    private static MockedStatic<GoldLapel> stubStart(
+            java.util.function.Function<String, String> urlForUpstream,
+            List<GoldLapelOptions> capturedOptions,
+            List<String> capturedUpstreams,
+            List<GoldLapel> capturedProxies) {
         MockedStatic<GoldLapel> stat = mockStatic(GoldLapel.class);
         stat.when(() -> GoldLapel.start(anyString(), any())).thenAnswer((InvocationOnMock inv) -> {
             String upstream = inv.getArgument(0);
@@ -87,6 +102,7 @@ class GoldLapelAutoConfigurationTest {
             when(gl.getJdbcUser()).thenReturn(parsed[1]);
             when(gl.getJdbcPassword()).thenReturn(parsed[2]);
             when(gl.getPort()).thenReturn(opts.getPort() != null ? opts.getPort() : 7932);
+            if (capturedProxies != null) capturedProxies.add(gl);
             return gl;
         });
         return stat;
@@ -763,6 +779,109 @@ class GoldLapelAutoConfigurationTest {
     void invokeStringGetterReturnsNullForMissingMethod() {
         Object obj = new Object();
         assertThat(GoldLapelDataSourcePostProcessor.invokeStringGetter(obj, "getUsername")).isNull();
+    }
+
+    // --- Lifecycle: DisposableBean context-close stops proxies (G1) ---
+
+    @Test
+    void destroyStopsAllProxies() {
+        // Unit-level: invoking destroy() directly must call stop() on every
+        // proxy the post-processor has started. This is the behavior Spring
+        // relies on when it tears down the context without killing the JVM
+        // (devtools restart, integration-test ctx close, etc.).
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        List<String> capturedUpstreams = new ArrayList<>();
+        List<GoldLapel> capturedProxies = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> u.contains("host1")
+                        ? "postgresql://localhost:7932/db1"
+                        : "postgresql://localhost:7933/db2",
+                captured, capturedUpstreams, capturedProxies)) {
+
+            HikariDataSource ds1 = new HikariDataSource();
+            ds1.setJdbcUrl("jdbc:postgresql://host1:5432/db1");
+            HikariDataSource ds2 = new HikariDataSource();
+            ds2.setJdbcUrl("jdbc:postgresql://host2:5432/db2");
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            props.setNativeCache(false);
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+
+            processor.postProcessAfterInitialization(ds1, "ds1");
+            processor.postProcessAfterInitialization(ds2, "ds2");
+            assertThat(capturedProxies).hasSize(2);
+
+            processor.destroy();
+
+            verify(capturedProxies.get(0), times(1)).stop();
+            verify(capturedProxies.get(1), times(1)).stop();
+        }
+    }
+
+    @Test
+    void springContextCloseStopsProxies() {
+        // End-to-end via ApplicationContextRunner: closing the context
+        // (without killing the JVM) must invoke destroy() on the
+        // DisposableBean, which stops the proxy. This is the devtools-restart
+        // / SpringBootTest scenario the old addShutdownHook missed.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        List<GoldLapel> capturedProxies = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured, null, capturedProxies)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver")
+                    .run(context -> {
+                        // Inside the closure, the context is open — proxy was started
+                        // but stop() has NOT been called yet.
+                        assertThat(capturedProxies).hasSize(1);
+                        verify(capturedProxies.get(0), never()).stop();
+                    });
+
+            // ApplicationContextRunner closes the context after the closure
+            // returns. That triggers DisposableBean.destroy() on our
+            // post-processor, which calls stop() on each proxy.
+            assertThat(capturedProxies).hasSize(1);
+            verify(capturedProxies.get(0), times(1)).stop();
+        }
+    }
+
+    @Test
+    void destroyContinuesAfterProxyStopThrows() {
+        // If one proxy's stop() misbehaves, the others must still get stopped
+        // (orphan subprocesses otherwise hold the next context-start hostage
+        // on port collisions).
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        List<GoldLapel> capturedProxies = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> u.contains("host1")
+                        ? "postgresql://localhost:7932/db1"
+                        : "postgresql://localhost:7933/db2",
+                captured, null, capturedProxies)) {
+
+            HikariDataSource ds1 = new HikariDataSource();
+            ds1.setJdbcUrl("jdbc:postgresql://host1:5432/db1");
+            HikariDataSource ds2 = new HikariDataSource();
+            ds2.setJdbcUrl("jdbc:postgresql://host2:5432/db2");
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            props.setNativeCache(false);
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+
+            processor.postProcessAfterInitialization(ds1, "ds1");
+            processor.postProcessAfterInitialization(ds2, "ds2");
+            assertThat(capturedProxies).hasSize(2);
+
+            // First proxy throws on stop(); the second one must still be called.
+            org.mockito.Mockito.doThrow(new RuntimeException("boom"))
+                    .when(capturedProxies.get(0)).stop();
+
+            processor.destroy();
+
+            verify(capturedProxies.get(0), times(1)).stop();
+            verify(capturedProxies.get(1), times(1)).stop();
+        }
     }
 
     @Test
