@@ -5,17 +5,20 @@ import com.goldlapel.NativeCache;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 
 import javax.sql.DataSource;
 import java.lang.reflect.Method;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
+public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(GoldLapelDataSourcePostProcessor.class);
     private static final String JDBC_PREFIX = "jdbc:";
@@ -32,11 +35,26 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
     public GoldLapelDataSourcePostProcessor(GoldLapelProperties properties) {
         this.properties = properties;
         this.nextPort = properties.getPort();
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            for (GoldLapel proxy : proxies) {
-                proxy.stopProxy();
+    }
+
+    /**
+     * Spring lifecycle: stop all proxies when the application context is
+     * closed. This fires on devtools restart, integration-test context
+     * teardown, and multi-context app shutdown — scenarios where the JVM keeps
+     * running but the context goes away. Using {@link DisposableBean} instead
+     * of {@code Runtime.addShutdownHook} avoids orphaned proxy subprocesses
+     * and port-collision failures on the next context start.
+     */
+    @Override
+    public void destroy() {
+        for (GoldLapel proxy : proxies) {
+            try {
+                proxy.stop();
+            } catch (RuntimeException e) {
+                // One proxy failing to stop shouldn't block the others.
+                log.warn("Gold Lapel: proxy stop() failed during context shutdown", e);
             }
-        }));
+        }
     }
 
     @Override
@@ -56,6 +74,17 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
 
         String upstream = jdbcUrl.substring(JDBC_PREFIX.length());
 
+        // If the DataSource carries credentials as separate properties
+        // (idiomatic Spring: spring.datasource.username / .password), inject
+        // them into the upstream URL so the Rust binary has creds for its
+        // bookkeeping connection. If the URL already has inline userinfo, we
+        // leave it alone — inline creds take precedence.
+        String dsUser = invokeStringGetter(ds, "getUsername");
+        String dsPassword = invokeStringGetter(ds, "getPassword");
+        if (!upstreamHasUserinfo(upstream) && dsUser != null && !dsUser.isEmpty()) {
+            upstream = injectUserinfo(upstream, dsUser, dsPassword);
+        }
+
         // Assign a unique port per unique upstream URL. If two DataSource beans
         // point to the same upstream, they share a proxy. Otherwise each gets
         // its own port so they don't collide.
@@ -63,22 +92,21 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
 
         String extraArgsStr = properties.getExtraArgs();
         Map<String, String> configMap = properties.getConfig();
+        final int assignedPort = port;
 
-        GoldLapel.Options options = new GoldLapel.Options().port(port);
-
-        if (configMap != null && !configMap.isEmpty()) {
-            options.config(normalizeCamelCase(configMap));
-        }
-
-        if (extraArgsStr != null && !extraArgsStr.isEmpty()) {
-            options.extraArgs(extraArgsStr.split(","));
-        }
-
-        options.client("spring-boot");
-        GoldLapel proxy = new GoldLapel(upstream, options);
-        String proxyUrl;
+        GoldLapel proxy;
         try {
-            proxyUrl = proxy.startProxy();
+            proxy = GoldLapel.start(upstream, opts -> {
+                opts.setPort(assignedPort);
+                if (configMap != null && !configMap.isEmpty()) {
+                    opts.setConfig(normalizeCamelCase(configMap));
+                }
+                String[] parsedExtraArgs = parseExtraArgs(extraArgsStr);
+                if (parsedExtraArgs.length > 0) {
+                    opts.setExtraArgs(parsedExtraArgs);
+                }
+                opts.setClient("spring-boot");
+            });
         } catch (RuntimeException e) {
             String safeUpstream = upstream.replaceAll("://.*@", "://***@");
             throw new RuntimeException(
@@ -87,8 +115,19 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
         }
 
         proxies.add(proxy);
-        String proxyJdbcUrl = JDBC_PREFIX + proxyUrl;
-        setJdbcUrl(ds, proxyJdbcUrl);
+        // Use the wrapper's JDBC-safe helpers: the PG JDBC driver rejects
+        // inline userinfo (it reads user@host as the hostname), so we set the
+        // URL without userinfo and push the user/password onto the DataSource
+        // via its separate setters (same reflection pattern as setJdbcUrl).
+        setJdbcUrl(ds, proxy.getJdbcUrl());
+        String jdbcUser = proxy.getJdbcUser();
+        String jdbcPassword = proxy.getJdbcPassword();
+        if (jdbcUser != null) {
+            setStringProperty(ds, "setUsername", jdbcUser);
+        }
+        if (jdbcPassword != null) {
+            setStringProperty(ds, "setPassword", jdbcPassword);
+        }
 
         log.info("Gold Lapel proxy started — {} now routes through localhost:{}", beanName, port);
 
@@ -157,6 +196,75 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
                 ds.getClass().getName());
     }
 
+    // Invoke a zero-arg String getter via reflection. Returns null if the
+    // method doesn't exist, isn't accessible, or returns a non-String value.
+    static String invokeStringGetter(Object target, String methodName) {
+        try {
+            Method m = target.getClass().getMethod(methodName);
+            Object result = m.invoke(target);
+            if (result instanceof String s) {
+                return s;
+            }
+        } catch (Exception ignored) {
+            // Method not found or not accessible — fall through
+        }
+        return null;
+    }
+
+    // Invoke a single-String-arg setter via reflection. Silently ignores
+    // missing or inaccessible methods (the bean may simply not support it).
+    private static void setStringProperty(Object target, String methodName, String value) {
+        try {
+            Method m = target.getClass().getMethod(methodName, String.class);
+            m.invoke(target, value);
+        } catch (Exception ignored) {
+            // Method not found or not accessible — silently skip
+        }
+    }
+
+    // True iff the authority portion of the postgres URL contains userinfo
+    // (i.e. a '@' before any /?# path/query delimiter).
+    static boolean upstreamHasUserinfo(String upstream) {
+        int schemeIdx = upstream.indexOf("://");
+        int start = schemeIdx < 0 ? 0 : schemeIdx + 3;
+        int end = upstream.length();
+        for (int i = start; i < end; i++) {
+            char c = upstream.charAt(i);
+            if (c == '/' || c == '?' || c == '#') {
+                end = i;
+                break;
+            }
+        }
+        return upstream.lastIndexOf('@', end - 1) >= start;
+    }
+
+    // Inject userinfo into a postgres URL that lacks it. user and password are
+    // percent-encoded so special characters (e.g. '@', ':', '/', ' ') don't
+    // corrupt the resulting URL. password may be null.
+    static String injectUserinfo(String upstream, String user, String password) {
+        int schemeIdx = upstream.indexOf("://");
+        if (schemeIdx < 0) {
+            // Not a URL we recognize — leave alone rather than mangle it
+            return upstream;
+        }
+        String prefix = upstream.substring(0, schemeIdx + 3);
+        String rest = upstream.substring(schemeIdx + 3);
+        StringBuilder userinfo = new StringBuilder();
+        userinfo.append(percentEncodeUserinfo(user));
+        if (password != null) {
+            userinfo.append(':').append(percentEncodeUserinfo(password));
+        }
+        userinfo.append('@');
+        return prefix + userinfo + rest;
+    }
+
+    // Percent-encode a userinfo component. Uses URLEncoder (form encoding) and
+    // then rewrites '+' as '%20' so spaces decode correctly against RFC 3986
+    // URL parsers (which treat '+' literally in userinfo).
+    private static String percentEncodeUserinfo(String s) {
+        return URLEncoder.encode(s, StandardCharsets.UTF_8).replace("+", "%20");
+    }
+
     // Convert kebab-case keys to camelCase and coerce String values to their
     // native types so the Java wrapper's configToArgs() gets what it expects.
     //
@@ -197,6 +305,68 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor {
                     .toList();
         }
         return value;
+    }
+
+    /**
+     * Split a {@code goldlapel.extra-args} string into individual CLI args.
+     *
+     * <p>Args are separated by commas. A comma can be included <em>inside</em>
+     * an arg by escaping it with a backslash ({@code \,}) — handy for values
+     * like regexes with counted repetition (e.g. {@code \d{1\,3}}). A literal
+     * backslash is written as {@code \\}. Empty tokens and pure-whitespace
+     * tokens are dropped. A null or empty input yields an empty array.
+     *
+     * <p>Examples (Java-source: double the backslashes):
+     * <pre>
+     *   "--foo,--bar"        -&gt; ["--foo", "--bar"]
+     *   "--re=\\d{1\\,3}"    -&gt; ["--re=\\d{1,3}"]
+     *   "a\\\\,b"            -&gt; ["a\\", "b"]
+     *   ""                   -&gt; []
+     * </pre>
+     *
+     * <p>In {@code application.yml}, only one level of escaping is needed:
+     * <pre>
+     *   goldlapel:
+     *     extra-args: "--re=\\d{1\,3}"
+     * </pre>
+     */
+    static String[] parseExtraArgs(String input) {
+        if (input == null || input.isEmpty()) {
+            return new String[0];
+        }
+        List<String> out = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            if (c == '\\' && i + 1 < input.length()) {
+                char next = input.charAt(i + 1);
+                if (next == ',' || next == '\\') {
+                    // Recognized escape — consume the backslash and emit the literal.
+                    cur.append(next);
+                    i++;
+                    continue;
+                }
+                // Unrecognized escape: keep the backslash as-is. (Preserves
+                // legacy callers that might pass flags containing a literal
+                // backslash before some other character.)
+                cur.append(c);
+                continue;
+            }
+            if (c == ',') {
+                addIfNotBlank(out, cur.toString());
+                cur.setLength(0);
+                continue;
+            }
+            cur.append(c);
+        }
+        addIfNotBlank(out, cur.toString());
+        return out.toArray(new String[0]);
+    }
+
+    private static void addIfNotBlank(List<String> list, String s) {
+        if (!s.isEmpty() && !s.trim().isEmpty()) {
+            list.add(s);
+        }
     }
 
     static String kebabToCamel(String key) {

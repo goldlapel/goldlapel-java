@@ -37,10 +37,10 @@ class InstanceMethodsTest {
 
     @BeforeEach
     void setUp() {
-        gl = new GoldLapel("postgresql://user:pass@host:5432/db");
+        gl = new GoldLapel("postgresql://user:pass@host:5432/db", new GoldLapelOptions());
         // Inject mock connection via reflection
         try {
-            java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("instanceConn");
+            java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("internalConn");
             f.setAccessible(true);
             f.set(gl, conn);
         } catch (Exception e) {
@@ -93,10 +93,10 @@ class InstanceMethodsTest {
 
         @Test
         void throwsWhenNoConnection() {
-            GoldLapel gl2 = new GoldLapel("postgresql://localhost:5432/db");
+            GoldLapel gl2 = new GoldLapel("postgresql://localhost:5432/db", new GoldLapelOptions());
             IllegalStateException ex = assertThrows(IllegalStateException.class, gl2::connection);
             assertTrue(ex.getMessage().contains("No connection available"));
-            assertTrue(ex.getMessage().contains("startProxy()"));
+            assertTrue(ex.getMessage().contains("GoldLapel.start()"));
         }
     }
 
@@ -368,6 +368,32 @@ class InstanceMethodsTest {
             verify(ps).setString(1, "spanish");
             verify(ps).setString(2, "hola mundo");
         }
+
+        @Test
+        void withExplicitConnUsesDefaultLang() throws SQLException {
+            // New overload: analyze(text, conn) should use the default lang
+            // ("english") and run against the caller-supplied connection —
+            // not the GoldLapel's internal/resolved connection.
+            Connection explicitConn = mock(Connection.class);
+            PreparedStatement explicitPs = mock(PreparedStatement.class);
+            ResultSet explicitRs = mock(ResultSet.class);
+            ResultSetMetaData explicitMeta = mock(ResultSetMetaData.class);
+
+            when(explicitConn.prepareStatement(anyString())).thenReturn(explicitPs);
+            when(explicitPs.executeQuery()).thenReturn(explicitRs);
+            when(explicitRs.next()).thenReturn(false);
+            when(explicitRs.getMetaData()).thenReturn(explicitMeta);
+            when(explicitMeta.getColumnCount()).thenReturn(0);
+
+            gl.analyze("hello world", explicitConn);
+
+            // The explicit connection got the prepareStatement call, NOT the
+            // internal one.
+            verify(explicitConn).prepareStatement(anyString());
+            verify(conn, never()).prepareStatement(anyString());
+            verify(explicitPs).setString(1, "english");
+            verify(explicitPs).setString(2, "hello world");
+        }
     }
 
 
@@ -381,7 +407,7 @@ class InstanceMethodsTest {
 
         @BeforeEach
         void setUp() {
-            bare = new GoldLapel("postgresql://localhost:5432/db");
+            bare = new GoldLapel("postgresql://localhost:5432/db", new GoldLapelOptions());
         }
 
         @Test

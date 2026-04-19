@@ -243,41 +243,169 @@ class WaitForPortTest {
 
 class GoldLapelClassTest {
 
+    // Helper: construct a GoldLapel without starting the proxy. Uses the
+    // package-private constructor to avoid spawning the Rust binary in unit tests.
+    static GoldLapel newUnstarted(String upstream) {
+        return new GoldLapel(upstream, new GoldLapelOptions());
+    }
+
+    static GoldLapel newUnstarted(String upstream, GoldLapelOptions opts) {
+        return new GoldLapel(upstream, opts);
+    }
+
     @Test
     void defaultPort() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb");
         assertEquals(7932, gl.getPort());
     }
 
     @Test
     void customPort() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb",
-            new GoldLapel.Options().port(9000));
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setPort(9000);
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
         assertEquals(9000, gl.getPort());
     }
 
     @Test
     void notRunningInitially() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb");
         assertFalse(gl.isRunning());
         assertNull(gl.getUrl());
     }
 
     @Test
     void stopIsNoOpWhenNotStarted() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
-        gl.stopProxy();
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb");
+        gl.stop();
         assertFalse(gl.isRunning());
         assertNull(gl.getUrl());
     }
 
     @Test
     void stopIsIdempotent() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
-        gl.stopProxy();
-        gl.stopProxy();
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb");
+        gl.stop();
+        gl.stop();
         assertFalse(gl.isRunning());
         assertNull(gl.getUrl());
+    }
+
+    @Test
+    void closeCallsStop() {
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb");
+        gl.close();
+        assertFalse(gl.isRunning());
+        assertNull(gl.getUrl());
+    }
+
+    @Test
+    void logLevelDebugTranslatesToDoubleVerbose() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("debug");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.singletonList("-vv"), args);
+    }
+
+    @Test
+    void logLevelTraceTranslatesToTripleVerbose() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("trace");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.singletonList("-vvv"), args);
+    }
+
+    @Test
+    void logLevelInfoTranslatesToSingleVerbose() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("info");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.singletonList("-v"), args);
+    }
+
+    @Test
+    void logLevelWarnOmitted() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("warn");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.emptyList(), args);
+    }
+
+    @Test
+    void logLevelErrorOmitted() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("error");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.emptyList(), args);
+    }
+
+    @Test
+    void logLevelCaseInsensitive() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("DEBUG");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.singletonList("-vv"), args);
+    }
+
+    @Test
+    void logLevelCombinedWithExtraArgs() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setExtraArgs("--foo", "bar");
+        opts.setLogLevel("info");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Arrays.asList("--foo", "bar", "-v"), args);
+    }
+
+    @Test
+    void logLevelInvalidThrows() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("verbose");
+        IllegalArgumentException ex = assertThrows(
+            IllegalArgumentException.class,
+            () -> newUnstarted("postgresql://localhost:5432/mydb", opts)
+        );
+        assertTrue(ex.getMessage().contains("log_level must be one of"),
+            "unexpected message: " + ex.getMessage());
+    }
+
+    @Test
+    void logLevelNullOmitted() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel(null);
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.emptyList(), args);
     }
 }
 
@@ -286,16 +414,36 @@ class DashboardUrlTest {
 
     @Test
     void defaultDashboardPort() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
-        assertEquals(7933, GoldLapel.DEFAULT_DASHBOARD_PORT);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
+        assertEquals(7933, gl.getDashboardPort());
+    }
+
+    @Test
+    void dashboardPortDerivesFromCustomProxyPort() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setPort(17932);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        assertEquals(17933, gl.getDashboardPort());
+    }
+
+    @Test
+    void explicitDashboardPortOverridesDerivation() {
+        Map<String, Object> config = new HashMap<>();
+        config.put("dashboardPort", 9999);
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setPort(17932);
+        opts.setConfig(config);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        assertEquals(9999, gl.getDashboardPort());
     }
 
     @Test
     void customDashboardPort() {
         Map<String, Object> config = new HashMap<>();
         config.put("dashboardPort", 8080);
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb",
-            new GoldLapel.Options().config(config));
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setConfig(config);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         assertNull(gl.getDashboardUrl()); // not running, so null
     }
 
@@ -303,14 +451,15 @@ class DashboardUrlTest {
     void disabledDashboardPort() {
         Map<String, Object> config = new HashMap<>();
         config.put("dashboardPort", 0);
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb",
-            new GoldLapel.Options().config(config));
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setConfig(config);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         assertNull(gl.getDashboardUrl());
     }
 
     @Test
     void dashboardUrlNullWhenNotRunning() {
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb");
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
         assertFalse(gl.isRunning());
         assertNull(gl.getDashboardUrl());
     }
@@ -319,8 +468,9 @@ class DashboardUrlTest {
     void dashboardPortExtractedFromConfig() {
         Map<String, Object> config = new HashMap<>();
         config.put("dashboardPort", 9999);
-        GoldLapel gl = new GoldLapel("postgresql://localhost:5432/mydb",
-            new GoldLapel.Options().config(config));
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setConfig(config);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         // Verify port was extracted (dashboardUrl includes it when running)
         // Since not running, getDashboardUrl() returns null — verify via config pass-through
         List<String> args = GoldLapel.configToArgs(config);
@@ -330,18 +480,162 @@ class DashboardUrlTest {
 }
 
 
-class ModuleFunctionsTest {
+class ClientOptionTest {
 
-    @Test
-    void proxyUrlNullWhenNotStarted() {
-        GoldLapel.stop();
-        assertNull(GoldLapel.proxyUrl());
+    // Helper: read private client field via reflection
+    private static String clientOf(GoldLapel gl) {
+        try {
+            java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("client");
+            f.setAccessible(true);
+            return (String) f.get(gl);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Test
-    void dashboardUrlNullWhenNotStarted() {
-        GoldLapel.stop();
-        assertNull(GoldLapel.dashboardUrl());
+    void defaultClientIsJava() {
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
+        assertEquals("java", clientOf(gl));
+    }
+
+    @Test
+    void clientOptionOverridesDefault() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setClient("my-app");
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        assertEquals("my-app", clientOf(gl));
+    }
+
+    @Test
+    void clientOptionGetterSetter() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        assertNull(opts.getClient());
+        opts.setClient("custom");
+        assertEquals("custom", opts.getClient());
+    }
+
+    // Spawn a shell script that dumps GOLDLAPEL_CLIENT to a file, then exits.
+    // The wrapper's startProxy() will time out (port never opens) and throw —
+    // but by then the script has already captured the env var. This lets us
+    // assert the actual subprocess-visible value, not just the Java-side field.
+    //
+    // Skipped on Windows (no /bin/sh).
+    private static Path writeDumpScript(Path tmp, Path outFile) throws IOException {
+        Path script = tmp.resolve("goldlapel-dump.sh");
+        Files.writeString(script,
+            "#!/bin/sh\n" +
+            "echo \"${GOLDLAPEL_CLIENT:-<unset>}\" > \"" + outFile.toString() + "\"\n" +
+            "exit 1\n"
+        );
+        script.toFile().setExecutable(true);
+        return script;
+    }
+
+    private static boolean isPosix() {
+        return !System.getProperty("os.name", "").toLowerCase().contains("windows");
+    }
+
+    @Test
+    void clientForwardedToSubprocessEnv(@TempDir Path tmp) throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(isPosix(), "POSIX-only test (needs /bin/sh)");
+        Path out = tmp.resolve("client.txt");
+        Path script = writeDumpScript(tmp, out);
+
+        String origBin = System.getenv("GOLDLAPEL_BINARY");
+        String origClient = System.getenv("GOLDLAPEL_CLIENT");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", script.toString());
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", null); // ensure parent env is clean
+            try {
+                GoldLapel.start("postgresql://localhost:5432/mydb", opts -> opts.setClient("from-opts"));
+                fail("start() should have thrown — dump script exits immediately");
+            } catch (RuntimeException expected) {
+                // Expected: port never opens because the script exited.
+            }
+            // Wait briefly for the script's write to flush (process has already exited).
+            assertTrue(Files.exists(out), "dump script should have written output file");
+            assertEquals("from-opts", Files.readString(out).trim());
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", origBin);
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", origClient);
+        }
+    }
+
+    @Test
+    void clientDefaultsToJavaWhenOptionUnset(@TempDir Path tmp) throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(isPosix(), "POSIX-only test (needs /bin/sh)");
+        Path out = tmp.resolve("client.txt");
+        Path script = writeDumpScript(tmp, out);
+
+        String origBin = System.getenv("GOLDLAPEL_BINARY");
+        String origClient = System.getenv("GOLDLAPEL_CLIENT");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", script.toString());
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", null);
+            try {
+                GoldLapel.start("postgresql://localhost:5432/mydb");
+                fail("start() should have thrown — dump script exits immediately");
+            } catch (RuntimeException expected) {
+                // expected
+            }
+            assertTrue(Files.exists(out));
+            assertEquals("java", Files.readString(out).trim());
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", origBin);
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", origClient);
+        }
+    }
+
+    @Test
+    void optionBeatsInheritedEnvClient(@TempDir Path tmp) throws Exception {
+        // Documents precedence: the wrapper uses
+        // ProcessBuilder.environment().put("GOLDLAPEL_CLIENT", client),
+        // so the config-lambda value wins over any inherited GOLDLAPEL_CLIENT
+        // from the parent JVM. Matches Spring Boot / Micronaut / Quarkus
+        // semantics (explicit config > env > defaults) — code that runs is
+        // what the developer wrote. If this test fails someone changed the
+        // precedence; update both the code and this test.
+        org.junit.jupiter.api.Assumptions.assumeTrue(isPosix(), "POSIX-only test (needs /bin/sh)");
+        Path out = tmp.resolve("client.txt");
+        Path script = writeDumpScript(tmp, out);
+
+        String origBin = System.getenv("GOLDLAPEL_BINARY");
+        String origClient = System.getenv("GOLDLAPEL_CLIENT");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", script.toString());
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", "from-parent-env");
+            try {
+                GoldLapel.start("postgresql://localhost:5432/mydb", opts -> opts.setClient("from-opts"));
+                fail("start() should have thrown");
+            } catch (RuntimeException expected) {
+                // expected
+            }
+            assertTrue(Files.exists(out));
+            // put → config-lambda value wins over inherited parent env
+            assertEquals("from-opts", Files.readString(out).trim());
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_BINARY", origBin);
+            ClientOptionTest.setEnv("GOLDLAPEL_CLIENT", origClient);
+        }
+    }
+
+    // Reflective env var manipulation (same approach as FindBinaryTest)
+    @SuppressWarnings("unchecked")
+    static void setEnv(String key, String value) {
+        try {
+            java.util.Map<String, String> env = System.getenv();
+            java.lang.reflect.Field field = env.getClass().getDeclaredField("m");
+            field.setAccessible(true);
+            java.util.Map<String, String> writableEnv = (java.util.Map<String, String>) field.get(env);
+            if (value == null) {
+                writableEnv.remove(key);
+            } else {
+                writableEnv.put(key, value);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to set env var", e);
+        }
     }
 }
 
@@ -509,11 +803,11 @@ class ConfigToArgsTest {
         config.put("mode", "waiter");
         config.put("disablePool", true);
 
-        GoldLapel.Options opts = new GoldLapel.Options()
-            .port(9000)
-            .config(config);
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setPort(9000);
+        opts.setConfig(config);
 
-        assertEquals(9000, opts.port);
-        assertSame(config, opts.config());
+        assertEquals(9000, opts.getPort());
+        assertSame(config, opts.getConfig());
     }
 }
