@@ -1141,6 +1141,10 @@ public class GoldLapel implements AutoCloseable {
         return Utils.analyze(resolveConn(), text, lang);
     }
 
+    public List<Map<String, Object>> analyze(String text, Connection conn) throws SQLException {
+        return Utils.analyze(conn, text);
+    }
+
     public List<Map<String, Object>> analyze(String text, String lang, Connection conn) throws SQLException {
         return Utils.analyze(conn, text, lang);
     }

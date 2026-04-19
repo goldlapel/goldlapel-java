@@ -368,6 +368,32 @@ class InstanceMethodsTest {
             verify(ps).setString(1, "spanish");
             verify(ps).setString(2, "hola mundo");
         }
+
+        @Test
+        void withExplicitConnUsesDefaultLang() throws SQLException {
+            // New overload: analyze(text, conn) should use the default lang
+            // ("english") and run against the caller-supplied connection —
+            // not the GoldLapel's internal/resolved connection.
+            Connection explicitConn = mock(Connection.class);
+            PreparedStatement explicitPs = mock(PreparedStatement.class);
+            ResultSet explicitRs = mock(ResultSet.class);
+            ResultSetMetaData explicitMeta = mock(ResultSetMetaData.class);
+
+            when(explicitConn.prepareStatement(anyString())).thenReturn(explicitPs);
+            when(explicitPs.executeQuery()).thenReturn(explicitRs);
+            when(explicitRs.next()).thenReturn(false);
+            when(explicitRs.getMetaData()).thenReturn(explicitMeta);
+            when(explicitMeta.getColumnCount()).thenReturn(0);
+
+            gl.analyze("hello world", explicitConn);
+
+            // The explicit connection got the prepareStatement call, NOT the
+            // internal one.
+            verify(explicitConn).prepareStatement(anyString());
+            verify(conn, never()).prepareStatement(anyString());
+            verify(explicitPs).setString(1, "english");
+            verify(explicitPs).setString(2, "hello world");
+        }
     }
 
 
