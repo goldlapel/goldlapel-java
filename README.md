@@ -115,6 +115,26 @@ try (Connection tx = DriverManager.getConnection(gl.getJdbcUrl(), props)) {
 
 The scope is thread-local: concurrent callers on other threads are unaffected. Nested `using(...)` calls restore the outer connection on exit, and exceptions unwind cleanly.
 
+> **Footgun — `using()` is `ThreadLocal`-scoped.** The scope attaches to the thread calling `using(...)` and **does not propagate** across thread boundaries. In particular, wrapper calls that run on a different thread will NOT see the scoped connection:
+>
+> - `ExecutorService.submit(...)` / `.execute(...)`
+> - `CompletableFuture.supplyAsync(...)` / `.runAsync(...)`
+> - `parallelStream()` / `stream().parallel()`
+> - any framework task scheduler that hops threads
+>
+> If your work fans out to a worker pool, pass `conn` explicitly as the last argument to each wrapper call instead of relying on `using(...)`:
+>
+> ```java
+> // DON'T — the supplyAsync body runs on a ForkJoin worker that
+> // never entered the using() scope.
+> gl.using(tx, () -> {
+>     CompletableFuture.supplyAsync(() -> gl.docInsert("events", "{}"));
+> });
+>
+> // DO — pass tx explicitly.
+> CompletableFuture.supplyAsync(() -> gl.docInsert("events", "{}", tx));
+> ```
+
 ### Per-method connection override
 
 Every wrapper method has an overload that accepts an explicit `Connection` as its last argument:
