@@ -126,6 +126,12 @@ gl.search("articles", "body", "postgres", 10, "english", false, conn);
 
 Precedence: **explicit `conn` argument > `using()` scope > internal connection**.
 
+> **Note:** `gl.script(String luaCode, String... args)` has no `Connection` overload — the trailing `String...` varargs would swallow a `Connection` passed as the last argument. To run `script` against a specific connection, wrap it in `using`:
+>
+> ```java
+> gl.using(conn, () -> gl.script("return 1", "x"));
+> ```
+
 ### `gl.getDashboardUrl()`
 
 Returns the dashboard URL (e.g. `http://127.0.0.1:7933`), or `null` if the proxy isn't running. The dashboard port is the proxy port + 1 by default and can be changed via config:

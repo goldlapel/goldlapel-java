@@ -1012,6 +1012,27 @@ public class GoldLapel implements AutoCloseable {
         return Utils.countDistinct(conn, table, column);
     }
 
+    /**
+     * Run a Lua script server-side with the given string arguments.
+     *
+     * <p><b>Caveat — no {@code Connection} overload.</b> The trailing
+     * {@code String...} varargs collides with a would-be
+     * {@code script(String luaCode, String... args, Connection conn)}
+     * overload (Java resolves the last {@code Object} as part of the varargs
+     * array, not as a separate parameter). To run {@code script} against a
+     * specific connection, wrap the call in {@link #using(Connection, Runnable)}:
+     *
+     * <pre>{@code
+     * gl.using(conn, () -> {
+     *     try {
+     *         gl.script("return redis.call('incr', KEYS[1])", "mykey");
+     *     } catch (SQLException e) { throw new RuntimeException(e); }
+     * });
+     * }</pre>
+     *
+     * <p>Without an active {@code using(...)} scope, {@code script} runs
+     * against Gold Lapel's internal connection.
+     */
     public String script(String luaCode, String... args) throws SQLException {
         return Utils.script(resolveConn(), luaCode, args);
     }
