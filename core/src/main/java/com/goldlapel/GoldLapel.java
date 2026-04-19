@@ -121,9 +121,9 @@ public class GoldLapel implements AutoCloseable {
         List<String> extras = options.getExtraArgs() != null
             ? new ArrayList<>(options.getExtraArgs())
             : new ArrayList<>();
-        if (options.getLogLevel() != null) {
-            extras.add("--log-level");
-            extras.add(options.getLogLevel());
+        String verboseFlag = translateLogLevel(options.getLogLevel());
+        if (verboseFlag != null) {
+            extras.add(verboseFlag);
         }
         this.extraArgs = extras;
         this.client = options.getClient() != null ? options.getClient() : "java";
@@ -299,6 +299,36 @@ public class GoldLapel implements AutoCloseable {
             authority = authority.substring(at + 1);
         }
         return new JdbcConnectionInfo("jdbc:postgresql://" + authority + rest, user, password);
+    }
+
+    /**
+     * Translate a log level string to the proxy's count-based verbosity flag.
+     * The Rust binary exposes verbosity as -v / -vv / -vvv (count flag) rather
+     * than --log-level <level>, so wrappers translate on the spawn side.
+     *
+     * @return "-v" / "-vv" / "-vvv" for info/debug/trace, or null for warn/error/null
+     * @throws IllegalArgumentException if the string is not a recognized level
+     */
+    static String translateLogLevel(String level) {
+        if (level == null) {
+            return null;
+        }
+        switch (level.toLowerCase(java.util.Locale.ROOT)) {
+            case "trace":
+                return "-vvv";
+            case "debug":
+                return "-vv";
+            case "info":
+                return "-v";
+            case "warn":
+            case "warning":
+            case "error":
+                return null;
+            default:
+                throw new IllegalArgumentException(
+                    "log_level must be one of: trace, debug, info, warn, error"
+                );
+        }
     }
 
     private static int indexOfAny(String s, String chars) {

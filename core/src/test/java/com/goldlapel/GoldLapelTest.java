@@ -300,7 +300,7 @@ class GoldLapelClassTest {
     }
 
     @Test
-    void logLevelAppendedToExtraArgs() throws Exception {
+    void logLevelDebugTranslatesToDoubleVerbose() throws Exception {
         GoldLapelOptions opts = new GoldLapelOptions();
         opts.setLogLevel("debug");
         GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
@@ -308,7 +308,67 @@ class GoldLapelClassTest {
         f.setAccessible(true);
         @SuppressWarnings("unchecked")
         List<String> args = (List<String>) f.get(gl);
-        assertEquals(Arrays.asList("--log-level", "debug"), args);
+        assertEquals(Collections.singletonList("-vv"), args);
+    }
+
+    @Test
+    void logLevelTraceTranslatesToTripleVerbose() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("trace");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.singletonList("-vvv"), args);
+    }
+
+    @Test
+    void logLevelInfoTranslatesToSingleVerbose() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("info");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.singletonList("-v"), args);
+    }
+
+    @Test
+    void logLevelWarnOmitted() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("warn");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.emptyList(), args);
+    }
+
+    @Test
+    void logLevelErrorOmitted() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("error");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.emptyList(), args);
+    }
+
+    @Test
+    void logLevelCaseInsensitive() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("DEBUG");
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.singletonList("-vv"), args);
     }
 
     @Test
@@ -321,7 +381,31 @@ class GoldLapelClassTest {
         f.setAccessible(true);
         @SuppressWarnings("unchecked")
         List<String> args = (List<String>) f.get(gl);
-        assertEquals(Arrays.asList("--foo", "bar", "--log-level", "info"), args);
+        assertEquals(Arrays.asList("--foo", "bar", "-v"), args);
+    }
+
+    @Test
+    void logLevelInvalidThrows() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel("verbose");
+        IllegalArgumentException ex = assertThrows(
+            IllegalArgumentException.class,
+            () -> newUnstarted("postgresql://localhost:5432/mydb", opts)
+        );
+        assertTrue(ex.getMessage().contains("log_level must be one of"),
+            "unexpected message: " + ex.getMessage());
+    }
+
+    @Test
+    void logLevelNullOmitted() throws Exception {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setLogLevel(null);
+        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<String> args = (List<String>) f.get(gl);
+        assertEquals(Collections.emptyList(), args);
     }
 }
 
