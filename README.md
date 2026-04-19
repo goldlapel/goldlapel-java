@@ -194,6 +194,68 @@ For the full configuration reference, see the [main documentation](https://githu
 
 Or set environment variables (`GOLDLAPEL_PROXY_PORT`, `GOLDLAPEL_UPSTREAM`, etc.) — the binary reads them automatically.
 
+## Reactive API
+
+A separate `goldlapel-reactor` artifact exposes a Project Reactor + R2DBC flavour — full parity with the sync API, returning `Mono<T>` / `Flux<T>` instead of blocking values. Use it in Spring WebFlux, reactor-based apps, or anywhere you need non-blocking I/O.
+
+```xml
+<dependency>
+    <groupId>com.goldlapel</groupId>
+    <artifactId>goldlapel-reactor</artifactId>
+    <version>0.2.0</version>
+</dependency>
+```
+
+The sync `goldlapel` artifact is untouched — reactive users pull R2DBC + Reactor through this additional dependency.
+
+### Quick Start
+
+```java
+import com.goldlapel.reactor.ReactiveGoldLapel;
+import reactor.core.publisher.Mono;
+
+Mono<Long> pipeline = ReactiveGoldLapel.start("postgresql://user:pass@db/mydb")
+    .flatMap(gl ->
+        gl.docInsert("events", "{\"type\":\"signup\"}")
+          .then(gl.docCount("events", "{}"))
+          .flatMap(count -> gl.stop().thenReturn(count))
+    );
+
+pipeline.subscribe(count -> System.out.println("Total: " + count));
+```
+
+Cancelling the `Mono<ReactiveGoldLapel>` mid-spawn tears the subprocess down — no leaks.
+
+### `using(conn)` — scope a connection over a Mono chain
+
+The reactive `using()` propagates a JDBC `Connection` through Reactor Context (not ThreadLocal), so it survives `flatMap` boundaries and scheduler hops:
+
+```java
+try (java.sql.Connection myConn = dataSource.getConnection()) {
+    gl.using(myConn, g ->
+        g.docInsert("events", json)
+         .then(g.docCount("events", "{}"))
+    ).block();
+}
+```
+
+Nested `using` blocks restore the outer connection on the way out — standard Context semantics.
+
+### Raw R2DBC queries against the proxy
+
+For your own non-blocking queries, `gl.connectionFactory()` returns an `io.r2dbc.spi.ConnectionFactory` wired to the proxy — plug it into Spring Data R2DBC's `DatabaseClient`, jOOQ-R2DBC, or raw R2DBC:
+
+```java
+Flux<Long> ids = Mono.from(gl.connectionFactory().create())
+    .flatMapMany(conn ->
+        Flux.from(conn.createStatement("SELECT id FROM users WHERE active").execute())
+            .flatMap(r -> r.map((row, meta) -> row.get(0, Long.class)))
+            .concatWith(Mono.from(conn.close()).cast(Long.class))
+    );
+```
+
+The ~61 wrapper helpers (`search`, `docFind`, `incr`, etc.) bridge through JDBC on `Schedulers.boundedElastic()` — Reactor's canonical pattern for running blocking code inside a reactive pipeline. That keeps the wire semantics identical to the sync API. The reactive value is in the R2DBC `ConnectionFactory` above: your own queries go end-to-end non-blocking.
+
 ## Spring Boot
 
 A separate `goldlapel-spring-boot` artifact auto-configures the proxy in front of every Postgres `DataSource` in your context:
