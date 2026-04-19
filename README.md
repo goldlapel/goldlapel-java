@@ -256,6 +256,68 @@ Flux<Long> ids = Mono.from(gl.connectionFactory().create())
 
 The ~61 wrapper helpers (`search`, `docFind`, `incr`, etc.) bridge through JDBC on `Schedulers.boundedElastic()` — Reactor's canonical pattern for running blocking code inside a reactive pipeline. That keeps the wire semantics identical to the sync API. The reactive value is in the R2DBC `ConnectionFactory` above: your own queries go end-to-end non-blocking.
 
+## RxJava 3 API
+
+A separate `goldlapel-rxjava3` artifact exposes the same reactive surface with RxJava 3 return types — `Single` / `Flowable` / `Completable` / `Maybe` — for codebases already standardised on RxJava.
+
+```xml
+<dependency>
+    <groupId>com.goldlapel</groupId>
+    <artifactId>goldlapel-rxjava3</artifactId>
+    <version>0.2.0</version>
+</dependency>
+```
+
+Pulls in `goldlapel-reactor` + `io.reactivex.rxjava3:rxjava` transitively; no conflict with a plain sync or plain reactive install, but typically you'll depend on only one of the three flavours.
+
+### Quick Start
+
+```java
+import com.goldlapel.rxjava3.RxJavaGoldLapel;
+import io.reactivex.rxjava3.core.Single;
+
+Single<Long> pipeline = RxJavaGoldLapel.start("postgresql://user:pass@db/mydb")
+    .flatMap(gl ->
+        gl.docInsert("events", "{\"type\":\"signup\"}")
+          .flatMap(ignored -> gl.docCount("events", "{}"))
+          .flatMap(count -> gl.stop().toSingleDefault(count))
+    );
+
+pipeline.subscribe(count -> System.out.println("Total: " + count));
+```
+
+### Type mapping
+
+| Reactor (`goldlapel-reactor`) | RxJava 3 (`goldlapel-rxjava3`) |
+|---|---|
+| `Mono<T>` (always emits) | `Single<T>` |
+| `Mono<T>` (may be empty — `hget`, `docFindOne`, `zscore`, etc.) | `Maybe<T>` |
+| `Mono<Void>` | `Completable` |
+| `Flux<T>` | `Flowable<T>` |
+
+Nullable lookups return `Maybe<T>` so "not found" is a clean `onComplete` with no value, rather than a `NoSuchElementException`.
+
+### Scoping connections
+
+RxJava has no `ContextView` equivalent of Reactor, so there's no `using(conn, body)` method on `RxJavaGoldLapel`. Two options:
+
+1. **Per-call explicit `Connection`** — every wrapper method has an overload taking a final `Connection conn` argument:
+   ```java
+   gl.docInsert("events", json, myConn)
+     .flatMap(ignored -> gl.docCount("events", "{}", myConn))
+     .subscribe();
+   ```
+2. **Drop into the Reactor API for a chain** — `gl.reactor()` returns the underlying `ReactiveGoldLapel`, which supports Reactor-Context scoping:
+   ```java
+   gl.reactor().using(myConn, g ->
+       g.docInsert("events", json).then(g.docCount("events", "{}"))
+   ).subscribe();
+   ```
+
+### Raw R2DBC queries
+
+Same as the Reactor module — `gl.connectionFactory()` returns an R2DBC `ConnectionFactory` pointing at the proxy. Mix with `io.reactivex.rxjava3.core.Flowable.fromPublisher` to pull rows back into RxJava types.
+
 ## Spring Boot
 
 A separate `goldlapel-spring-boot` artifact auto-configures the proxy in front of every Postgres `DataSource` in your context:
