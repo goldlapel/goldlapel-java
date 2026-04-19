@@ -48,12 +48,14 @@ jobs:
           echo "GOLDLAPEL_BINARY=/tmp/goldlapel-linux-x86_64" >> $GITHUB_ENV
 
       - name: Run tests
-        # Skip GPG signing during CI test runs (release workflow handles signing).
-        # -pl/-am would be needed if we wanted per-module tests; root-level `mvn
-        # test` covers all four modules (core, spring-boot, reactor, rxjava3).
+        # Use the runner's pre-installed `mvn` — `mvnw` and `.mvn/` are
+        # gitignored in this repo, so the wrapper isn't checked out on CI.
+        # Skip GPG signing during CI test runs (release workflow handles
+        # signing). Root-level `mvn test` covers all four modules (core,
+        # spring-boot, reactor, rxjava3).
         env:
           PGHOST: localhost
           PGUSER: postgres
           PGPASSWORD: postgres
           PGDATABASE: postgres
-        run: ./mvnw test -Dgpg.skip=true
+        run: mvn test -Dgpg.skip=true
