@@ -292,7 +292,38 @@ class FactoryApiTest {
     void usingRejectsNullBody() {
         GoldLapel gl = unstarted();
         Connection conn = mock(Connection.class);
-        assertThrows(IllegalArgumentException.class, () -> gl.using(conn, null));
+        assertThrows(IllegalArgumentException.class, () -> gl.using(conn, (Runnable) null));
+        assertThrows(IllegalArgumentException.class, () -> gl.using(conn, (GoldLapel.ThrowingSupplier<Integer>) null));
+    }
+
+    @Test
+    void usingSupplierReturnsValue() throws SQLException {
+        GoldLapel gl = unstarted();
+        Connection internal = mock(Connection.class);
+        Connection scoped = mock(Connection.class);
+        inject(gl, "internalConn", internal);
+
+        int result = gl.using(scoped, () -> 42);
+        assertEquals(42, result);
+        // Scope is unwound — connection falls back to internal
+        assertSame(internal, gl.connection());
+    }
+
+    @Test
+    void usingSupplierPropagatesSQLException() {
+        GoldLapel gl = unstarted();
+        Connection internal = mock(Connection.class);
+        Connection scoped = mock(Connection.class);
+        inject(gl, "internalConn", internal);
+
+        SQLException thrown = assertThrows(SQLException.class, () ->
+            gl.using(scoped, (GoldLapel.ThrowingSupplier<String>) () -> {
+                throw new SQLException("boom");
+            })
+        );
+        assertEquals("boom", thrown.getMessage());
+        // Scope unwound even on exception
+        assertSame(internal, gl.connection());
     }
 
     @Test
