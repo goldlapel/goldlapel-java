@@ -516,6 +516,10 @@ public class GoldLapel implements AutoCloseable {
         Utils.docCreateTtlIndex(resolveConn(), collection, expireAfterSeconds);
     }
 
+    public void docCreateTtlIndex(String collection, int expireAfterSeconds, Connection conn) throws SQLException {
+        Utils.docCreateTtlIndex(conn, collection, expireAfterSeconds);
+    }
+
     public void docCreateTtlIndex(String collection, int expireAfterSeconds, String field) throws SQLException {
         Utils.docCreateTtlIndex(resolveConn(), collection, expireAfterSeconds, field);
     }
@@ -542,6 +546,10 @@ public class GoldLapel implements AutoCloseable {
 
     public void docCreateCollection(String collection) throws SQLException {
         Utils.docCreateCollection(resolveConn(), collection);
+    }
+
+    public void docCreateCollection(String collection, Connection conn) throws SQLException {
+        Utils.docCreateCollection(conn, collection);
     }
 
     public void docCreateCapped(String collection, int maxDocuments) throws SQLException {
@@ -632,8 +640,18 @@ public class GoldLapel implements AutoCloseable {
     }
 
     public List<Map<String, Object>> facets(String table, String column, int limit,
+            String query, String queryColumn, String lang, Connection conn) throws SQLException {
+        return Utils.facets(conn, table, column, limit, query, queryColumn, lang);
+    }
+
+    public List<Map<String, Object>> facets(String table, String column, int limit,
             String query, String[] queryColumns, String lang) throws SQLException {
         return Utils.facets(resolveConn(), table, column, limit, query, queryColumns, lang);
+    }
+
+    public List<Map<String, Object>> facets(String table, String column, int limit,
+            String query, String[] queryColumns, String lang, Connection conn) throws SQLException {
+        return Utils.facets(conn, table, column, limit, query, queryColumns, lang);
     }
 
     public List<Map<String, Object>> facets(String table, String column, int limit,
@@ -655,12 +673,25 @@ public class GoldLapel implements AutoCloseable {
         return Utils.aggregate(resolveConn(), table, column, func, groupBy, limit);
     }
 
+    public List<Map<String, Object>> aggregate(String table, String column, String func,
+            String groupBy, int limit, Connection conn) throws SQLException {
+        return Utils.aggregate(conn, table, column, func, groupBy, limit);
+    }
+
     public void createSearchConfig(String name) throws SQLException {
         Utils.createSearchConfig(resolveConn(), name);
     }
 
+    public void createSearchConfig(String name, Connection conn) throws SQLException {
+        Utils.createSearchConfig(conn, name);
+    }
+
     public void createSearchConfig(String name, String copyFrom) throws SQLException {
         Utils.createSearchConfig(resolveConn(), name, copyFrom);
+    }
+
+    public void createSearchConfig(String name, String copyFrom, Connection conn) throws SQLException {
+        Utils.createSearchConfig(conn, name, copyFrom);
     }
 
     // PubSub and queues
@@ -675,6 +706,11 @@ public class GoldLapel implements AutoCloseable {
 
     public Thread subscribe(String channel, BiConsumer<String, String> callback) throws SQLException {
         return Utils.subscribe(resolveConn(), channel, callback);
+    }
+
+    public Thread subscribe(String channel, BiConsumer<String, String> callback,
+            Connection conn) throws SQLException {
+        return Utils.subscribe(conn, channel, callback);
     }
 
     public Thread subscribe(String channel, BiConsumer<String, String> callback,
@@ -905,6 +941,10 @@ public class GoldLapel implements AutoCloseable {
         Utils.percolateAdd(resolveConn(), name, queryId, query);
     }
 
+    public void percolateAdd(String name, String queryId, String query, Connection conn) throws SQLException {
+        Utils.percolateAdd(conn, name, queryId, query);
+    }
+
     public void percolateAdd(String name, String queryId, String query,
             String lang, String metadataJson) throws SQLException {
         Utils.percolateAdd(resolveConn(), name, queryId, query, lang, metadataJson);
@@ -917,6 +957,10 @@ public class GoldLapel implements AutoCloseable {
 
     public List<Map<String, Object>> percolate(String name, String text) throws SQLException {
         return Utils.percolate(resolveConn(), name, text);
+    }
+
+    public List<Map<String, Object>> percolate(String name, String text, Connection conn) throws SQLException {
+        return Utils.percolate(conn, name, text);
     }
 
     public List<Map<String, Object>> percolate(String name, String text,
@@ -954,6 +998,11 @@ public class GoldLapel implements AutoCloseable {
     public Map<String, Object> explainScore(String table, String column, String query,
             String idColumn, Object idValue) throws SQLException {
         return Utils.explainScore(resolveConn(), table, column, query, idColumn, idValue);
+    }
+
+    public Map<String, Object> explainScore(String table, String column, String query,
+            String idColumn, Object idValue, Connection conn) throws SQLException {
+        return Utils.explainScore(conn, table, column, query, idColumn, idValue);
     }
 
     public Map<String, Object> explainScore(String table, String column, String query,
