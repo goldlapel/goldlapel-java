@@ -36,6 +36,7 @@ public class Utils {
      * Uses PostgreSQL NOTIFY under the hood.
      */
     public static void publish(Connection conn, String channel, String message) throws SQLException {
+        validateIdentifier(channel);
         try (PreparedStatement ps = conn.prepareStatement("SELECT pg_notify(?, ?)")) {
             ps.setString(1, channel);
             ps.setString(2, message);
@@ -48,6 +49,7 @@ public class Utils {
      * Creates the queue table if it doesn't exist. Payload is stored as JSONB.
      */
     public static void enqueue(Connection conn, String queueTable, String payloadJson) throws SQLException {
+        validateIdentifier(queueTable);
         try (java.sql.Statement st = conn.createStatement()) {
             st.execute(
                 "CREATE TABLE IF NOT EXISTS " + queueTable + " (" +
@@ -69,6 +71,7 @@ public class Utils {
      * Returns the payload JSON string, or null if the queue is empty.
      */
     public static String dequeue(Connection conn, String queueTable) throws SQLException {
+        validateIdentifier(queueTable);
         try (PreparedStatement ps = conn.prepareStatement(
                 "DELETE FROM " + queueTable +
                 " WHERE id = (" +
@@ -88,6 +91,7 @@ public class Utils {
      * Creates the counter table if it doesn't exist. Returns the new value.
      */
     public static long incr(Connection conn, String table, String key, long amount) throws SQLException {
+        validateIdentifier(table);
         try (java.sql.Statement st = conn.createStatement()) {
             st.execute(
                 "CREATE TABLE IF NOT EXISTS " + table + " (" +
@@ -114,6 +118,7 @@ public class Utils {
      * If the member already exists, updates the score.
      */
     public static void zadd(Connection conn, String table, String member, double score) throws SQLException {
+        validateIdentifier(table);
         try (java.sql.Statement st = conn.createStatement()) {
             st.execute(
                 "CREATE TABLE IF NOT EXISTS " + table + " (" +
@@ -137,6 +142,7 @@ public class Utils {
      */
     public static List<Map.Entry<String, Double>> zrange(Connection conn, String table,
             int start, int stop, boolean desc) throws SQLException {
+        validateIdentifier(table);
         String order = desc ? "DESC" : "ASC";
         int limit = stop - start;
         try (PreparedStatement ps = conn.prepareStatement(
@@ -160,6 +166,7 @@ public class Utils {
      * Creates the hash table if it doesn't exist. Uses JSONB for storage.
      */
     public static void hset(Connection conn, String table, String key, String field, String valueJson) throws SQLException {
+        validateIdentifier(table);
         try (java.sql.Statement st = conn.createStatement()) {
             st.execute(
                 "CREATE TABLE IF NOT EXISTS " + table + " (" +
@@ -184,6 +191,7 @@ public class Utils {
      * Returns the value as a JSON string, or null if key or field doesn't exist.
      */
     public static String hget(Connection conn, String table, String key, String field) throws SQLException {
+        validateIdentifier(table);
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT data->>? FROM " + table + " WHERE key = ?")) {
             ps.setString(1, field);
@@ -201,6 +209,7 @@ public class Utils {
      * Returns the full JSONB object as a string, or null if key doesn't exist.
      */
     public static String hgetall(Connection conn, String table, String key) throws SQLException {
+        validateIdentifier(table);
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT data FROM " + table + " WHERE key = ?")) {
             ps.setString(1, key);
@@ -217,6 +226,7 @@ public class Utils {
      * Returns true if the field existed, false otherwise.
      */
     public static boolean hdel(Connection conn, String table, String key, String field) throws SQLException {
+        validateIdentifier(table);
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT data ? ? AS existed FROM " + table + " WHERE key = ?")) {
             ps.setString(1, field);
@@ -242,6 +252,9 @@ public class Utils {
      */
     public static void geoadd(Connection conn, String table, String nameColumn,
             String geomColumn, String name, double lon, double lat) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(nameColumn);
+        validateIdentifier(geomColumn);
         try (java.sql.Statement st = conn.createStatement()) {
             st.execute("CREATE EXTENSION IF NOT EXISTS postgis");
         }
@@ -271,6 +284,8 @@ public class Utils {
      */
     public static List<Map<String, Object>> georadius(Connection conn, String table,
             String geomColumn, double lon, double lat, double radiusMeters, int limit) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(geomColumn);
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT *, ST_Distance(" +
                 geomColumn + "::geography, " +
@@ -310,6 +325,9 @@ public class Utils {
      */
     public static Double geodist(Connection conn, String table, String geomColumn,
             String nameColumn, String nameA, String nameB) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(geomColumn);
+        validateIdentifier(nameColumn);
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT ST_Distance(a." + geomColumn + "::geography, b." + geomColumn + "::geography) " +
                 "FROM " + table + " a, " + table + " b " +
@@ -331,6 +349,7 @@ public class Utils {
 
     public static Thread subscribe(Connection conn, String channel,
             BiConsumer<String, String> callback, boolean blocking) throws SQLException {
+        validateIdentifier(channel);
         PGConnection pgConn = conn.unwrap(PGConnection.class);
         Runnable listen = () -> {
             try {
@@ -360,6 +379,7 @@ public class Utils {
     }
 
     public static long getCounter(Connection conn, String table, String key) throws SQLException {
+        validateIdentifier(table);
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT value FROM " + table + " WHERE key = ?")) {
             ps.setString(1, key);
@@ -373,6 +393,7 @@ public class Utils {
 
     public static double zincrby(Connection conn, String table, String member,
             double amount) throws SQLException {
+        validateIdentifier(table);
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO " + table + " (member, score) VALUES (?, ?) " +
                 "ON CONFLICT (member) DO UPDATE SET score = " + table + ".score + ? " +
@@ -388,6 +409,7 @@ public class Utils {
 
     public static Long zrank(Connection conn, String table, String member,
             boolean desc) throws SQLException {
+        validateIdentifier(table);
         String order = desc ? "DESC" : "ASC";
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT rank FROM (" +
@@ -404,6 +426,7 @@ public class Utils {
     }
 
     public static Double zscore(Connection conn, String table, String member) throws SQLException {
+        validateIdentifier(table);
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT score FROM " + table + " WHERE member = ?")) {
             ps.setString(1, member);
@@ -416,6 +439,7 @@ public class Utils {
     }
 
     public static boolean zrem(Connection conn, String table, String member) throws SQLException {
+        validateIdentifier(table);
         try (PreparedStatement ps = conn.prepareStatement(
                 "DELETE FROM " + table + " WHERE member = ?")) {
             ps.setString(1, member);
@@ -424,6 +448,8 @@ public class Utils {
     }
 
     public static long countDistinct(Connection conn, String table, String column) throws SQLException {
+        validateIdentifier(table);
+        validateIdentifier(column);
         try (Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT COUNT(DISTINCT " + column + ") FROM " + table)) {
             rs.next();
@@ -432,6 +458,7 @@ public class Utils {
     }
 
     public static long streamAdd(Connection conn, String stream, String payload) throws SQLException {
+        validateIdentifier(stream);
         try (Statement st = conn.createStatement()) {
             st.execute(
                 "CREATE TABLE IF NOT EXISTS " + stream + " (" +
@@ -450,6 +477,7 @@ public class Utils {
     }
 
     public static void streamCreateGroup(Connection conn, String stream, String group) throws SQLException {
+        validateIdentifier(stream);
         String groupTable = stream + "_groups";
         String pelTable = stream + "_pel";
         try (Statement st = conn.createStatement()) {
@@ -479,6 +507,7 @@ public class Utils {
 
     public static List<Map<String, Object>> streamRead(Connection conn, String stream,
             String group, String consumer, int count) throws SQLException {
+        validateIdentifier(stream);
         String groupTable = stream + "_groups";
         String pelTable = stream + "_pel";
         try (PreparedStatement ps = conn.prepareStatement(
@@ -535,6 +564,7 @@ public class Utils {
     }
 
     public static boolean streamAck(Connection conn, String stream, String group, long messageId) throws SQLException {
+        validateIdentifier(stream);
         String pelTable = stream + "_pel";
         try (PreparedStatement ps = conn.prepareStatement(
                 "DELETE FROM " + pelTable + " WHERE message_id = ? AND group_name = ?")) {
@@ -546,6 +576,7 @@ public class Utils {
 
     public static List<Map<String, Object>> streamClaim(Connection conn, String stream,
             String group, String consumer, long minIdleMs) throws SQLException {
+        validateIdentifier(stream);
         String pelTable = stream + "_pel";
         List<Long> claimedIds = new ArrayList<>();
         try (PreparedStatement ps = conn.prepareStatement(
