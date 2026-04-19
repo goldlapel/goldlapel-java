@@ -260,6 +260,38 @@ class FactoryApiTest {
     }
 
     @Test
+    void readmeQuickStartAccessorsReturnJdbcSafeValues() {
+        // Regression: README Quick Start + using() examples depend on
+        // getJdbcUrl() / getJdbcUser() / getJdbcPassword() returning a
+        // JDBC-driver-safe URL (no inline userinfo) plus the parsed creds.
+        // If anyone "fixes" those helpers to inline userinfo into the URL,
+        // the PG JDBC driver will reject the URL at runtime.
+        GoldLapel gl = unstarted();
+        inject(gl, "proxyUrl", "postgresql://alice:s3cret@localhost:7932/mydb");
+
+        String jdbcUrl = gl.getJdbcUrl();
+        assertEquals("jdbc:postgresql://localhost:7932/mydb", jdbcUrl);
+        assertFalse(jdbcUrl.contains("@"),
+            "JDBC URL must not carry inline userinfo (PG driver reads user@host as hostname)");
+        assertEquals("alice", gl.getJdbcUser());
+        assertEquals("s3cret", gl.getJdbcPassword());
+
+        // getUrl() keeps the Postgres-native form (userinfo inline) for libpq/psql.
+        assertEquals("postgresql://alice:s3cret@localhost:7932/mydb", gl.getUrl());
+    }
+
+    @Test
+    void jdbcAccessorsNullBeforeStart() {
+        // Regression: before start(), proxyUrl is null and the JDBC accessors
+        // must return null rather than throwing — the README describes the
+        // post-start state, but the accessors are defined to be null-safe.
+        GoldLapel gl = unstarted();
+        assertNull(gl.getJdbcUrl());
+        assertNull(gl.getJdbcUser());
+        assertNull(gl.getJdbcPassword());
+    }
+
+    @Test
     void usingScopeVisibleToWrapperMethodWithoutOverride() throws SQLException {
         GoldLapel gl = unstarted();
         Connection internal = mock(Connection.class);

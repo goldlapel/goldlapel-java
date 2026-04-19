@@ -76,7 +76,20 @@ Options:
 
 ### `gl.getUrl()`
 
-Returns the proxy URL (e.g. `postgresql://user:pass@localhost:7932/mydb`). Pass it to any JDBC driver — Gold Lapel is driver-agnostic.
+Returns the proxy URL in the standard Postgres form (e.g. `postgresql://user:pass@localhost:7932/mydb`) — mirrors the shape of the upstream URL, suitable for libpq/psql and any driver that accepts inline userinfo. The PostgreSQL JDBC driver does **not** accept inline userinfo (it reads everything before `@` as the hostname); for JDBC use `getJdbcUrl()` / `getJdbcUser()` / `getJdbcPassword()` below.
+
+### `gl.getJdbcUrl()` / `gl.getJdbcUser()` / `gl.getJdbcPassword()`
+
+Returns the JDBC-ready form of the proxy URL (no userinfo) plus the parsed user and password. Hand them to `DriverManager.getConnection(...)` with a `Properties` object, or pass them separately:
+
+```java
+Properties props = new Properties();
+if (gl.getJdbcUser() != null) props.setProperty("user", gl.getJdbcUser());
+if (gl.getJdbcPassword() != null) props.setProperty("password", gl.getJdbcPassword());
+try (Connection conn = DriverManager.getConnection(gl.getJdbcUrl(), props)) {
+    // ...
+}
+```
 
 ### `gl.close()` / `gl.stop()`
 
@@ -87,7 +100,10 @@ Stops the proxy and closes the internal JDBC connection. `GoldLapel` implements 
 Scope a block to a caller-supplied connection. Wrapper methods called inside the lambda (on the same thread) use that connection instead of Gold Lapel's internal one. Ideal for transactional work:
 
 ```java
-try (Connection tx = DriverManager.getConnection(gl.getUrl())) {
+Properties props = new Properties();
+if (gl.getJdbcUser() != null) props.setProperty("user", gl.getJdbcUser());
+if (gl.getJdbcPassword() != null) props.setProperty("password", gl.getJdbcPassword());
+try (Connection tx = DriverManager.getConnection(gl.getJdbcUrl(), props)) {
     tx.setAutoCommit(false);
     gl.using(tx, () -> {
         gl.docInsert("orders", "{\"id\":42}");

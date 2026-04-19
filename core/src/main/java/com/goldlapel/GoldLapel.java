@@ -35,7 +35,12 @@ import java.util.function.BiConsumer;
  *     opts.setPort(7932);
  *     opts.setLogLevel("info");
  * })) {
- *     try (Connection conn = DriverManager.getConnection(gl.getUrl())) {
+ *     // JDBC: use getJdbcUrl() + getJdbcUser() + getJdbcPassword() — the PG
+ *     // JDBC driver rejects inline userinfo in the URL.
+ *     Properties props = new Properties();
+ *     if (gl.getJdbcUser() != null) props.setProperty("user", gl.getJdbcUser());
+ *     if (gl.getJdbcPassword() != null) props.setProperty("password", gl.getJdbcPassword());
+ *     try (Connection conn = DriverManager.getConnection(gl.getJdbcUrl(), props)) {
  *         // ... raw JDBC ...
  *     }
  *     gl.docInsert("events", "{\"type\":\"signup\"}");
