@@ -21,19 +21,25 @@ final class JsonMini {
 
     private JsonMini(String s) { this.s = s; }
 
-    /** Parse a JSON string expected to be an object. Returns a {@code Map<String, Object>}. */
+    /** Parse a JSON string expected to be an object. Returns a {@code Map<String, Object>}.
+     *  Non-JSON bodies (e.g. the proxy's plain-text 403 "Invalid or missing X-GL-Dashboard
+     *  token" response) return an empty map so callers can fall back to status-only error
+     *  handling instead of surfacing a parser exception. */
     @SuppressWarnings("unchecked")
     static Map<String, Object> parseObject(String input) {
         if (input == null || input.isEmpty()) return new LinkedHashMap<>();
-        JsonMini p = new JsonMini(input);
-        p.skipWs();
-        Object v = p.parseValue();
-        if (!(v instanceof Map)) {
-            // If the body isn't an object (e.g. empty, error text), return an
-            // empty map — callers check keys individually with null defaults.
+        try {
+            JsonMini p = new JsonMini(input);
+            p.skipWs();
+            Object v = p.parseValue();
+            if (!(v instanceof Map)) {
+                return new LinkedHashMap<>();
+            }
+            return (Map<String, Object>) v;
+        } catch (RuntimeException ignored) {
+            // Malformed body (plain text, truncated JSON, etc.) — treat as empty.
             return new LinkedHashMap<>();
         }
-        return (Map<String, Object>) v;
     }
 
     private Object parseValue() {

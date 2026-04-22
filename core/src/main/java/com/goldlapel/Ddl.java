@@ -32,13 +32,14 @@ import java.util.concurrent.ConcurrentHashMap;
  *       spawned the proxy (happy path).
  *   <li>For externally-launched proxies, {@link #tokenFromEnvOrFile()} reads
  *       {@code GOLDLAPEL_DASHBOARD_TOKEN} env or
- *       {@code ~/.goldlapel/dashboard_token} file.
+ *       {@code ~/.goldlapel/dashboard-token} file.
  * </ul>
  *
  * <p>The {@code tables} and {@code query_patterns} return values are both
  * {@code Map<String, String>}; callers (Utils.streamX) key into the patterns
- * map and run the SQL verbatim through JDBC (PostgreSQL driver supports the
- * numbered {@code $1, $2, …} placeholders natively as {@code ?}).
+ * map. The proxy emits SQL with numbered {@code $1, $2, …} placeholders which
+ * {@code Utils.pgToJdbc} rewrites to JDBC's positional {@code ?} form before
+ * preparing each statement.
  */
 public final class Ddl {
     private Ddl() {}
@@ -55,7 +56,7 @@ public final class Ddl {
         }
         String home = System.getProperty("user.home");
         if (home == null) return null;
-        Path path = Path.of(home, ".goldlapel", "dashboard_token");
+        Path path = Path.of(home, ".goldlapel", "dashboard-token");
         if (Files.exists(path)) {
             try {
                 String text = Files.readString(path, StandardCharsets.UTF_8).trim();
@@ -154,7 +155,7 @@ public final class Ddl {
                 throw new RuntimeException(
                     "Gold Lapel dashboard rejected the DDL request (403). "
                     + "The dashboard token is missing or incorrect — check "
-                    + "GOLDLAPEL_DASHBOARD_TOKEN or ~/.goldlapel/dashboard_token."
+                    + "GOLDLAPEL_DASHBOARD_TOKEN or ~/.goldlapel/dashboard-token."
                 );
             }
             throw new RuntimeException(
