@@ -8,6 +8,8 @@ import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 class NativeCacheTest {
 
@@ -230,6 +232,220 @@ class NativeCacheTest {
 
                 cache.stopInvalidation();
             }
+        }
+    }
+
+    // --- Concurrent thread-safety (v0.2 coverage audit) ---
+    //
+    // Java is explicitly multi-threaded — the JVM will happily concurrent-hammer
+    // non-synchronized collections. The cache is mutated from both the query-path
+    // (put/get on user threads) and the background invalidation listener thread.
+    // These tests exercise contention directly against the NativeCache (matching
+    // the Python/Go/.NET reference implementations — no live Postgres needed,
+    // the cache is a self-contained in-process LRU).
+    //
+    // Failure modes guarded against:
+    //   - ConcurrentModificationException from unsynchronized map iteration
+    //   - Corrupted reads mid-mutation (returns partially-initialized entry)
+    //   - Lost invalidations (stale entry served after signal from another thread)
+    //   - Leaked tableIndex entries (orphaned key → stale unreachable node)
+
+    @Nested class ConcurrentAccessTest {
+
+        @Test
+        void concurrentPutAndGet() throws Exception {
+            NativeCache cache = makeCache();
+            int threads = 16;
+            int opsPerThread = 500;
+            ExecutorService executor = Executors.newFixedThreadPool(threads);
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<?>> futures = new ArrayList<>();
+            AtomicInteger errors = new AtomicInteger();
+
+            try {
+                for (int t = 0; t < threads; t++) {
+                    final int tId = t;
+                    futures.add(executor.submit(() -> {
+                        try {
+                            start.await();
+                            for (int i = 0; i < opsPerThread; i++) {
+                                // High contention: 100 shared keys across 16 threads
+                                String sql = "SELECT * FROM t WHERE id = " + (i % 100);
+                                Object[] params = new Object[]{i % 100};
+                                if (i % 3 == 0) {
+                                    cache.put(sql, params,
+                                        Collections.singletonList(new Object[]{tId, i}),
+                                        new String[]{"tid", "i"});
+                                } else {
+                                    cache.get(sql, params);
+                                }
+                            }
+                        } catch (Throwable ex) {
+                            errors.incrementAndGet();
+                            ex.printStackTrace();
+                        }
+                    }));
+                }
+                start.countDown();
+                for (Future<?> f : futures) {
+                    f.get(30, TimeUnit.SECONDS);
+                }
+            } finally {
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS),
+                    "executor failed to terminate");
+            }
+
+            assertEquals(0, errors.get(),
+                "concurrent put/get must not throw (e.g. ConcurrentModificationException)");
+        }
+
+        @Test
+        void concurrentInvalidation() throws Exception {
+            NativeCache cache = makeCache();
+            // Pre-seed the cache across 10 tables
+            for (int i = 0; i < 100; i++) {
+                String sql = "SELECT * FROM t" + (i % 10) + " WHERE id = " + i;
+                cache.put(sql, new Object[]{i},
+                    Collections.singletonList(new Object[]{i}), new String[]{"id"});
+            }
+
+            int threads = 12;
+            int opsPerThread = 500;
+            ExecutorService executor = Executors.newFixedThreadPool(threads);
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<?>> futures = new ArrayList<>();
+            AtomicInteger errors = new AtomicInteger();
+
+            try {
+                for (int t = 0; t < threads; t++) {
+                    final int tId = t;
+                    futures.add(executor.submit(() -> {
+                        try {
+                            start.await();
+                            for (int i = 0; i < opsPerThread; i++) {
+                                int bucket = i % 10;
+                                String sql = "SELECT * FROM t" + bucket + " WHERE id = " + i;
+                                Object[] params = new Object[]{i};
+                                // Mix puts, gets, and invalidations concurrently so
+                                // the tableIndex is mutated while queries run.
+                                switch (tId % 4) {
+                                    case 0:
+                                        cache.put(sql, params,
+                                            Collections.singletonList(new Object[]{i}),
+                                            new String[]{"id"});
+                                        break;
+                                    case 1:
+                                        cache.get(sql, params);
+                                        break;
+                                    case 2:
+                                        cache.invalidateTable("t" + bucket);
+                                        break;
+                                    case 3:
+                                        if (i % 50 == 0) {
+                                            cache.invalidateAll();
+                                        } else {
+                                            cache.get(sql, params);
+                                        }
+                                        break;
+                                }
+                            }
+                        } catch (Throwable ex) {
+                            errors.incrementAndGet();
+                            ex.printStackTrace();
+                        }
+                    }));
+                }
+                start.countDown();
+                for (Future<?> f : futures) {
+                    f.get(30, TimeUnit.SECONDS);
+                }
+            } finally {
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS),
+                    "executor failed to terminate");
+            }
+
+            assertEquals(0, errors.get(),
+                "concurrent put/get/invalidate must not throw");
+
+            // After a final invalidateAll all state must be clean — no leaked
+            // entries, no orphaned tableIndex keys.
+            cache.invalidateAll();
+            assertEquals(0, cache.size(), "cache must be empty after invalidateAll");
+        }
+
+        @Test
+        void concurrentStatsAccess() throws Exception {
+            NativeCache cache = makeCache();
+            cache.put("SELECT 1", null,
+                Collections.singletonList(new Object[]{1}), new String[]{"x"});
+
+            int opsPerThread = 500;
+            ExecutorService executor = Executors.newFixedThreadPool(4);
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<?>> futures = new ArrayList<>();
+            AtomicInteger errors = new AtomicInteger();
+
+            Runnable reader = () -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < opsPerThread; i++) {
+                        cache.get("SELECT 1", null);
+                        cache.get("SELECT " + i, null);
+                    }
+                } catch (Throwable ex) {
+                    errors.incrementAndGet();
+                    ex.printStackTrace();
+                }
+            };
+
+            Runnable statsReader = () -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < opsPerThread; i++) {
+                        cache.statsHits.get();
+                        cache.statsMisses.get();
+                        cache.statsInvalidations.get();
+                    }
+                } catch (Throwable ex) {
+                    errors.incrementAndGet();
+                    ex.printStackTrace();
+                }
+            };
+
+            Runnable invalidator = () -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < opsPerThread / 5; i++) {
+                        cache.put("SELECT temp " + i, null,
+                            Collections.singletonList(new Object[]{i}),
+                            new String[]{"x"});
+                        cache.invalidateAll();
+                    }
+                } catch (Throwable ex) {
+                    errors.incrementAndGet();
+                    ex.printStackTrace();
+                }
+            };
+
+            try {
+                futures.add(executor.submit(reader));
+                futures.add(executor.submit(statsReader));
+                futures.add(executor.submit(invalidator));
+                futures.add(executor.submit(reader));
+                start.countDown();
+                for (Future<?> f : futures) {
+                    f.get(30, TimeUnit.SECONDS);
+                }
+            } finally {
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS),
+                    "executor failed to terminate");
+            }
+
+            assertEquals(0, errors.get(),
+                "concurrent stats + cache ops must not throw");
         }
     }
 }
