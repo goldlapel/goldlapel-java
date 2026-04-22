@@ -130,6 +130,17 @@ class DdlTest {
     }
 
     @Test
+    void differentNamesMissCache() {
+        queue(200, "{\"tables\":{\"main\":\"_goldlapel.stream_events\"},\"query_patterns\":{\"insert\":\"INSERT events\"}}");
+        queue(200, "{\"tables\":{\"main\":\"_goldlapel.stream_orders\"},\"query_patterns\":{\"insert\":\"INSERT orders\"}}");
+
+        ConcurrentHashMap<String, Map<String, Object>> cache = new ConcurrentHashMap<>();
+        Ddl.fetch(cache, "stream", "events", port, "tok");
+        Ddl.fetch(cache, "stream", "orders", port, "tok");
+        assertEquals(2, captured.size(), "different names must each trigger a fetch");
+    }
+
+    @Test
     void versionMismatch_throwsActionable() {
         queue(409, "{\"error\":\"version_mismatch\",\"detail\":\"wrapper requested v1; proxy speaks v2 — upgrade proxy\"}");
         ConcurrentHashMap<String, Map<String, Object>> cache = new ConcurrentHashMap<>();
