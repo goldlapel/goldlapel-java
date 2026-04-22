@@ -4,8 +4,17 @@ import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import java.sql.*;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -121,6 +130,60 @@ class StreamsIntegrationTest {
         gl.streamRead(streamName, "workers", "consumer-a", 10);
         List<Map<String, Object>> claimed = gl.streamClaim(streamName, "workers", "consumer-b", 0L);
         assertEquals(1, claimed.size());
+    }
+
+    /**
+     * Concurrency regression: two consumers running streamRead at the same
+     * time on the same group must divide the pending messages between them,
+     * never claiming the same message twice.
+     *
+     * Without the BEGIN/COMMIT wrapping in {@link Utils#streamRead} the
+     * SELECT ... FOR UPDATE lock is released immediately under autocommit,
+     * letting both consumers read the same cursor and claim duplicate
+     * messages.
+     */
+    @Test
+    void concurrentConsumersDoNotDoubleClaim() throws Exception {
+        gl.streamCreateGroup(streamName, "workers");
+        final int N = 40;
+        for (int i = 0; i < N; i++) {
+            gl.streamAdd(streamName, "{\"i\":" + i + "}");
+        }
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CountDownLatch start = new CountDownLatch(1);
+            // Each "consumer" task loops until the stream is drained so the
+            // two threads genuinely interleave at the cursor.
+            Callable<List<Long>> mkTask = () -> {
+                start.await();
+                String me = "c-" + Thread.currentThread().getId();
+                List<Long> mine = new ArrayList<>();
+                while (true) {
+                    List<Map<String, Object>> batch =
+                        gl.streamRead(streamName, "workers", me, 4);
+                    if (batch.isEmpty()) break;
+                    for (Map<String, Object> m : batch) {
+                        mine.add((Long) m.get("id"));
+                    }
+                }
+                return mine;
+            };
+            Future<List<Long>> fa = pool.submit(mkTask);
+            Future<List<Long>> fb = pool.submit(mkTask);
+            start.countDown();
+            List<Long> a = fa.get(30, TimeUnit.SECONDS);
+            List<Long> b = fb.get(30, TimeUnit.SECONDS);
+
+            Set<Long> union = new TreeSet<>();
+            union.addAll(a);
+            union.addAll(b);
+            assertEquals(N, union.size(), "all messages delivered once (a=" + a + " b=" + b + ")");
+            assertEquals(a.size() + b.size(), union.size(),
+                "no message delivered to both consumers");
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     private static String toJdbc(String pgUrl) {

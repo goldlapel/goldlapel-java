@@ -516,51 +516,73 @@ public class Utils {
         String advanceSql = requirePattern(patterns, "group_advance_cursor", "streamRead");
         String pendingSql = requirePattern(patterns, "pending_insert", "streamRead");
 
-        long lastId;
-        try (PreparedStatement ps = conn.prepareStatement(cursorSql)) {
-            ps.setString(1, group);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) {
-                    return new ArrayList<>();
-                }
-                lastId = rs.getLong(1);
-            }
+        // Wrap in an explicit transaction so the FOR UPDATE lock from
+        // group_get_cursor is held until we've advanced the cursor and
+        // inserted pending rows. Under autocommit the row lock is released
+        // immediately, allowing concurrent consumers to read the same cursor
+        // and claim the same messages.
+        boolean prevAutoCommit = conn.getAutoCommit();
+        if (prevAutoCommit) {
+            conn.setAutoCommit(false);
         }
+        try {
+            long lastId;
+            try (PreparedStatement ps = conn.prepareStatement(cursorSql)) {
+                ps.setString(1, group);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        if (prevAutoCommit) conn.commit();
+                        return new ArrayList<>();
+                    }
+                    lastId = rs.getLong(1);
+                }
+            }
 
-        List<Map<String, Object>> results = new ArrayList<>();
-        long maxId = 0;
-        try (PreparedStatement ps = conn.prepareStatement(readSql)) {
-            ps.setLong(1, lastId);
-            ps.setInt(2, count);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    long id = rs.getLong("id");
-                    row.put("id", id);
-                    row.put("payload", rs.getString("payload"));
-                    row.put("created_at", rs.getTimestamp("created_at"));
-                    results.add(row);
-                    if (id > maxId) maxId = id;
+            List<Map<String, Object>> results = new ArrayList<>();
+            long maxId = 0;
+            try (PreparedStatement ps = conn.prepareStatement(readSql)) {
+                ps.setLong(1, lastId);
+                ps.setInt(2, count);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        long id = rs.getLong("id");
+                        row.put("id", id);
+                        row.put("payload", rs.getString("payload"));
+                        row.put("created_at", rs.getTimestamp("created_at"));
+                        results.add(row);
+                        if (id > maxId) maxId = id;
+                    }
                 }
             }
-        }
 
-        if (!results.isEmpty()) {
-            try (PreparedStatement upd = conn.prepareStatement(advanceSql)) {
-                upd.setLong(1, maxId);
-                upd.setString(2, group);
-                upd.executeUpdate();
-            }
-            for (Map<String, Object> row : results) {
-                try (PreparedStatement ins = conn.prepareStatement(pendingSql)) {
-                    ins.setLong(1, (Long) row.get("id"));
-                    ins.setString(2, group);
-                    ins.setString(3, consumer);
-                    ins.executeUpdate();
+            if (!results.isEmpty()) {
+                try (PreparedStatement upd = conn.prepareStatement(advanceSql)) {
+                    upd.setLong(1, maxId);
+                    upd.setString(2, group);
+                    upd.executeUpdate();
+                }
+                for (Map<String, Object> row : results) {
+                    try (PreparedStatement ins = conn.prepareStatement(pendingSql)) {
+                        ins.setLong(1, (Long) row.get("id"));
+                        ins.setString(2, group);
+                        ins.setString(3, consumer);
+                        ins.executeUpdate();
+                    }
                 }
             }
+            if (prevAutoCommit) conn.commit();
+            return results;
+        } catch (SQLException | RuntimeException e) {
+            if (prevAutoCommit) {
+                try { conn.rollback(); } catch (SQLException ignore) { /* surface original */ }
+            }
+            throw e;
+        } finally {
+            if (prevAutoCommit) {
+                try { conn.setAutoCommit(true); } catch (SQLException ignore) { /* best effort */ }
+            }
         }
-        return results;
     }
 
     public static boolean streamAck(Connection conn, String stream, String group, long messageId,
