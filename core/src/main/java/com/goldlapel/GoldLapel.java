@@ -99,6 +99,7 @@ public class GoldLapel implements AutoCloseable {
     private final Map<String, Object> config;
     private final List<String> extraArgs;
     private final String client;
+    private final boolean silent;
     private Process process;
     private String proxyUrl;
     private Connection internalConn;
@@ -126,6 +127,7 @@ public class GoldLapel implements AutoCloseable {
         }
         this.extraArgs = extras;
         this.client = options.getClient() != null ? options.getClient() : "java";
+        this.silent = options.isSilent();
         this.process = null;
         this.proxyUrl = null;
     }
@@ -235,10 +237,25 @@ public class GoldLapel implements AutoCloseable {
 
         proxyUrl = makeProxyUrl(upstream, port);
 
+        printBanner(System.err);
+    }
+
+    /**
+     * Write the one-line startup banner to {@code stream}. No-op when the
+     * {@code silent} option is set. Package-private so tests can exercise the
+     * routing and silent-suppression paths directly without spawning the Rust
+     * binary. {@link #startProxy()} always calls this with {@code System.err}
+     * — library code must never write to stdout unconditionally (app stdout is
+     * piped, captured by test runners, consumed by CLI tools).
+     */
+    void printBanner(java.io.PrintStream stream) {
+        if (silent) {
+            return;
+        }
         if (dashboardPort > 0) {
-            System.out.println("goldlapel → :" + port + " (proxy) | http://127.0.0.1:" + dashboardPort + " (dashboard)");
+            stream.println("goldlapel → :" + port + " (proxy) | http://127.0.0.1:" + dashboardPort + " (dashboard)");
         } else {
-            System.out.println("goldlapel → :" + port + " (proxy)");
+            stream.println("goldlapel → :" + port + " (proxy)");
         }
     }
 

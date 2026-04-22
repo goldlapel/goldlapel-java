@@ -23,6 +23,7 @@ public class GoldLapelOptions {
     private Map<String, Object> config;
     private List<String> extraArgs;
     private String client;
+    private boolean silent;
 
     public Integer getPort() {
         return port;
@@ -66,5 +67,24 @@ public class GoldLapelOptions {
 
     public void setClient(String client) {
         this.client = client;
+    }
+
+    /**
+     * Whether to suppress the startup banner. When {@code false} (the default),
+     * {@link GoldLapel#start(String, java.util.function.Consumer)} writes a
+     * one-line banner to {@code System.err} describing the proxy and dashboard
+     * URLs. When {@code true}, nothing is printed.
+     *
+     * <p>Banner goes to {@code System.err} rather than {@code System.out} so it
+     * doesn't pollute app output (CLI tools piping stdout, servers logging to
+     * stdout, test harnesses capturing stdout, etc.). Opt out entirely for
+     * embedded/daemon scenarios where stderr is inspected too.
+     */
+    public boolean isSilent() {
+        return silent;
+    }
+
+    public void setSilent(boolean silent) {
+        this.silent = silent;
     }
 }
