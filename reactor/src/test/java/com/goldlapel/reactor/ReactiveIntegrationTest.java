@@ -17,13 +17,15 @@ import static org.junit.jupiter.api.Assertions.*;
  * End-to-end integration test: real Postgres upstream, real proxy binary
  * (spawned by the sync wrapper), real R2DBC driver on top.
  *
- * <p>Skipped unless {@code GOLDLAPEL_INTEGRATION_URL} is set to a valid
- * Postgres URL (e.g. {@code postgresql://postgres@127.0.0.1/postgres}).
+ * <p>Gated on the standardized Gold Lapel integration-test convention
+ * (GOLDLAPEL_INTEGRATION=1 + GOLDLAPEL_TEST_UPSTREAM) — see
+ * {@link IntegrationGate}.
  *
  * <p>Run locally:
  * <pre>
  *   export GOLDLAPEL_BINARY=/home/you/dev/gl/goldlapel/target/release/goldlapel
- *   export GOLDLAPEL_INTEGRATION_URL=postgresql://postgres@127.0.0.1/postgres
+ *   export GOLDLAPEL_INTEGRATION=1
+ *   export GOLDLAPEL_TEST_UPSTREAM=postgresql://postgres@127.0.0.1/postgres
  *   ./mvnw -pl reactor test
  * </pre>
  *
@@ -37,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *       path works with the fixed proxy binary on main.
  * </ul>
  */
-@EnabledIfEnvironmentVariable(named = "GOLDLAPEL_INTEGRATION_URL", matches = ".+")
+@EnabledIfEnvironmentVariable(named = "GOLDLAPEL_INTEGRATION", matches = "1")
 class ReactiveIntegrationTest {
 
     static String upstream;
@@ -45,7 +47,10 @@ class ReactiveIntegrationTest {
 
     @BeforeAll
     static void setup() throws Exception {
-        upstream = System.getenv("GOLDLAPEL_INTEGRATION_URL");
+        // requireUpstream() throws if GOLDLAPEL_TEST_UPSTREAM is missing,
+        // surfacing half-configured CI as a loud failure rather than a
+        // silent skip.
+        upstream = IntegrationGate.requireUpstream();
         // Pick a free port to avoid collisions with a running dev proxy.
         try (ServerSocket s = new ServerSocket(0)) {
             proxyPort = s.getLocalPort();

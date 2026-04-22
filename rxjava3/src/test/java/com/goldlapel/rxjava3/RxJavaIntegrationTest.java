@@ -14,17 +14,19 @@ import static org.junit.jupiter.api.Assertions.*;
  * real proxy binary, talks to a real Postgres upstream, composes a full
  * chain in RxJava 3 operators.
  *
- * <p>Skipped unless {@code GOLDLAPEL_INTEGRATION_URL} is set to a valid
- * Postgres URL (e.g. {@code postgresql://postgres@127.0.0.1/postgres}).
+ * <p>Gated on the standardized Gold Lapel integration-test convention
+ * (GOLDLAPEL_INTEGRATION=1 + GOLDLAPEL_TEST_UPSTREAM) — see
+ * {@link IntegrationGate}.
  *
  * <p>Run locally:
  * <pre>
  *   export GOLDLAPEL_BINARY=/home/you/dev/gl/goldlapel/target/release/goldlapel
- *   export GOLDLAPEL_INTEGRATION_URL=postgresql://postgres@127.0.0.1/postgres
+ *   export GOLDLAPEL_INTEGRATION=1
+ *   export GOLDLAPEL_TEST_UPSTREAM=postgresql://postgres@127.0.0.1/postgres
  *   ./mvnw -pl rxjava3 test
  * </pre>
  */
-@EnabledIfEnvironmentVariable(named = "GOLDLAPEL_INTEGRATION_URL", matches = ".+")
+@EnabledIfEnvironmentVariable(named = "GOLDLAPEL_INTEGRATION", matches = "1")
 class RxJavaIntegrationTest {
 
     static String upstream;
@@ -32,7 +34,10 @@ class RxJavaIntegrationTest {
 
     @BeforeAll
     static void setup() throws Exception {
-        upstream = System.getenv("GOLDLAPEL_INTEGRATION_URL");
+        // requireUpstream() throws if GOLDLAPEL_TEST_UPSTREAM is missing,
+        // surfacing half-configured CI as a loud failure rather than a
+        // silent skip.
+        upstream = IntegrationGate.requireUpstream();
         try (ServerSocket s = new ServerSocket(0)) {
             proxyPort = s.getLocalPort();
         }

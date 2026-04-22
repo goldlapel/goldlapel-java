@@ -22,9 +22,10 @@ import static org.junit.jupiter.api.Assertions.*;
  * End-to-end streams integration test — proxy-owned DDL (Phase 3).
  * Mirrors goldlapel-python/tests/test_streams_integration.py.
  *
- * Runs only when GOLDLAPEL_INTEGRATION=1 is set, plus:
- *   - DATABASE_URL (default: postgresql://sgibson@localhost:5432/postgres)
- *   - GOLDLAPEL_BINARY (explicit path to the goldlapel binary)
+ * Gated on the standardized Gold Lapel integration-test convention
+ * (GOLDLAPEL_INTEGRATION=1 + GOLDLAPEL_TEST_UPSTREAM) — see
+ * {@link IntegrationGate}. Also requires GOLDLAPEL_BINARY pointing at the
+ * goldlapel binary.
  */
 @EnabledIfEnvironmentVariable(named = "GOLDLAPEL_INTEGRATION", matches = "1")
 class StreamsIntegrationTest {
@@ -33,10 +34,12 @@ class StreamsIntegrationTest {
 
     @BeforeAll
     static void setupPgUrl() throws ClassNotFoundException {
+        // requireUpstream() throws if GOLDLAPEL_TEST_UPSTREAM is missing,
+        // surfacing half-configured CI as a loud failure rather than a
+        // silent skip. The class-level @EnabledIfEnvironmentVariable
+        // ensures this @BeforeAll only runs when GOLDLAPEL_INTEGRATION=1.
         Class.forName("org.postgresql.Driver");
-        PG_URL = System.getenv().getOrDefault(
-            "DATABASE_URL", "postgresql://sgibson@localhost:5432/postgres"
-        );
+        PG_URL = IntegrationGate.requireUpstream();
     }
 
     private GoldLapel gl;
