@@ -2489,4 +2489,73 @@ class DocTest {
             verify(conn, never()).setAutoCommit(anyBoolean());
         }
     }
+
+
+    // -------------------------------------------------------------------------
+    // Regression: JSONB field paths may exceed 63 chars (NAMEDATALEN-1).
+    //
+    // The v0.2 security review applied a 63-char cap to the identifier
+    // validator. JSONB field keys are NOT Postgres identifiers — they're JSON
+    // keys, which can legitimately be longer. These tests guard against a
+    // regression where a wrapper accidentally rejects valid long JSON keys.
+    // -------------------------------------------------------------------------
+
+    @Nested class JsonbFieldPathLengthTest {
+
+        private String longKey() {
+            return "a".repeat(100);
+        }
+
+        @Test
+        void validateFieldKeyAcceptsLongJsonKey() {
+            assertDoesNotThrow(() -> Utils.validateFieldKey(longKey()));
+        }
+
+        @Test
+        void validateFieldKeyAcceptsDottedPath() {
+            assertDoesNotThrow(() -> Utils.validateFieldKey("metadata." + longKey()));
+        }
+
+        @Test
+        void validateFieldKeyRejectsInjection() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.validateFieldKey("bad'; DROP TABLE--"));
+        }
+
+        @Test
+        void validateIdentifierStillCapsAt63() {
+            // Sanity: the identifier validator still enforces NAMEDATALEN.
+            String max = "a".repeat(63);
+            assertDoesNotThrow(() -> Utils.validateIdentifier(max));
+            String over = "a".repeat(64);
+            assertThrows(IllegalArgumentException.class,
+                    () -> Utils.validateIdentifier(over));
+        }
+
+        @Test
+        void fieldPathAcceptsLongJsonKey() {
+            String expr = Utils.fieldPath(longKey());
+            assertTrue(expr.contains(longKey()));
+        }
+
+        @Test
+        void docFindSortAcceptsLongJsonKey() throws SQLException {
+            // parseSortClause used validateIdentifier (63-cap) on sort keys
+            // before the fix — a 100-char JSON key would throw.
+            emptyResultSet("_id", "data", "created_at", "updated_at");
+            String sortJson = "{\"" + longKey() + "\": 1}";
+            assertDoesNotThrow(() ->
+                    Utils.docFind(conn, "users", null, sortJson, null, null));
+        }
+
+        @Test
+        void docCreateIndexAcceptsLongJsonKey() throws SQLException {
+            // docCreateIndex key is a JSONB field path; it was validated
+            // with validateIdentifier (63-cap) before the fix.
+            allowCreateStatement();
+            assertDoesNotThrow(() ->
+                    Utils.docCreateIndex(conn, "users",
+                            Collections.singletonList(longKey())));
+        }
+    }
 }

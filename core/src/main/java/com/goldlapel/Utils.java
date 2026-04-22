@@ -27,9 +27,29 @@ public class Utils {
     // proxy's server-side regex exactly: ^[A-Za-z_][A-Za-z0-9_]{0,62}$.
     private static final Pattern IDENTIFIER_RE = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]{0,62}$");
 
+    // FIELD_KEY_RE is the unbounded variant for JSONB field keys — JSON keys
+    // are not Postgres identifiers, so no NAMEDATALEN cap applies. Still
+    // anchored to alphanumeric+underscore to prevent SQL injection.
+    private static final Pattern FIELD_KEY_RE = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*$");
+
     static void validateIdentifier(String name) {
         if (name == null || !IDENTIFIER_RE.matcher(name).matches()) {
             throw new IllegalArgumentException("Invalid identifier: " + name);
+        }
+    }
+
+    // validateFieldKey validates a JSONB field key (interpolated into
+    // expressions like data->>'key'). Accepts dotted paths for nested JSONB
+    // access, validating each segment independently. No 63-char cap — JSON
+    // keys are not subject to NAMEDATALEN.
+    static void validateFieldKey(String key) {
+        if (key == null || key.isEmpty()) {
+            throw new IllegalArgumentException("Invalid field key: " + key);
+        }
+        for (String part : key.split("\\.", -1)) {
+            if (!FIELD_KEY_RE.matcher(part).matches()) {
+                throw new IllegalArgumentException("Invalid field key: " + key);
+            }
         }
     }
 
@@ -2084,7 +2104,7 @@ public class Utils {
                 throw new IllegalArgumentException("Invalid sort entry: " + pair.trim());
             }
             String key = kv[0].trim().replaceAll("^\"|\"$", "");
-            validateIdentifier(key);
+            validateFieldKey(key);
             int dir = Integer.parseInt(kv[1].trim());
             if (dir != 1 && dir != -1) {
                 throw new IllegalArgumentException("Sort direction must be 1 or -1, got: " + dir);
@@ -2503,20 +2523,20 @@ public class Utils {
                         } else if (idRaw.startsWith("\"$") && idRaw.endsWith("\"")) {
                             // "$field" reference
                             groupIdField = idRaw.substring(2, idRaw.length() - 1);
-                            validateIdentifier(groupIdField);
+                            validateFieldKey(groupIdField);
                             String resolved = resolveFieldRef(groupIdField, unwindMap);
                             selectExprs.add(resolved + " AS _id");
                             groupByExprs.add(resolved);
                         } else if (idRaw.startsWith("$")) {
                             groupIdField = idRaw.substring(1);
-                            validateIdentifier(groupIdField);
+                            validateFieldKey(groupIdField);
                             String resolved = resolveFieldRef(groupIdField, unwindMap);
                             selectExprs.add(resolved + " AS _id");
                             groupByExprs.add(resolved);
                         } else {
                             // bare field name (unquoted or quoted without $)
                             groupIdField = idRaw.replaceAll("^\"|\"$", "");
-                            validateIdentifier(groupIdField);
+                            validateFieldKey(groupIdField);
                             String resolved = resolveFieldRef(groupIdField, unwindMap);
                             selectExprs.add(resolved + " AS _id");
                             groupByExprs.add(resolved);
@@ -2574,8 +2594,8 @@ public class Utils {
                                 "$lookup requires from, localField, foreignField, and as");
                     }
                     validateIdentifier(fromTable);
-                    validateIdentifier(localField);
-                    validateIdentifier(foreignField);
+                    validateFieldKey(localField);
+                    validateFieldKey(foreignField);
                     validateIdentifier(asField);
                     lookupExprs.put(asField,
                         "COALESCE((SELECT json_agg(" + fromTable + ".data) FROM " + fromTable +
@@ -2670,7 +2690,7 @@ public class Utils {
         for (String[] kv : pairs) {
             String key = kv[0].trim().replaceAll("^\"|\"$", "");
             String val = kv[1].trim();
-            validateIdentifier(key);
+            validateFieldKey(key);
             if (val.equals("0")) {
                 // Exclusion — skip this field (don't add to select)
                 continue;
@@ -2859,12 +2879,14 @@ public class Utils {
         for (int i = 0; i < pairs.size(); i++) {
             String alias = pairs.get(i)[0].trim().replaceAll("^\"|\"$", "");
             String ref = pairs.get(i)[1].trim().replaceAll("^\"|\"$", "");
-            validateIdentifier(alias);
+            // `alias` is emitted as a JSON string literal inside
+            // json_build_object('alias', ...), not as a Postgres identifier.
+            validateFieldKey(alias);
             if (!ref.startsWith("$")) {
                 throw new IllegalArgumentException("Composite _id values must be $field references: " + ref);
             }
             String field = ref.substring(1);
-            validateIdentifier(field);
+            validateFieldKey(field);
             if (i > 0) jsonBuild.append(", ");
             jsonBuild.append("'").append(alias).append("', data->>'").append(field).append("'");
             groupByExprs.add("data->>'" + field + "'");
@@ -3026,7 +3048,7 @@ public class Utils {
             throw new IllegalArgumentException("Accumulator field must be a $reference: " + arg);
         }
         String field = s.substring(1);
-        validateIdentifier(field);
+        validateFieldKey(field);
         return field;
     }
 
@@ -3314,7 +3336,10 @@ public class Utils {
         StringBuilder indexName = new StringBuilder("idx_" + collection);
         for (int i = 0; i < keys.size(); i++) {
             String key = keys.get(i);
-            validateIdentifier(key);
+            // `key` is a JSONB field key (interpolated as data->>'key'), not
+            // a Postgres identifier. The index name is capped by NAMEDATALEN
+            // and Postgres will truncate silently if it overflows.
+            validateFieldKey(key);
             if (i > 0) indexCols.append(", ");
             indexCols.append("(data->>'").append(key).append("')");
             indexName.append("_").append(key);
