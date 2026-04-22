@@ -93,7 +93,7 @@ class DdlTest {
             "\"query_patterns\":{\"insert\":\"INSERT ...\"}}");
 
         ConcurrentHashMap<String, Map<String, Object>> cache = new ConcurrentHashMap<>();
-        Map<String, Object> entry = Ddl.fetch(cache, "stream", "events", port, "tok");
+        Map<String, Object> entry = Ddl.fetchPatterns(cache, "stream", "events", port, "tok");
         Map<String, String> qp = Ddl.queryPatterns(entry);
         assertEquals("INSERT ...", qp.get("insert"));
 
@@ -111,8 +111,8 @@ class DdlTest {
             "\"query_patterns\":{\"insert\":\"X\"}}");
 
         ConcurrentHashMap<String, Map<String, Object>> cache = new ConcurrentHashMap<>();
-        Map<String, Object> r1 = Ddl.fetch(cache, "stream", "events", port, "tok");
-        Map<String, Object> r2 = Ddl.fetch(cache, "stream", "events", port, "tok");
+        Map<String, Object> r1 = Ddl.fetchPatterns(cache, "stream", "events", port, "tok");
+        Map<String, Object> r2 = Ddl.fetchPatterns(cache, "stream", "events", port, "tok");
         assertSame(r1, r2);
         assertEquals(1, captured.size());
     }
@@ -124,8 +124,8 @@ class DdlTest {
 
         ConcurrentHashMap<String, Map<String, Object>> c1 = new ConcurrentHashMap<>();
         ConcurrentHashMap<String, Map<String, Object>> c2 = new ConcurrentHashMap<>();
-        Ddl.fetch(c1, "stream", "events", port, "tok");
-        Ddl.fetch(c2, "stream", "events", port, "tok");
+        Ddl.fetchPatterns(c1, "stream", "events", port, "tok");
+        Ddl.fetchPatterns(c2, "stream", "events", port, "tok");
         assertEquals(2, captured.size());
     }
 
@@ -135,8 +135,8 @@ class DdlTest {
         queue(200, "{\"tables\":{\"main\":\"_goldlapel.stream_orders\"},\"query_patterns\":{\"insert\":\"INSERT orders\"}}");
 
         ConcurrentHashMap<String, Map<String, Object>> cache = new ConcurrentHashMap<>();
-        Ddl.fetch(cache, "stream", "events", port, "tok");
-        Ddl.fetch(cache, "stream", "orders", port, "tok");
+        Ddl.fetchPatterns(cache, "stream", "events", port, "tok");
+        Ddl.fetchPatterns(cache, "stream", "orders", port, "tok");
         assertEquals(2, captured.size(), "different names must each trigger a fetch");
     }
 
@@ -145,7 +145,7 @@ class DdlTest {
         queue(409, "{\"error\":\"version_mismatch\",\"detail\":\"wrapper requested v1; proxy speaks v2 — upgrade proxy\"}");
         ConcurrentHashMap<String, Map<String, Object>> cache = new ConcurrentHashMap<>();
         RuntimeException ex = assertThrows(RuntimeException.class,
-            () -> Ddl.fetch(cache, "stream", "events", port, "tok"));
+            () -> Ddl.fetchPatterns(cache, "stream", "events", port, "tok"));
         assertTrue(ex.getMessage().contains("schema version mismatch"),
             "expected actionable mismatch msg, got: " + ex.getMessage());
     }
@@ -155,7 +155,7 @@ class DdlTest {
         queue(403, "{\"error\":\"forbidden\"}");
         ConcurrentHashMap<String, Map<String, Object>> cache = new ConcurrentHashMap<>();
         RuntimeException ex = assertThrows(RuntimeException.class,
-            () -> Ddl.fetch(cache, "stream", "events", port, "tok"));
+            () -> Ddl.fetchPatterns(cache, "stream", "events", port, "tok"));
         assertTrue(ex.getMessage().contains("dashboard token"),
             "expected token-specific msg, got: " + ex.getMessage());
     }
@@ -164,7 +164,7 @@ class DdlTest {
     void missingToken_throwsBeforeHttp() {
         ConcurrentHashMap<String, Map<String, Object>> cache = new ConcurrentHashMap<>();
         RuntimeException ex = assertThrows(RuntimeException.class,
-            () -> Ddl.fetch(cache, "stream", "events", 9999, null));
+            () -> Ddl.fetchPatterns(cache, "stream", "events", 9999, null));
         assertTrue(ex.getMessage().contains("No dashboard token"));
         assertEquals(0, captured.size());
     }
@@ -173,7 +173,7 @@ class DdlTest {
     void missingPort_throwsBeforeHttp() {
         ConcurrentHashMap<String, Map<String, Object>> cache = new ConcurrentHashMap<>();
         RuntimeException ex = assertThrows(RuntimeException.class,
-            () -> Ddl.fetch(cache, "stream", "events", 0, "tok"));
+            () -> Ddl.fetchPatterns(cache, "stream", "events", 0, "tok"));
         assertTrue(ex.getMessage().contains("No dashboard port"));
     }
 
@@ -182,7 +182,7 @@ class DdlTest {
         ConcurrentHashMap<String, Map<String, Object>> cache = new ConcurrentHashMap<>();
         // Port 1 is guaranteed unreachable in tests.
         RuntimeException ex = assertThrows(RuntimeException.class,
-            () -> Ddl.fetch(cache, "stream", "events", 1, "tok"));
+            () -> Ddl.fetchPatterns(cache, "stream", "events", 1, "tok"));
         assertTrue(ex.getMessage().contains("dashboard not reachable"),
             "expected unreachable msg, got: " + ex.getMessage());
     }
@@ -193,9 +193,9 @@ class DdlTest {
         queue(200, "{\"tables\":{\"main\":\"x\"},\"query_patterns\":{\"insert\":\"X\"}}");
 
         ConcurrentHashMap<String, Map<String, Object>> cache = new ConcurrentHashMap<>();
-        Ddl.fetch(cache, "stream", "events", port, "tok");
+        Ddl.fetchPatterns(cache, "stream", "events", port, "tok");
         Ddl.invalidate(cache);
-        Ddl.fetch(cache, "stream", "events", port, "tok");
+        Ddl.fetchPatterns(cache, "stream", "events", port, "tok");
         assertEquals(2, captured.size());
     }
 

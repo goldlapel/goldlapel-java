@@ -88,7 +88,7 @@ public final class Ddl {
      *         {@code Map<String, String>}.
      */
     @SuppressWarnings("unchecked")
-    public static Map<String, Object> fetch(
+    public static Map<String, Object> fetchPatterns(
         ConcurrentHashMap<String, Map<String, Object>> cache,
         String family,
         String name,

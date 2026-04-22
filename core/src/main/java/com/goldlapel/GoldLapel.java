@@ -1152,7 +1152,7 @@ public class GoldLapel implements AutoCloseable {
     @SuppressWarnings("unchecked")
     public Map<String, String> streamPatterns(String stream) {
         String token = dashboardToken != null ? dashboardToken : Ddl.tokenFromEnvOrFile();
-        Map<String, Object> entry = Ddl.fetch(ddlCache, "stream", stream, dashboardPort, token);
+        Map<String, Object> entry = Ddl.fetchPatterns(ddlCache, "stream", stream, dashboardPort, token);
         return Ddl.queryPatterns(entry);
     }
 
