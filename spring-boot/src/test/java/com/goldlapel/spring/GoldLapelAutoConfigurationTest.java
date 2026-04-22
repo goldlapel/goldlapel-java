@@ -101,7 +101,7 @@ class GoldLapelAutoConfigurationTest {
             when(gl.getJdbcUrl()).thenReturn(parsed[0]);
             when(gl.getJdbcUser()).thenReturn(parsed[1]);
             when(gl.getJdbcPassword()).thenReturn(parsed[2]);
-            when(gl.getPort()).thenReturn(opts.getPort() != null ? opts.getPort() : 7932);
+            when(gl.getProxyPort()).thenReturn(opts.getProxyPort() != null ? opts.getProxyPort() : 7932);
             if (capturedProxies != null) capturedProxies.add(gl);
             return gl;
         });
@@ -197,7 +197,7 @@ class GoldLapelAutoConfigurationTest {
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
                             "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.port=9999",
+                            "goldlapel.proxy-port=9999",
                             "goldlapel.extra-args=--threshold-duration-ms,200")
                     .run(context -> {
                         DataSource ds = context.getBean(DataSource.class);
@@ -205,7 +205,7 @@ class GoldLapelAutoConfigurationTest {
                         HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:9999/testdb");
                         assertThat(captured).hasSize(1);
-                        assertThat(captured.get(0).getPort()).isEqualTo(9999);
+                        assertThat(captured.get(0).getProxyPort()).isEqualTo(9999);
                         assertThat(captured.get(0).getExtraArgs())
                                 .containsExactly("--threshold-duration-ms", "200");
                     });
@@ -287,7 +287,7 @@ class GoldLapelAutoConfigurationTest {
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
                             "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.config.mode=waiter",
+                            "goldlapel.config.pool-mode=transaction",
                             "goldlapel.config.pool-size=30")
                     .run(context -> {
                         assertThat(context).hasSingleBean(GoldLapelDataSourcePostProcessor.class);
@@ -298,7 +298,7 @@ class GoldLapelAutoConfigurationTest {
 
                         assertThat(captured).hasSize(1);
                         Map<String, Object> cfg = captured.get(0).getConfig();
-                        assertThat(cfg).containsEntry("mode", "waiter");
+                        assertThat(cfg).containsEntry("poolMode", "transaction");
                         assertThat(cfg).containsEntry("poolSize", "30");
                     });
         }
@@ -334,8 +334,8 @@ class GoldLapelAutoConfigurationTest {
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
                             "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.port=9000",
-                            "goldlapel.config.mode=waiter",
+                            "goldlapel.proxy-port=9000",
+                            "goldlapel.config.pool-mode=transaction",
                             "goldlapel.extra-args=--verbose")
                     .run(context -> {
                         DataSource ds = context.getBean(DataSource.class);
@@ -343,7 +343,7 @@ class GoldLapelAutoConfigurationTest {
                         HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:9000/testdb");
                         assertThat(captured).hasSize(1);
-                        assertThat(captured.get(0).getPort()).isEqualTo(9000);
+                        assertThat(captured.get(0).getProxyPort()).isEqualTo(9000);
                     });
         }
     }
@@ -520,7 +520,7 @@ class GoldLapelAutoConfigurationTest {
             ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setPort(7932);
+            props.setProxyPort(7932);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             Object result = processor.postProcessAfterInitialization(ds, "dataSource");
@@ -587,7 +587,7 @@ class GoldLapelAutoConfigurationTest {
         assertThat(props.isNativeCache()).isTrue();
         assertThat(props.getInvalidationPort()).isEqualTo(0);
         assertThat(props.isEnabled()).isTrue();
-        assertThat(props.getPort()).isEqualTo(7932);
+        assertThat(props.getProxyPort()).isEqualTo(7932);
     }
 
     // --- DataSource type agnostic tests ---

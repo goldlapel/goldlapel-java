@@ -256,15 +256,15 @@ class GoldLapelClassTest {
     @Test
     void defaultPort() {
         GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb");
-        assertEquals(7932, gl.getPort());
+        assertEquals(7932, gl.getProxyPort());
     }
 
     @Test
     void customPort() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setPort(9000);
+        opts.setProxyPort(9000);
         GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
-        assertEquals(9000, gl.getPort());
+        assertEquals(9000, gl.getProxyPort());
     }
 
     @Test
@@ -300,112 +300,61 @@ class GoldLapelClassTest {
     }
 
     @Test
-    void logLevelDebugTranslatesToDoubleVerbose() throws Exception {
+    void logLevelDebugTranslatesToDoubleVerbose() {
+        assertEquals("-vv", GoldLapel.translateLogLevel("debug"));
+    }
+
+    @Test
+    void logLevelTraceTranslatesToTripleVerbose() {
+        assertEquals("-vvv", GoldLapel.translateLogLevel("trace"));
+    }
+
+    @Test
+    void logLevelInfoTranslatesToSingleVerbose() {
+        assertEquals("-v", GoldLapel.translateLogLevel("info"));
+    }
+
+    @Test
+    void logLevelWarnOmitted() {
+        assertNull(GoldLapel.translateLogLevel("warn"));
+    }
+
+    @Test
+    void logLevelErrorOmitted() {
+        assertNull(GoldLapel.translateLogLevel("error"));
+    }
+
+    @Test
+    void logLevelCaseInsensitive() {
+        assertEquals("-vv", GoldLapel.translateLogLevel("DEBUG"));
+    }
+
+    @Test
+    void logLevelStoredOnInstance() throws Exception {
+        // logLevel is a top-level option — it lives on the instance directly,
+        // not in the config map or extraArgs. The translation to -v/-vv/-vvv
+        // happens at spawn time in startProxy().
         GoldLapelOptions opts = new GoldLapelOptions();
         opts.setLogLevel("debug");
         GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
-        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("logLevel");
         f.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        List<String> args = (List<String>) f.get(gl);
-        assertEquals(Collections.singletonList("-vv"), args);
+        assertEquals("debug", f.get(gl));
     }
 
     @Test
-    void logLevelTraceTranslatesToTripleVerbose() throws Exception {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setLogLevel("trace");
-        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
-        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
-        f.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        List<String> args = (List<String>) f.get(gl);
-        assertEquals(Collections.singletonList("-vvv"), args);
-    }
-
-    @Test
-    void logLevelInfoTranslatesToSingleVerbose() throws Exception {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setLogLevel("info");
-        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
-        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
-        f.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        List<String> args = (List<String>) f.get(gl);
-        assertEquals(Collections.singletonList("-v"), args);
-    }
-
-    @Test
-    void logLevelWarnOmitted() throws Exception {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setLogLevel("warn");
-        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
-        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
-        f.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        List<String> args = (List<String>) f.get(gl);
-        assertEquals(Collections.emptyList(), args);
-    }
-
-    @Test
-    void logLevelErrorOmitted() throws Exception {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setLogLevel("error");
-        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
-        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
-        f.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        List<String> args = (List<String>) f.get(gl);
-        assertEquals(Collections.emptyList(), args);
-    }
-
-    @Test
-    void logLevelCaseInsensitive() throws Exception {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setLogLevel("DEBUG");
-        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
-        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
-        f.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        List<String> args = (List<String>) f.get(gl);
-        assertEquals(Collections.singletonList("-vv"), args);
-    }
-
-    @Test
-    void logLevelCombinedWithExtraArgs() throws Exception {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setExtraArgs("--foo", "bar");
-        opts.setLogLevel("info");
-        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
-        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
-        f.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        List<String> args = (List<String>) f.get(gl);
-        assertEquals(Arrays.asList("--foo", "bar", "-v"), args);
-    }
-
-    @Test
-    void logLevelInvalidThrows() {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setLogLevel("verbose");
+    void logLevelInvalidThrowsAtTranslate() {
         IllegalArgumentException ex = assertThrows(
             IllegalArgumentException.class,
-            () -> newUnstarted("postgresql://localhost:5432/mydb", opts)
+            () -> GoldLapel.translateLogLevel("verbose")
         );
         assertTrue(ex.getMessage().contains("log_level must be one of"),
             "unexpected message: " + ex.getMessage());
     }
 
     @Test
-    void logLevelNullOmitted() throws Exception {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setLogLevel(null);
-        GoldLapel gl = newUnstarted("postgresql://localhost:5432/mydb", opts);
-        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("extraArgs");
-        f.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        List<String> args = (List<String>) f.get(gl);
-        assertEquals(Collections.emptyList(), args);
+    void logLevelNullReturnsNull() {
+        assertNull(GoldLapel.translateLogLevel(null));
     }
 }
 
@@ -421,38 +370,33 @@ class DashboardUrlTest {
     @Test
     void dashboardPortDerivesFromCustomProxyPort() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setPort(17932);
+        opts.setProxyPort(17932);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         assertEquals(17933, gl.getDashboardPort());
     }
 
     @Test
     void explicitDashboardPortOverridesDerivation() {
-        Map<String, Object> config = new HashMap<>();
-        config.put("dashboardPort", 9999);
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setPort(17932);
-        opts.setConfig(config);
+        opts.setProxyPort(17932);
+        opts.setDashboardPort(9999);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         assertEquals(9999, gl.getDashboardPort());
     }
 
     @Test
     void customDashboardPort() {
-        Map<String, Object> config = new HashMap<>();
-        config.put("dashboardPort", 8080);
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setConfig(config);
+        opts.setDashboardPort(8080);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         assertNull(gl.getDashboardUrl()); // not running, so null
+        assertEquals(8080, gl.getDashboardPort());
     }
 
     @Test
     void disabledDashboardPort() {
-        Map<String, Object> config = new HashMap<>();
-        config.put("dashboardPort", 0);
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setConfig(config);
+        opts.setDashboardPort(0);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         assertNull(gl.getDashboardUrl());
     }
@@ -465,17 +409,34 @@ class DashboardUrlTest {
     }
 
     @Test
-    void dashboardPortExtractedFromConfig() {
+    void dashboardPortInConfigMapRejected() {
+        // Regression guard: dashboardPort was promoted out of the config map
+        // to a top-level option. Passing it via setConfig() must raise.
         Map<String, Object> config = new HashMap<>();
         config.put("dashboardPort", 9999);
         GoldLapelOptions opts = new GoldLapelOptions();
         opts.setConfig(config);
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts)
+        );
+    }
+
+    @Test
+    void invalidationPortDerivesFromCustomProxyPort() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setProxyPort(17932);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
-        // Verify port was extracted (dashboardUrl includes it when running)
-        // Since not running, getDashboardUrl() returns null — verify via config pass-through
-        List<String> args = GoldLapel.configToArgs(config);
-        assertTrue(args.contains("--dashboard-port"));
-        assertTrue(args.contains("9999"));
+        assertEquals(17934, gl.invalidationPort());
+    }
+
+    @Test
+    void explicitInvalidationPortOverridesDerivation() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setProxyPort(17932);
+        opts.setInvalidationPort(9999);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        assertEquals(9999, gl.invalidationPort());
     }
 }
 
@@ -652,16 +613,25 @@ class ConfigKeysTest {
     @Test
     void containsKnownKeys() {
         Set<String> keys = GoldLapel.configKeys();
-        assertTrue(keys.contains("mode"));
+        // Tuning knobs still live in the structured config map.
         assertTrue(keys.contains("poolSize"));
         assertTrue(keys.contains("disableMatviews"));
         assertTrue(keys.contains("replica"));
     }
 
     @Test
-    void hasExpectedCount() {
+    void doesNotContainPromotedTopLevelKeys() {
+        // Canonical surface: mode, logLevel, dashboardPort, invalidationPort,
+        // client, config, license are top-level options on GoldLapelOptions,
+        // not structured-config keys.
         Set<String> keys = GoldLapel.configKeys();
-        assertEquals(42, keys.size());
+        assertFalse(keys.contains("mode"));
+        assertFalse(keys.contains("logLevel"));
+        assertFalse(keys.contains("dashboardPort"));
+        assertFalse(keys.contains("invalidationPort"));
+        assertFalse(keys.contains("client"));
+        assertFalse(keys.contains("config"));
+        assertFalse(keys.contains("license"));
     }
 
     @Test
@@ -676,9 +646,9 @@ class ConfigToArgsTest {
 
     @Test
     void testStringValue() {
-        Map<String, Object> config = Collections.singletonMap("mode", "waiter");
+        Map<String, Object> config = Collections.singletonMap("poolMode", "transaction");
         List<String> args = GoldLapel.configToArgs(config);
-        assertEquals(Arrays.asList("--mode", "waiter"), args);
+        assertEquals(Arrays.asList("--pool-mode", "transaction"), args);
     }
 
     @Test
@@ -739,13 +709,13 @@ class ConfigToArgsTest {
     @Test
     void testMultipleKeys() {
         Map<String, Object> config = new LinkedHashMap<>();
-        config.put("mode", "waiter");
+        config.put("poolMode", "transaction");
         config.put("poolSize", 10);
         config.put("disableRewrite", true);
         List<String> args = GoldLapel.configToArgs(config);
         assertEquals(5, args.size());
-        assertTrue(args.contains("--mode"));
-        assertTrue(args.contains("waiter"));
+        assertTrue(args.contains("--pool-mode"));
+        assertTrue(args.contains("transaction"));
         assertTrue(args.contains("--pool-size"));
         assertTrue(args.contains("10"));
         assertTrue(args.contains("--disable-rewrite"));
@@ -800,14 +770,36 @@ class ConfigToArgsTest {
     @Test
     void testConfigWithOptions() {
         Map<String, Object> config = new HashMap<>();
-        config.put("mode", "waiter");
+        config.put("poolMode", "transaction");
         config.put("disablePool", true);
 
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setPort(9000);
+        opts.setProxyPort(9000);
+        opts.setMode("waiter");
         opts.setConfig(config);
 
-        assertEquals(9000, opts.getPort());
+        assertEquals(9000, opts.getProxyPort());
+        assertEquals("waiter", opts.getMode());
         assertSame(config, opts.getConfig());
+    }
+
+    @Test
+    void testLogLevelInConfigMapRejected() {
+        // Regression guard: logLevel was promoted out of the config map.
+        Map<String, Object> config = Collections.singletonMap("logLevel", "info");
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(config)
+        );
+    }
+
+    @Test
+    void testModeInConfigMapRejected() {
+        // Regression guard: mode was promoted out of the config map.
+        Map<String, Object> config = Collections.singletonMap("mode", "waiter");
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(config)
+        );
     }
 }

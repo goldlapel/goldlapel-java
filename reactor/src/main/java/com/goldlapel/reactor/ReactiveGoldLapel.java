@@ -137,7 +137,7 @@ public final class ReactiveGoldLapel implements AutoCloseable {
         // proxy URL is already a plain postgres:// URL, but R2DBC uses its
         // own ConnectionFactoryOptions DSL rather than URL strings.
         String host = "127.0.0.1";
-        int port = gl.getPort();
+        int port = gl.getProxyPort();
         String jdbcUrl = gl.getJdbcUrl(); // jdbc:postgresql://host:port/db?query
         String database = parseDatabase(jdbcUrl);
 
@@ -219,7 +219,7 @@ public final class ReactiveGoldLapel implements AutoCloseable {
 
     public String getJdbcPassword() { return sync.getJdbcPassword(); }
 
-    public int getPort() { return sync.getPort(); }
+    public int getProxyPort() { return sync.getProxyPort(); }
 
     public String getDashboardUrl() { return sync.getDashboardUrl(); }
 

@@ -216,7 +216,7 @@ class ReactiveGoldLapelUnitTest {
         GoldLapel sync = syncWithConnection(internal);
         ReactiveGoldLapel gl = newInstance(sync);
 
-        assertEquals(7932, gl.getPort());
+        assertEquals(7932, gl.getProxyPort());
         // proxyUrl is null until start() runs, but the accessor should not NPE
         assertNull(gl.getUrl());
         assertNull(gl.getJdbcUrl());

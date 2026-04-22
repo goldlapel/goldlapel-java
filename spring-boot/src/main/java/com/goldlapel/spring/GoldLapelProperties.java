@@ -9,7 +9,7 @@ import java.util.Map;
 public class GoldLapelProperties {
 
     private boolean enabled = true;
-    private int port = 7932;
+    private int proxyPort = 7932;
     private String extraArgs = "";
     private int invalidationPort = 0;
     private boolean nativeCache = true;
@@ -23,12 +23,12 @@ public class GoldLapelProperties {
         this.enabled = enabled;
     }
 
-    public int getPort() {
-        return port;
+    public int getProxyPort() {
+        return proxyPort;
     }
 
-    public void setPort(int port) {
-        this.port = port;
+    public void setProxyPort(int proxyPort) {
+        this.proxyPort = proxyPort;
     }
 
     public String getExtraArgs() {

@@ -47,7 +47,7 @@ class RxJavaIntegrationTest {
     void endToEndChainedSingle() {
         String coll = "rxj_it_chain_" + System.nanoTime();
 
-        Single<Long> pipeline = RxJavaGoldLapel.start(upstream, opts -> opts.setPort(proxyPort))
+        Single<Long> pipeline = RxJavaGoldLapel.start(upstream, opts -> opts.setProxyPort(proxyPort))
             .flatMap(gl ->
                 gl.docCreateCollection(coll)
                   .andThen(gl.docInsert(coll, "{\"type\":\"signup\",\"n\":1}"))

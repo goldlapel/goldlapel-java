@@ -264,7 +264,7 @@ class RxJavaGoldLapelUnitTest {
         GoldLapel sync = syncWithConnection(internal);
         RxJavaGoldLapel gl = newInstance(sync);
 
-        assertEquals(7932, gl.getPort());
+        assertEquals(7932, gl.getProxyPort());
         assertNull(gl.getUrl());
         assertNull(gl.getJdbcUrl());
         assertNull(gl.getDashboardUrl());
@@ -293,7 +293,7 @@ class RxJavaGoldLapelUnitTest {
     @Test
     void startFactoriesReturnSingleType() {
         Single<RxJavaGoldLapel> s1 = RxJavaGoldLapel.start("postgresql://bogus/x");
-        Single<RxJavaGoldLapel> s2 = RxJavaGoldLapel.start("postgresql://bogus/x", opts -> opts.setPort(1));
+        Single<RxJavaGoldLapel> s2 = RxJavaGoldLapel.start("postgresql://bogus/x", opts -> opts.setProxyPort(1));
         assertNotNull(s1);
         assertNotNull(s2);
     }

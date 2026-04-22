@@ -57,7 +57,7 @@ class ReactiveCancellationTest {
             AtomicReference<Throwable> asyncErr = new AtomicReference<>();
             Disposable d = ReactiveGoldLapel.start(
                 "postgresql://localhost:5432/mydb",
-                opts -> opts.setPort(port)
+                opts -> opts.setProxyPort(port)
             ).subscribe(
                 ignored -> { /* won't fire — we cancel first */ },
                 asyncErr::set

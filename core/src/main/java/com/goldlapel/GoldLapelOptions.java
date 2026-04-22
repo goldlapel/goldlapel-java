@@ -12,25 +12,63 @@ import java.util.Map;
  *
  * <pre>{@code
  * GoldLapel gl = GoldLapel.start("postgresql://localhost/db", opts -> {
- *     opts.setPort(7932);
+ *     opts.setProxyPort(7932);
  *     opts.setLogLevel("info");
  * });
  * }</pre>
+ *
+ * <p>Top-level option names match the canonical config surface shared across
+ * every Gold Lapel wrapper — see
+ * {@code docs/reviews/schema-to-core/config-surface-canonical.md} in the
+ * main goldlapel repo. The structured {@link #getConfig() config} map only
+ * holds the ~45 low-level tuning knobs (pool size, cache sizes, disable_X
+ * booleans, replicas, etc.); concepts that users reach for regularly
+ * (ports, log level, mode) have their own top-level setters.
  */
 public class GoldLapelOptions {
-    private Integer port;
+    private Integer proxyPort;
+    private Integer dashboardPort;
+    private Integer invalidationPort;
     private String logLevel;
+    private String mode;
+    private String license;
+    private String client;
+    private String configFile;
     private Map<String, Object> config;
     private List<String> extraArgs;
-    private String client;
     private boolean silent;
 
-    public Integer getPort() {
-        return port;
+    public Integer getProxyPort() {
+        return proxyPort;
     }
 
-    public void setPort(Integer port) {
-        this.port = port;
+    public void setProxyPort(Integer proxyPort) {
+        this.proxyPort = proxyPort;
+    }
+
+    public Integer getDashboardPort() {
+        return dashboardPort;
+    }
+
+    /**
+     * Dashboard listen port. When {@code null} (default), the port is derived
+     * as {@code proxyPort + 1}. Set to {@code 0} to disable the dashboard
+     * entirely.
+     */
+    public void setDashboardPort(Integer dashboardPort) {
+        this.dashboardPort = dashboardPort;
+    }
+
+    public Integer getInvalidationPort() {
+        return invalidationPort;
+    }
+
+    /**
+     * Cache-invalidation listen port. When {@code null} (default), the port
+     * is derived as {@code proxyPort + 2}.
+     */
+    public void setInvalidationPort(Integer invalidationPort) {
+        this.invalidationPort = invalidationPort;
     }
 
     public String getLogLevel() {
@@ -41,6 +79,54 @@ public class GoldLapelOptions {
         this.logLevel = logLevel;
     }
 
+    public String getMode() {
+        return mode;
+    }
+
+    /** Operating mode, passed as {@code --mode} (e.g. {@code "waiter"}, {@code "bellhop"}). */
+    public void setMode(String mode) {
+        this.mode = mode;
+    }
+
+    public String getLicense() {
+        return license;
+    }
+
+    /** Path to the signed license file, passed as {@code --license}. */
+    public void setLicense(String license) {
+        this.license = license;
+    }
+
+    public String getClient() {
+        return client;
+    }
+
+    public void setClient(String client) {
+        this.client = client;
+    }
+
+    public String getConfigFile() {
+        return configFile;
+    }
+
+    /**
+     * Path to a TOML config file the Rust binary will parse. Passed as
+     * {@code --config}. Distinct from {@link #getConfig()} which is the
+     * structured map of tuning keys.
+     */
+    public void setConfigFile(String configFile) {
+        this.configFile = configFile;
+    }
+
+    /**
+     * Structured config map of the ~45 tuning keys (pool size, cache sizes,
+     * disable_X booleans, replicas, exclude_tables, tls_*, n1_*, pattern_*).
+     * Keys are {@code camelCase} strings matching the Java idiom; the
+     * wrapper translates to {@code --kebab-case} CLI flags.
+     *
+     * <p>Top-level concepts (proxy port, dashboard port, log level, mode,
+     * etc.) use their own setters and are rejected here.
+     */
     public Map<String, Object> getConfig() {
         return config;
     }
@@ -59,14 +145,6 @@ public class GoldLapelOptions {
 
     public void setExtraArgs(String... extraArgs) {
         this.extraArgs = new ArrayList<>(Arrays.asList(extraArgs));
-    }
-
-    public String getClient() {
-        return client;
-    }
-
-    public void setClient(String client) {
-        this.client = client;
     }
 
     /**

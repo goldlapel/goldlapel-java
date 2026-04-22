@@ -62,7 +62,7 @@ class ReactiveIntegrationTest {
         // Unique collection name per run so tests don't interfere.
         String coll = "rx_it_chain_" + System.nanoTime();
 
-        Mono<Long> pipeline = ReactiveGoldLapel.start(upstream, opts -> opts.setPort(proxyPort))
+        Mono<Long> pipeline = ReactiveGoldLapel.start(upstream, opts -> opts.setProxyPort(proxyPort))
             .flatMap(gl ->
                 gl.docCreateCollection(coll)
                   .then(gl.docInsert(coll, "{\"type\":\"signup\",\"n\":1}"))
@@ -91,7 +91,7 @@ class ReactiveIntegrationTest {
         // Open our own JDBC connection to the proxy and use it for all
         // wrapper calls inside a using() block.
         StepVerifier.create(
-            ReactiveGoldLapel.start(upstream, opts -> opts.setPort(proxyPort + 1))
+            ReactiveGoldLapel.start(upstream, opts -> opts.setProxyPort(proxyPort + 1))
                 .flatMap(gl -> {
                     String jdbcUrl = gl.getJdbcUrl();
                     java.util.Properties props = new java.util.Properties();
@@ -124,7 +124,7 @@ class ReactiveIntegrationTest {
         // ConnectionFactory from ReactiveGoldLapel, going through the proxy.
         // This exercises R2DBC's prepared-statement / extended-protocol path,
         // which relies on the CloseComplete fix in the proxy on main.
-        Mono<Long> pipeline = ReactiveGoldLapel.start(upstream, opts -> opts.setPort(proxyPort + 2))
+        Mono<Long> pipeline = ReactiveGoldLapel.start(upstream, opts -> opts.setProxyPort(proxyPort + 2))
             .flatMap(gl -> {
                 Flux<Long> count = Mono.from(gl.connectionFactory().create())
                     .flatMapMany(conn ->

@@ -55,7 +55,7 @@ class FactoryApiTest {
             AtomicReference<String> seen = new AtomicReference<>();
             try {
                 GoldLapel.start("postgresql://localhost/db", opts -> {
-                    opts.setPort(17932);
+                    opts.setProxyPort(17932);
                     seen.set("invoked");
                 });
             } catch (RuntimeException ignored) {
@@ -104,7 +104,7 @@ class FactoryApiTest {
 
             RuntimeException caught = assertThrows(
                 RuntimeException.class,
-                () -> GoldLapel.start("postgresql://localhost:5432/mydb", opts -> opts.setPort(port)),
+                () -> GoldLapel.start("postgresql://localhost:5432/mydb", opts -> opts.setProxyPort(port)),
                 "start() should throw — fake binary speaks no Postgres protocol"
             );
             // Expected failure paths: eagerConnect's missing driver / handshake

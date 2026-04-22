@@ -34,7 +34,7 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
 
     public GoldLapelDataSourcePostProcessor(GoldLapelProperties properties) {
         this.properties = properties;
-        this.nextPort = properties.getPort();
+        this.nextPort = properties.getProxyPort();
     }
 
     /**
@@ -97,7 +97,7 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
         GoldLapel proxy;
         try {
             proxy = GoldLapel.start(upstream, opts -> {
-                opts.setPort(assignedPort);
+                opts.setProxyPort(assignedPort);
                 if (configMap != null && !configMap.isEmpty()) {
                     opts.setConfig(normalizeCamelCase(configMap));
                 }

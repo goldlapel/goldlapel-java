@@ -49,7 +49,7 @@ class StreamsIntegrationTest {
     void spawnProxy() {
         int port = 7700 + (int) (System.currentTimeMillis() % 100);
         gl = GoldLapel.start(PG_URL, opts -> {
-            opts.setPort(port);
+            opts.setProxyPort(port);
             opts.setSilent(true);
         });
         streamName = "gl_java_int_" + System.currentTimeMillis();

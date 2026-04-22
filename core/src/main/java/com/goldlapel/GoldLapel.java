@@ -32,7 +32,7 @@ import java.util.function.BiConsumer;
  *
  * <pre>{@code
  * try (GoldLapel gl = GoldLapel.start("postgresql://user:pass@db/mydb", opts -> {
- *     opts.setPort(7932);
+ *     opts.setProxyPort(7932);
  *     opts.setLogLevel("info");
  * })) {
  *     // JDBC: use getJdbcUrl() + getJdbcUser() + getJdbcPassword() — the PG
@@ -49,10 +49,14 @@ import java.util.function.BiConsumer;
  */
 public class GoldLapel implements AutoCloseable {
 
-    static final int DEFAULT_PORT = 7932;
+    static final int DEFAULT_PROXY_PORT = 7932;
     static final long STARTUP_TIMEOUT_MS = 10000;
     static final long STARTUP_POLL_INTERVAL_MS = 50;
 
+    // Keys that are valid inside the structured `config` map. Top-level
+    // concepts (proxyPort, dashboardPort, invalidationPort, logLevel, mode,
+    // license, client, configFile) live on GoldLapelOptions directly and
+    // are NOT accepted here — passing them via Config raises.
     private static final Set<String> VALID_CONFIG_KEYS;
     private static final Set<String> BOOLEAN_KEYS;
     private static final Set<String> LIST_KEYS;
@@ -60,20 +64,19 @@ public class GoldLapel implements AutoCloseable {
     static {
         Set<String> keys = new HashSet<>();
         Collections.addAll(keys,
-            "mode", "minPatternCount", "refreshIntervalSecs", "patternTtlSecs",
+            "minPatternCount", "refreshIntervalSecs", "patternTtlSecs",
             "maxTablesPerView", "maxColumnsPerView", "deepPaginationThreshold",
             "reportIntervalSecs", "resultCacheSize", "batchCacheSize",
             "batchCacheTtlSecs", "poolSize", "poolTimeoutSecs",
             "poolMode", "mgmtIdleTimeout", "fallback", "readAfterWriteSecs",
             "n1Threshold", "n1WindowMs", "n1CrossThreshold",
-            "tlsCert", "tlsKey", "tlsClientCa", "config", "dashboardPort",
+            "tlsCert", "tlsKey", "tlsClientCa",
             "disableMatviews", "disableConsolidation", "disableBtreeIndexes",
             "disableTrigramIndexes", "disableExpressionIndexes",
             "disablePartialIndexes", "disableRewrite", "disablePreparedCache",
             "disableResultCache", "disablePool",
             "disableN1", "disableN1CrossConnection", "disableShadowMode",
-            "enableCoalescing", "replica", "excludeTables",
-            "invalidationPort"
+            "enableCoalescing", "replica", "excludeTables"
         );
         VALID_CONFIG_KEYS = Collections.unmodifiableSet(keys);
 
@@ -94,8 +97,15 @@ public class GoldLapel implements AutoCloseable {
     }
 
     private final String upstream;
-    private final int port;
+    private final int proxyPort;
     private final int dashboardPort;
+    private final boolean dashboardPortExplicit;
+    private final int invalidationPort;
+    private final boolean invalidationPortExplicit;
+    private final String logLevel;
+    private final String mode;
+    private final String license;
+    private final String configFile;
     private final Map<String, Object> config;
     private final List<String> extraArgs;
     private final String client;
@@ -119,20 +129,38 @@ public class GoldLapel implements AutoCloseable {
     // actually spawning the proxy subprocess. Production callers use start().
     GoldLapel(String upstream, GoldLapelOptions options) {
         this.upstream = upstream;
-        this.port = options.getPort() != null ? options.getPort() : DEFAULT_PORT;
+        this.proxyPort = options.getProxyPort() != null ? options.getProxyPort() : DEFAULT_PROXY_PORT;
+
+        // Dashboard / invalidation: null on options → derive from proxyPort.
+        // Non-null → record the explicit override so startProxy() emits the
+        // matching --dashboard-port / --invalidation-port flag.
+        Integer dp = options.getDashboardPort();
+        this.dashboardPortExplicit = (dp != null);
+        this.dashboardPort = dp != null ? dp : this.proxyPort + 1;
+        Integer ip = options.getInvalidationPort();
+        this.invalidationPortExplicit = (ip != null);
+        this.invalidationPort = ip != null ? ip : this.proxyPort + 2;
+
+        this.logLevel = options.getLogLevel();
+        this.mode = options.getMode();
+        this.license = options.getLicense();
+        this.configFile = options.getConfigFile();
+
         Map<String, Object> cfg = options.getConfig();
-        this.dashboardPort = cfg != null && cfg.containsKey("dashboardPort")
-            ? ((Number) cfg.get("dashboardPort")).intValue()
-            : this.port + 1;
+        // Validate config keys eagerly so unit tests that construct without
+        // spawning still catch bad keys (same contract as configToArgs()).
+        if (cfg != null) {
+            for (String key : cfg.keySet()) {
+                if (!VALID_CONFIG_KEYS.contains(key)) {
+                    throw new IllegalArgumentException("Unknown config key: " + key);
+                }
+            }
+        }
         this.config = cfg;
-        List<String> extras = options.getExtraArgs() != null
+
+        this.extraArgs = options.getExtraArgs() != null
             ? new ArrayList<>(options.getExtraArgs())
             : new ArrayList<>();
-        String verboseFlag = translateLogLevel(options.getLogLevel());
-        if (verboseFlag != null) {
-            extras.add(verboseFlag);
-        }
-        this.extraArgs = extras;
         this.client = options.getClient() != null ? options.getClient() : "java";
         this.silent = options.isSilent();
         this.process = null;
@@ -156,7 +184,7 @@ public class GoldLapel implements AutoCloseable {
      *
      * <pre>{@code
      * GoldLapel gl = GoldLapel.start(url, opts -> {
-     *     opts.setPort(7932);
+     *     opts.setProxyPort(7932);
      *     opts.setLogLevel("info");
      * });
      * }</pre>
@@ -188,7 +216,35 @@ public class GoldLapel implements AutoCloseable {
         cmd.add("--upstream");
         cmd.add(upstream);
         cmd.add("--proxy-port");
-        cmd.add(String.valueOf(port));
+        cmd.add(String.valueOf(proxyPort));
+        // Top-level options (promoted out of the config map) emit their own
+        // CLI flags before the tuning-knob config map. Each is suppressed
+        // when the user hasn't set it, so the Rust binary applies its own
+        // defaults (and tuning stays aligned with the CLI/TOML/env surfaces).
+        if (dashboardPortExplicit) {
+            cmd.add("--dashboard-port");
+            cmd.add(String.valueOf(dashboardPort));
+        }
+        if (invalidationPortExplicit) {
+            cmd.add("--invalidation-port");
+            cmd.add(String.valueOf(invalidationPort));
+        }
+        String verboseFlag = translateLogLevel(logLevel);
+        if (verboseFlag != null) {
+            cmd.add(verboseFlag);
+        }
+        if (mode != null) {
+            cmd.add("--mode");
+            cmd.add(mode);
+        }
+        if (license != null) {
+            cmd.add("--license");
+            cmd.add(license);
+        }
+        if (configFile != null) {
+            cmd.add("--config");
+            cmd.add(configFile);
+        }
         cmd.addAll(configToArgs(config));
         cmd.addAll(extraArgs);
 
@@ -239,7 +295,7 @@ public class GoldLapel implements AutoCloseable {
         boolean ready = false;
         while (System.nanoTime() < deadline) {
             if (!process.isAlive()) break;
-            if (waitForPort("127.0.0.1", port, 500)) {
+            if (waitForPort("127.0.0.1", proxyPort, 500)) {
                 ready = true;
                 break;
             }
@@ -250,12 +306,12 @@ public class GoldLapel implements AutoCloseable {
             try { process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
             try { stderrDrain.join(2000); } catch (InterruptedException ignored) {}
             throw new RuntimeException(
-                "Gold Lapel failed to start on port " + port +
+                "Gold Lapel failed to start on port " + proxyPort +
                 " within " + (STARTUP_TIMEOUT_MS / 1000) + "s.\nstderr: " + stderrBuf
             );
         }
 
-        proxyUrl = makeProxyUrl(upstream, port);
+        proxyUrl = makeProxyUrl(upstream, proxyPort);
 
         printBanner(System.err);
     }
@@ -273,9 +329,9 @@ public class GoldLapel implements AutoCloseable {
             return;
         }
         if (dashboardPort > 0) {
-            stream.println("goldlapel → :" + port + " (proxy) | http://127.0.0.1:" + dashboardPort + " (dashboard)");
+            stream.println("goldlapel → :" + proxyPort + " (proxy) | http://127.0.0.1:" + dashboardPort + " (dashboard)");
         } else {
-            stream.println("goldlapel → :" + port + " (proxy)");
+            stream.println("goldlapel → :" + proxyPort + " (proxy)");
         }
     }
 
@@ -471,8 +527,8 @@ public class GoldLapel implements AutoCloseable {
         return toJdbcConnectionInfo(proxyUrl).password;
     }
 
-    public int getPort() {
-        return port;
+    public int getProxyPort() {
+        return proxyPort;
     }
 
     // Package-private accessor for tests — not part of the public API.
@@ -487,6 +543,15 @@ public class GoldLapel implements AutoCloseable {
      */
     public int dashboardPort() {
         return dashboardPort;
+    }
+
+    /**
+     * Return the cache-invalidation port this instance's proxy is listening
+     * on (typically proxy port + 2 unless {@link GoldLapelOptions#setInvalidationPort(Integer)}
+     * was called).
+     */
+    public int invalidationPort() {
+        return invalidationPort;
     }
 
     /**

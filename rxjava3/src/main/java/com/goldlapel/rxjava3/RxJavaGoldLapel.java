@@ -121,7 +121,7 @@ public final class RxJavaGoldLapel implements AutoCloseable {
     public String getJdbcUrl() { return inner.getJdbcUrl(); }
     public String getJdbcUser() { return inner.getJdbcUser(); }
     public String getJdbcPassword() { return inner.getJdbcPassword(); }
-    public int getPort() { return inner.getPort(); }
+    public int getProxyPort() { return inner.getProxyPort(); }
     public String getDashboardUrl() { return inner.getDashboardUrl(); }
     public boolean isRunning() { return inner.isRunning(); }
     public Connection connection() { return inner.connection(); }

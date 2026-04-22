@@ -88,7 +88,7 @@ class BannerTest {
     @Test
     void bannerUsesCustomProxyPort() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setPort(17932);
+        opts.setProxyPort(17932);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://host:5432/mydb", opts);
 
         String out = capture(gl);
@@ -103,10 +103,8 @@ class BannerTest {
     void bannerOmitsDashboardWhenDisabled() {
         // dashboardPort = 0 means the dashboard is disabled — banner should
         // only mention the proxy, not a bogus http://127.0.0.1:0 URL.
-        Map<String, Object> cfg = new HashMap<>();
-        cfg.put("dashboardPort", 0);
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setConfig(cfg);
+        opts.setDashboardPort(0);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://host:5432/mydb", opts);
 
         String out = capture(gl);
