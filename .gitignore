@@ -9,3 +9,8 @@ src/main/resources/bin/
 .project
 .mvn/
 mvnw
+
+# Local secrets
+.env
+.env.local
+.env.*.local
