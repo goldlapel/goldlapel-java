@@ -7,6 +7,7 @@ import java.math.BigDecimal;
 import java.sql.Date;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.util.*;
@@ -141,17 +142,18 @@ public class CachedResultSet {
             return val;
         }
 
-        private Object getByName(String name) {
+        private Object getByName(String name) throws SQLException {
             Integer idx = columnIndex.get(name.toLowerCase());
-            if (idx == null) throw new RuntimeException("Column not found: " + name);
+            // JDBC convention: missing columns throw SQLException, not RuntimeException.
+            if (idx == null) throw new SQLException("Column not found: " + name);
             Object val = rows.get(cursor)[idx];
             wasNull = (val == null);
             return val;
         }
 
-        private int findColumn(String name) {
+        private int findColumn(String name) throws SQLException {
             Integer idx = columnIndex.get(name.toLowerCase());
-            if (idx == null) throw new RuntimeException("Column not found: " + name);
+            if (idx == null) throw new SQLException("Column not found: " + name);
             return idx + 1;
         }
 
