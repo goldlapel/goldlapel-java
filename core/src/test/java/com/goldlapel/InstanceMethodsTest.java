@@ -448,7 +448,10 @@ class InstanceMethodsTest {
 
         @Test
         void streamAddThrows() {
-            assertThrows(IllegalStateException.class,
+            // streamAdd now fetches DDL patterns first — the failure mode for
+            // a non-started instance is RuntimeException ("dashboard not
+            // reachable" / "no dashboard token"), not IllegalStateException.
+            assertThrows(RuntimeException.class,
                 () -> bare.streamAdd("stream", "{}"));
         }
 

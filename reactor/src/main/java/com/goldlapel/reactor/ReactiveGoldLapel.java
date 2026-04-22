@@ -780,44 +780,48 @@ public final class ReactiveGoldLapel implements AutoCloseable {
     }
 
     // ── Streams ───────────────────────────────────────────────
+    //
+    // Each stream op fetches canonical DDL + query patterns from the proxy
+    // on first use (cached thereafter). The DDL fetch runs in the blocking
+    // scheduler because it's a one-shot HTTP round-trip — not a hot path.
 
     public Mono<Long> streamAdd(String stream, String payload) {
-        return call(null, c -> Utils.streamAdd(c, stream, payload));
+        return call(null, c -> Utils.streamAdd(c, stream, payload, sync.streamPatterns(stream)));
     }
     public Mono<Long> streamAdd(String stream, String payload, Connection conn) {
-        return call(conn, c -> Utils.streamAdd(c, stream, payload));
+        return call(conn, c -> Utils.streamAdd(c, stream, payload, sync.streamPatterns(stream)));
     }
 
     public Mono<Void> streamCreateGroup(String stream, String group) {
-        return run(null, c -> Utils.streamCreateGroup(c, stream, group));
+        return run(null, c -> Utils.streamCreateGroup(c, stream, group, sync.streamPatterns(stream)));
     }
     public Mono<Void> streamCreateGroup(String stream, String group, Connection conn) {
-        return run(conn, c -> Utils.streamCreateGroup(c, stream, group));
+        return run(conn, c -> Utils.streamCreateGroup(c, stream, group, sync.streamPatterns(stream)));
     }
 
     public Flux<Map<String, Object>> streamRead(String stream, String group,
             String consumer, int count) {
-        return flux(null, c -> Utils.streamRead(c, stream, group, consumer, count));
+        return flux(null, c -> Utils.streamRead(c, stream, group, consumer, count, sync.streamPatterns(stream)));
     }
     public Flux<Map<String, Object>> streamRead(String stream, String group,
             String consumer, int count, Connection conn) {
-        return flux(conn, c -> Utils.streamRead(c, stream, group, consumer, count));
+        return flux(conn, c -> Utils.streamRead(c, stream, group, consumer, count, sync.streamPatterns(stream)));
     }
 
     public Mono<Boolean> streamAck(String stream, String group, long messageId) {
-        return call(null, c -> Utils.streamAck(c, stream, group, messageId));
+        return call(null, c -> Utils.streamAck(c, stream, group, messageId, sync.streamPatterns(stream)));
     }
     public Mono<Boolean> streamAck(String stream, String group, long messageId, Connection conn) {
-        return call(conn, c -> Utils.streamAck(c, stream, group, messageId));
+        return call(conn, c -> Utils.streamAck(c, stream, group, messageId, sync.streamPatterns(stream)));
     }
 
     public Flux<Map<String, Object>> streamClaim(String stream, String group,
             String consumer, long minIdleMs) {
-        return flux(null, c -> Utils.streamClaim(c, stream, group, consumer, minIdleMs));
+        return flux(null, c -> Utils.streamClaim(c, stream, group, consumer, minIdleMs, sync.streamPatterns(stream)));
     }
     public Flux<Map<String, Object>> streamClaim(String stream, String group,
             String consumer, long minIdleMs, Connection conn) {
-        return flux(conn, c -> Utils.streamClaim(c, stream, group, consumer, minIdleMs));
+        return flux(conn, c -> Utils.streamClaim(c, stream, group, consumer, minIdleMs, sync.streamPatterns(stream)));
     }
 
     // ── Percolator ────────────────────────────────────────────

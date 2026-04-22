@@ -457,162 +457,153 @@ public class Utils {
         }
     }
 
-    public static long streamAdd(Connection conn, String stream, String payload) throws SQLException {
-        validateIdentifier(stream);
-        try (Statement st = conn.createStatement()) {
-            st.execute(
-                "CREATE TABLE IF NOT EXISTS " + stream + " (" +
-                "id BIGSERIAL PRIMARY KEY, " +
-                "payload JSONB NOT NULL, " +
-                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+    /** Translate $N (proxy) placeholders to ? (JDBC) — string-only rewrite. */
+    private static String pgToJdbc(String sql) {
+        // Simple replace: $1→?, $2→?, … up to $99 — defensive; only $1..$9 in use today.
+        return sql.replaceAll("\\$\\d+", "?");
+    }
+
+    private static String requirePattern(Map<String, String> patterns, String key, String fn) {
+        if (patterns == null) {
+            throw new IllegalArgumentException(
+                fn + " requires DDL patterns from the proxy — call via "
+                + "gl." + fn + "(...) rather than Utils." + fn + " directly."
             );
         }
-        try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO " + stream + " (payload) VALUES (?::jsonb) RETURNING id")) {
+        String sql = patterns.get(key);
+        if (sql == null) {
+            throw new IllegalStateException(
+                "DDL API response missing pattern '" + key + "' for " + fn
+            );
+        }
+        return pgToJdbc(sql);
+    }
+
+    public static long streamAdd(Connection conn, String stream, String payload,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(stream);
+        String sql = requirePattern(patterns, "insert", "streamAdd");
+        // JDBC's setString won't bind directly to JSONB — we cast at the SQL
+        // site. The canonical pattern emits `VALUES (?)`; rewrite it to
+        // `VALUES (?::jsonb)` so the bound text is accepted as JSONB.
+        String withCast = sql.replace("VALUES (?)", "VALUES (?::jsonb)");
+        try (PreparedStatement ps = conn.prepareStatement(withCast)) {
             ps.setString(1, payload);
-            ResultSet rs = ps.executeQuery();
-            rs.next();
-            return rs.getLong(1);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
         }
     }
 
-    public static void streamCreateGroup(Connection conn, String stream, String group) throws SQLException {
+    public static void streamCreateGroup(Connection conn, String stream, String group,
+            Map<String, String> patterns) throws SQLException {
         validateIdentifier(stream);
-        String groupTable = stream + "_groups";
-        String pelTable = stream + "_pel";
-        try (Statement st = conn.createStatement()) {
-            st.execute(
-                "CREATE TABLE IF NOT EXISTS " + groupTable + " (" +
-                "group_name TEXT PRIMARY KEY, " +
-                "last_delivered_id BIGINT NOT NULL DEFAULT 0)"
-            );
-        }
-        try (Statement st = conn.createStatement()) {
-            st.execute(
-                "CREATE TABLE IF NOT EXISTS " + pelTable + " (" +
-                "message_id BIGINT NOT NULL, " +
-                "group_name TEXT NOT NULL, " +
-                "consumer TEXT NOT NULL, " +
-                "delivered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), " +
-                "PRIMARY KEY (message_id, group_name))"
-            );
-        }
-        try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO " + groupTable + " (group_name) VALUES (?) " +
-                "ON CONFLICT (group_name) DO NOTHING")) {
+        String sql = requirePattern(patterns, "create_group", "streamCreateGroup");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, group);
             ps.executeUpdate();
         }
     }
 
     public static List<Map<String, Object>> streamRead(Connection conn, String stream,
-            String group, String consumer, int count) throws SQLException {
+            String group, String consumer, int count, Map<String, String> patterns) throws SQLException {
         validateIdentifier(stream);
-        String groupTable = stream + "_groups";
-        String pelTable = stream + "_pel";
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT last_delivered_id FROM " + groupTable + " WHERE group_name = ?")) {
+        String cursorSql = requirePattern(patterns, "group_get_cursor", "streamRead");
+        String readSql = requirePattern(patterns, "read_since", "streamRead");
+        String advanceSql = requirePattern(patterns, "group_advance_cursor", "streamRead");
+        String pendingSql = requirePattern(patterns, "pending_insert", "streamRead");
+
+        long lastId;
+        try (PreparedStatement ps = conn.prepareStatement(cursorSql)) {
             ps.setString(1, group);
-            ResultSet rs = ps.executeQuery();
-            if (!rs.next()) {
-                throw new SQLException("Consumer group '" + group + "' does not exist");
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return new ArrayList<>();
+                }
+                lastId = rs.getLong(1);
             }
         }
+
         List<Map<String, Object>> results = new ArrayList<>();
-        try (PreparedStatement ps = conn.prepareStatement(
-                "WITH new_messages AS (" +
-                "SELECT s.id, s.payload, s.created_at FROM " + stream + " s " +
-                "WHERE s.id > (SELECT last_delivered_id FROM " + groupTable + " WHERE group_name = ?) " +
-                "AND NOT EXISTS (SELECT 1 FROM " + pelTable + " p WHERE p.message_id = s.id AND p.group_name = ?) " +
-                "ORDER BY s.id LIMIT ?" +
-                ") SELECT * FROM new_messages")) {
-            ps.setString(1, group);
-            ps.setString(2, group);
-            ps.setInt(3, count);
-            ResultSet rs = ps.executeQuery();
-            long maxId = 0;
-            while (rs.next()) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                long id = rs.getLong("id");
-                row.put("id", id);
-                row.put("payload", rs.getString("payload"));
-                row.put("created_at", rs.getTimestamp("created_at"));
-                results.add(row);
-                if (id > maxId) maxId = id;
-            }
-            if (maxId > 0) {
-                try (PreparedStatement upd = conn.prepareStatement(
-                        "UPDATE " + groupTable + " SET last_delivered_id = ? WHERE group_name = ? AND last_delivered_id < ?")) {
-                    upd.setLong(1, maxId);
-                    upd.setString(2, group);
-                    upd.setLong(3, maxId);
-                    upd.executeUpdate();
+        long maxId = 0;
+        try (PreparedStatement ps = conn.prepareStatement(readSql)) {
+            ps.setLong(1, lastId);
+            ps.setInt(2, count);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    long id = rs.getLong("id");
+                    row.put("id", id);
+                    row.put("payload", rs.getString("payload"));
+                    row.put("created_at", rs.getTimestamp("created_at"));
+                    results.add(row);
+                    if (id > maxId) maxId = id;
                 }
-                for (Map<String, Object> row : results) {
-                    try (PreparedStatement ins = conn.prepareStatement(
-                            "INSERT INTO " + pelTable + " (message_id, group_name, consumer) VALUES (?, ?, ?) " +
-                            "ON CONFLICT (message_id, group_name) DO NOTHING")) {
-                        ins.setLong(1, (Long) row.get("id"));
-                        ins.setString(2, group);
-                        ins.setString(3, consumer);
-                        ins.executeUpdate();
-                    }
+            }
+        }
+
+        if (!results.isEmpty()) {
+            try (PreparedStatement upd = conn.prepareStatement(advanceSql)) {
+                upd.setLong(1, maxId);
+                upd.setString(2, group);
+                upd.executeUpdate();
+            }
+            for (Map<String, Object> row : results) {
+                try (PreparedStatement ins = conn.prepareStatement(pendingSql)) {
+                    ins.setLong(1, (Long) row.get("id"));
+                    ins.setString(2, group);
+                    ins.setString(3, consumer);
+                    ins.executeUpdate();
                 }
             }
         }
         return results;
     }
 
-    public static boolean streamAck(Connection conn, String stream, String group, long messageId) throws SQLException {
+    public static boolean streamAck(Connection conn, String stream, String group, long messageId,
+            Map<String, String> patterns) throws SQLException {
         validateIdentifier(stream);
-        String pelTable = stream + "_pel";
-        try (PreparedStatement ps = conn.prepareStatement(
-                "DELETE FROM " + pelTable + " WHERE message_id = ? AND group_name = ?")) {
-            ps.setLong(1, messageId);
-            ps.setString(2, group);
+        String sql = requirePattern(patterns, "ack", "streamAck");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, group);
+            ps.setLong(2, messageId);
             return ps.executeUpdate() > 0;
         }
     }
 
     public static List<Map<String, Object>> streamClaim(Connection conn, String stream,
-            String group, String consumer, long minIdleMs) throws SQLException {
+            String group, String consumer, long minIdleMs, Map<String, String> patterns) throws SQLException {
         validateIdentifier(stream);
-        String pelTable = stream + "_pel";
+        String claimSql = requirePattern(patterns, "claim", "streamClaim");
+        String readByIdSql = requirePattern(patterns, "read_by_id", "streamClaim");
+
         List<Long> claimedIds = new ArrayList<>();
-        try (PreparedStatement ps = conn.prepareStatement(
-                "UPDATE " + pelTable + " SET consumer = ?, delivered_at = NOW() " +
-                "WHERE group_name = ? AND delivered_at < NOW() - (? || ' milliseconds')::interval " +
-                "RETURNING message_id")) {
+        try (PreparedStatement ps = conn.prepareStatement(claimSql)) {
             ps.setString(1, consumer);
             ps.setString(2, group);
-            ps.setString(3, String.valueOf(minIdleMs));
-            ResultSet rs = ps.executeQuery();
-            while (rs.next()) {
-                claimedIds.add(rs.getLong(1));
+            ps.setLong(3, minIdleMs);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    claimedIds.add(rs.getLong(1));
+                }
             }
-        }
-        if (claimedIds.isEmpty()) {
-            return new ArrayList<>();
-        }
-        StringBuilder placeholders = new StringBuilder();
-        for (int i = 0; i < claimedIds.size(); i++) {
-            if (i > 0) placeholders.append(", ");
-            placeholders.append("?");
         }
         List<Map<String, Object>> results = new ArrayList<>();
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, payload, created_at FROM " + stream +
-                " WHERE id IN (" + placeholders + ") ORDER BY id")) {
-            for (int i = 0; i < claimedIds.size(); i++) {
-                ps.setLong(i + 1, claimedIds.get(i));
-            }
-            ResultSet rs = ps.executeQuery();
-            while (rs.next()) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", rs.getLong("id"));
-                row.put("payload", rs.getString("payload"));
-                row.put("created_at", rs.getTimestamp("created_at"));
-                results.add(row);
+        if (claimedIds.isEmpty()) return results;
+
+        for (long msgId : claimedIds) {
+            try (PreparedStatement ps = conn.prepareStatement(readByIdSql)) {
+                ps.setLong(1, msgId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        row.put("id", rs.getLong("id"));
+                        row.put("payload", rs.getString("payload"));
+                        row.put("created_at", rs.getTimestamp("created_at"));
+                        results.add(row);
+                    }
+                }
             }
         }
         return results;

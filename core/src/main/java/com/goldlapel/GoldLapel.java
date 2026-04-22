@@ -103,6 +103,13 @@ public class GoldLapel implements AutoCloseable {
     private Process process;
     private String proxyUrl;
     private Connection internalConn;
+    // Dashboard token — provisioned per-session on startProxy. Exposed to the
+    // DDL client via dashboardToken(). Non-final because we clear it on stop().
+    private volatile String dashboardToken;
+    // DDL pattern cache — one entry per (family, name) fetched from the proxy.
+    // Populated on first stream_*/doc_*/etc call that touches a given helper.
+    private final java.util.concurrent.ConcurrentHashMap<String, Map<String, Object>> ddlCache =
+        new java.util.concurrent.ConcurrentHashMap<>();
 
     // Scoped connection override — set by using(conn, runnable) for the duration
     // of the lambda. Uses ThreadLocal so only the calling thread sees the override.
@@ -190,6 +197,19 @@ public class GoldLapel implements AutoCloseable {
             // Explicit config wins over inherited env (matches Spring Boot /
             // Micronaut / Quarkus precedence: explicit config > env > defaults).
             pb.environment().put("GOLDLAPEL_CLIENT", client);
+            // Provision a session-scoped dashboard token for /api/ddl/* calls.
+            // Pre-set env wins; otherwise generate a fresh one per session.
+            String existingToken = pb.environment().get("GOLDLAPEL_DASHBOARD_TOKEN");
+            if (existingToken != null && !existingToken.isEmpty()) {
+                this.dashboardToken = existingToken;
+            } else {
+                byte[] randomBytes = new byte[32];
+                new java.security.SecureRandom().nextBytes(randomBytes);
+                StringBuilder sb = new StringBuilder();
+                for (byte b : randomBytes) sb.append(String.format("%02x", b));
+                this.dashboardToken = sb.toString();
+                pb.environment().put("GOLDLAPEL_DASHBOARD_TOKEN", this.dashboardToken);
+            }
             pb.redirectInput(ProcessBuilder.Redirect.PIPE);
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
             pb.redirectError(ProcessBuilder.Redirect.PIPE);
@@ -385,6 +405,10 @@ public class GoldLapel implements AutoCloseable {
      * Called automatically by {@link #close()} (try-with-resources).
      */
     public void stop() {
+        // Drop any cached DDL patterns — they're tied to the proxy we're
+        // about to kill.
+        ddlCache.clear();
+        dashboardToken = null;
         if (internalConn != null) {
             try { internalConn.close(); } catch (SQLException ignored) {}
             internalConn = null;
@@ -454,6 +478,31 @@ public class GoldLapel implements AutoCloseable {
     // Package-private accessor for tests — not part of the public API.
     int getDashboardPort() {
         return dashboardPort;
+    }
+
+    /**
+     * Return the dashboard port this instance's proxy is listening on
+     * (typically proxy port + 1). Returned value is valid between start()
+     * and stop(). Used by DDL API clients on this process.
+     */
+    public int dashboardPort() {
+        return dashboardPort;
+    }
+
+    /**
+     * Return the dashboard token the wrapper uses to authenticate against
+     * /api/ddl/* on this instance's proxy. Provisioned during startProxy()
+     * for internally-spawned proxies; {@code null} for externally-launched
+     * proxies (in that case the DDL client falls back to env/file).
+     */
+    public String dashboardToken() {
+        return dashboardToken;
+    }
+
+    // Package-private accessor used by Utils.streamX to share the per-instance
+    // DDL pattern cache. Keyed on "family:name".
+    java.util.concurrent.ConcurrentHashMap<String, Map<String, Object>> ddlCache() {
+        return ddlCache;
     }
 
     public String getDashboardUrl() {
@@ -1091,50 +1140,64 @@ public class GoldLapel implements AutoCloseable {
         return Utils.script(resolveConn(), luaCode, args);
     }
 
-    // Streams
+    // Streams — proxy-owned DDL. Each call fetches (and caches) canonical
+    // query patterns from the dashboard's /api/ddl/stream/create endpoint on
+    // first use; subsequent calls use the cached patterns.
+
+    /**
+     * Fetch (and cache per-instance) canonical stream DDL + query patterns.
+     * Public so reactor/rxjava3 wrappers in sibling artifacts can reuse the
+     * same cache.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, String> streamPatterns(String stream) {
+        String token = dashboardToken != null ? dashboardToken : Ddl.tokenFromEnvOrFile();
+        Map<String, Object> entry = Ddl.fetch(ddlCache, "stream", stream, dashboardPort, token);
+        return Ddl.queryPatterns(entry);
+    }
 
     public long streamAdd(String stream, String payload) throws SQLException {
-        return Utils.streamAdd(resolveConn(), stream, payload);
+        return Utils.streamAdd(resolveConn(), stream, payload, streamPatterns(stream));
     }
 
     public long streamAdd(String stream, String payload, Connection conn) throws SQLException {
-        return Utils.streamAdd(conn, stream, payload);
+        return Utils.streamAdd(conn, stream, payload, streamPatterns(stream));
     }
 
     public void streamCreateGroup(String stream, String group) throws SQLException {
-        Utils.streamCreateGroup(resolveConn(), stream, group);
+        Utils.streamCreateGroup(resolveConn(), stream, group, streamPatterns(stream));
     }
 
     public void streamCreateGroup(String stream, String group, Connection conn) throws SQLException {
-        Utils.streamCreateGroup(conn, stream, group);
+        Utils.streamCreateGroup(conn, stream, group, streamPatterns(stream));
     }
 
     public List<Map<String, Object>> streamRead(String stream, String group,
             String consumer, int count) throws SQLException {
-        return Utils.streamRead(resolveConn(), stream, group, consumer, count);
+        return Utils.streamRead(resolveConn(), stream, group, consumer, count, streamPatterns(stream));
     }
 
     public List<Map<String, Object>> streamRead(String stream, String group,
             String consumer, int count, Connection conn) throws SQLException {
-        return Utils.streamRead(conn, stream, group, consumer, count);
+        return Utils.streamRead(conn, stream, group, consumer, count, streamPatterns(stream));
     }
 
     public boolean streamAck(String stream, String group, long messageId) throws SQLException {
-        return Utils.streamAck(resolveConn(), stream, group, messageId);
+        return Utils.streamAck(resolveConn(), stream, group, messageId, streamPatterns(stream));
     }
 
     public boolean streamAck(String stream, String group, long messageId, Connection conn) throws SQLException {
-        return Utils.streamAck(conn, stream, group, messageId);
+        return Utils.streamAck(conn, stream, group, messageId, streamPatterns(stream));
     }
 
     public List<Map<String, Object>> streamClaim(String stream, String group,
             String consumer, long minIdleMs) throws SQLException {
-        return Utils.streamClaim(resolveConn(), stream, group, consumer, minIdleMs);
+        return Utils.streamClaim(resolveConn(), stream, group, consumer, minIdleMs, streamPatterns(stream));
     }
 
     public List<Map<String, Object>> streamClaim(String stream, String group,
             String consumer, long minIdleMs, Connection conn) throws SQLException {
-        return Utils.streamClaim(conn, stream, group, consumer, minIdleMs);
+        return Utils.streamClaim(conn, stream, group, consumer, minIdleMs, streamPatterns(stream));
     }
 
     // Percolator

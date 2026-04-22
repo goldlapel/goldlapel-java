@@ -143,28 +143,30 @@ class RedisCompatValidationTest {
                 () -> Utils.geodist(conn, BAD, "geom", "name", "a", "b"));
     }
 
+    // Streams now accept a `patterns` kwarg from the proxy — a null patterns
+    // arg is valid here because the identifier validation runs first.
     @Test void streamAddRejectsBad() {
         assertThrows(IllegalArgumentException.class,
-                () -> Utils.streamAdd(conn, BAD, "{}"));
+                () -> Utils.streamAdd(conn, BAD, "{}", null));
     }
 
     @Test void streamCreateGroupRejectsBad() {
         assertThrows(IllegalArgumentException.class,
-                () -> Utils.streamCreateGroup(conn, BAD, "g"));
+                () -> Utils.streamCreateGroup(conn, BAD, "g", null));
     }
 
     @Test void streamReadRejectsBad() {
         assertThrows(IllegalArgumentException.class,
-                () -> Utils.streamRead(conn, BAD, "g", "c", 1));
+                () -> Utils.streamRead(conn, BAD, "g", "c", 1, null));
     }
 
     @Test void streamAckRejectsBad() {
         assertThrows(IllegalArgumentException.class,
-                () -> Utils.streamAck(conn, BAD, "g", 1L));
+                () -> Utils.streamAck(conn, BAD, "g", 1L, null));
     }
 
     @Test void streamClaimRejectsBad() {
         assertThrows(IllegalArgumentException.class,
-                () -> Utils.streamClaim(conn, BAD, "g", "c", 60000L));
+                () -> Utils.streamClaim(conn, BAD, "g", "c", 60000L, null));
     }
 }
