@@ -955,5 +955,14 @@ class SearchTest {
             assertThrows(IllegalArgumentException.class, () -> Utils.validateIdentifier(""));
             assertThrows(IllegalArgumentException.class, () -> Utils.validateIdentifier("has-dash"));
         }
+
+        @Test
+        void lengthBounds() {
+            // NAMEDATALEN-1 = 63 is the Postgres (and proxy) ceiling.
+            String max = "a".repeat(63);
+            assertDoesNotThrow(() -> Utils.validateIdentifier(max));
+            String over = "a".repeat(64);
+            assertThrows(IllegalArgumentException.class, () -> Utils.validateIdentifier(over));
+        }
     }
 }

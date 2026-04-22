@@ -23,10 +23,12 @@ import org.postgresql.PGNotification;
 
 public class Utils {
 
-    private static final Pattern IDENTIFIER_RE = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*$");
+    // Bound to 63 chars (Postgres NAMEDATALEN-1) so identifiers match the
+    // proxy's server-side regex exactly: ^[A-Za-z_][A-Za-z0-9_]{0,62}$.
+    private static final Pattern IDENTIFIER_RE = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]{0,62}$");
 
     static void validateIdentifier(String name) {
-        if (!IDENTIFIER_RE.matcher(name).matches()) {
+        if (name == null || !IDENTIFIER_RE.matcher(name).matches()) {
             throw new IllegalArgumentException("Invalid identifier: " + name);
         }
     }
