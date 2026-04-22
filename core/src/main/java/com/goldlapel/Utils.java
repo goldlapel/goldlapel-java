@@ -3089,13 +3089,14 @@ public class Utils {
             );
         }
 
-        try (Statement st = conn.createStatement()) {
-            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
-        }
-
+        // CREATE OR REPLACE TRIGGER (Postgres 14+) is atomic — avoids the
+        // race where a DROP + CREATE pair could have two concurrent
+        // docWatch calls replace each other's triggers mid-flight and end
+        // up with a partially dropped one. GL targets PG14+ across the
+        // product, so this is safe.
         try (Statement st = conn.createStatement()) {
             st.execute(
-                "CREATE TRIGGER " + triggerName + " " +
+                "CREATE OR REPLACE TRIGGER " + triggerName + " " +
                 "AFTER INSERT OR UPDATE OR DELETE ON " + collection + " " +
                 "FOR EACH ROW EXECUTE FUNCTION " + funcName + "()"
             );
@@ -3180,13 +3181,11 @@ public class Utils {
             );
         }
 
-        try (Statement st = conn.createStatement()) {
-            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
-        }
-
+        // CREATE OR REPLACE TRIGGER (Postgres 14+): atomic, avoids the
+        // same race documented in docWatch.
         try (Statement st = conn.createStatement()) {
             st.execute(
-                "CREATE TRIGGER " + triggerName + " " +
+                "CREATE OR REPLACE TRIGGER " + triggerName + " " +
                 "BEFORE INSERT ON " + collection + " " +
                 "FOR EACH ROW EXECUTE FUNCTION " + funcName + "()"
             );
@@ -3256,13 +3255,11 @@ public class Utils {
             );
         }
 
-        try (Statement st = conn.createStatement()) {
-            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
-        }
-
+        // CREATE OR REPLACE TRIGGER (Postgres 14+): atomic, avoids the
+        // same race documented in docWatch.
         try (Statement st = conn.createStatement()) {
             st.execute(
-                "CREATE TRIGGER " + triggerName + " " +
+                "CREATE OR REPLACE TRIGGER " + triggerName + " " +
                 "AFTER INSERT ON " + collection + " " +
                 "FOR EACH ROW EXECUTE FUNCTION " + funcName + "()"
             );

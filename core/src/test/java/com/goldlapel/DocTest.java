@@ -1300,13 +1300,21 @@ class DocTest {
             Thread t = Utils.docWatch(conn, "events", (ch, payload) -> {});
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
-            verify(stmt, atLeast(4)).execute(ddlCaptor.capture());
+            // CREATE FN + CREATE OR REPLACE TRIGGER + LISTEN = 3 DDLs.
+            // Atomic CREATE OR REPLACE TRIGGER (PG14+) replaces the old
+            // DROP + CREATE pair to avoid a race between concurrent
+            // docWatch calls; matches the Go wrapper.
+            verify(stmt, atLeast(3)).execute(ddlCaptor.capture());
             List<String> ddls = ddlCaptor.getAllValues();
 
             assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE OR REPLACE FUNCTION events_notify_fn()")));
-            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP TRIGGER IF EXISTS events_notify_trg ON events")));
-            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE TRIGGER events_notify_trg")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE OR REPLACE TRIGGER events_notify_trg")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("LISTEN events_changes")));
+
+            // Guard against the racy DROP + CREATE pair regressing.
+            assertTrue(ddls.stream().noneMatch(s ->
+                s.contains("DROP TRIGGER IF EXISTS events_notify_trg")),
+                "docWatch should not emit DROP TRIGGER IF EXISTS (racy); use CREATE OR REPLACE TRIGGER");
 
             assertNotNull(t);
             assertTrue(t.isDaemon());
@@ -1322,7 +1330,7 @@ class DocTest {
             Thread t = Utils.docWatch(conn, "orders", (ch, payload) -> {});
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
-            verify(stmt, atLeast(4)).execute(ddlCaptor.capture());
+            verify(stmt, atLeast(3)).execute(ddlCaptor.capture());
             List<String> ddls = ddlCaptor.getAllValues();
 
             String funcDdl = ddls.stream()
@@ -1386,15 +1394,22 @@ class DocTest {
             Utils.docCreateTtlIndex(conn, "sessions", 3600);
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
-            verify(stmt, times(4)).execute(ddlCaptor.capture());
+            // CREATE INDEX + CREATE FN + CREATE OR REPLACE TRIGGER = 3 DDLs.
+            // Atomic CREATE OR REPLACE TRIGGER (PG14+) replaces the old
+            // DROP + CREATE pair — matches the Go wrapper.
+            verify(stmt, times(3)).execute(ddlCaptor.capture());
             List<String> ddls = ddlCaptor.getAllValues();
 
             assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE INDEX IF NOT EXISTS sessions_ttl_idx ON sessions (created_at)")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE OR REPLACE FUNCTION sessions_ttl_fn()")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("INTERVAL '3600 seconds'")));
-            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP TRIGGER IF EXISTS sessions_ttl_trg ON sessions")));
-            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE TRIGGER sessions_ttl_trg")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE OR REPLACE TRIGGER sessions_ttl_trg")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("BEFORE INSERT")));
+
+            // Guard against the racy DROP + CREATE pair regressing.
+            assertTrue(ddls.stream().noneMatch(s ->
+                s.contains("DROP TRIGGER IF EXISTS sessions_ttl_trg")),
+                "docCreateTtlIndex should not emit DROP TRIGGER IF EXISTS (racy); use CREATE OR REPLACE TRIGGER");
         }
 
         @Test
@@ -1520,16 +1535,23 @@ class DocTest {
             Utils.docCreateCapped(conn, "logs", 1000);
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
-            verify(stmt, atLeast(4)).execute(ddlCaptor.capture());
+            // ensureCollection + CREATE FN + CREATE OR REPLACE TRIGGER = 3 DDLs.
+            // Atomic CREATE OR REPLACE TRIGGER (PG14+) replaces the old
+            // DROP + CREATE pair — matches the Go wrapper.
+            verify(stmt, atLeast(3)).execute(ddlCaptor.capture());
             List<String> ddls = ddlCaptor.getAllValues();
 
             assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE TABLE IF NOT EXISTS logs")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE OR REPLACE FUNCTION logs_cap_fn()")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("- 1000, 0)")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("ORDER BY created_at ASC, _id ASC")));
-            assertTrue(ddls.stream().anyMatch(s -> s.contains("DROP TRIGGER IF EXISTS logs_cap_trg ON logs")));
-            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE TRIGGER logs_cap_trg")));
+            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE OR REPLACE TRIGGER logs_cap_trg")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("AFTER INSERT")));
+
+            // Guard against the racy DROP + CREATE pair regressing.
+            assertTrue(ddls.stream().noneMatch(s ->
+                s.contains("DROP TRIGGER IF EXISTS logs_cap_trg")),
+                "docCreateCapped should not emit DROP TRIGGER IF EXISTS (racy); use CREATE OR REPLACE TRIGGER");
         }
 
         @Test
