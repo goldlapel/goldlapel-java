@@ -214,7 +214,7 @@ class DdlTest {
     void tokenFromEnvOrFile_fallbackReturnsNullWhenNothing() {
         // Can't mock System.getenv() without reflection; this asserts the
         // method is callable and either returns null or a real token. In CI
-        // with no env var and no ~/.goldlapel/dashboard_token, returns null.
+        // with no env var and no ~/.goldlapel/dashboard-token, returns null.
         String tok = Ddl.tokenFromEnvOrFile();
         // Just assert we didn't throw — value depends on the test host.
         assertTrue(tok == null || !tok.isEmpty());
