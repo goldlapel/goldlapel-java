@@ -802,4 +802,55 @@ class ConfigToArgsTest {
             () -> GoldLapel.configToArgs(config)
         );
     }
+
+    // ── Mesh startup options ────────────────────────────────────────────────
+
+    @Test
+    void testMeshDefaultFalse() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        assertFalse(opts.isMesh());
+        assertNull(opts.getMeshTag());
+    }
+
+    @Test
+    void testMeshSetterGetter() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setMesh(true);
+        opts.setMeshTag("prod-east");
+        assertTrue(opts.isMesh());
+        assertEquals("prod-east", opts.getMeshTag());
+    }
+
+    @Test
+    void testMeshStoredOnInstance() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setMesh(true);
+        opts.setMeshTag("prod-east");
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        assertTrue(gl.isMesh());
+        assertEquals("prod-east", gl.meshTag());
+    }
+
+    @Test
+    void testMeshTagEmptyStringNormalizedToNull() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setMesh(true);
+        opts.setMeshTag("");
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        assertNull(gl.meshTag());
+    }
+
+    @Test
+    void testMeshInConfigMapRejected() {
+        // Regression guard: mesh / meshTag are top-level canonical-surface
+        // options, never valid inside the structured config map.
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(Collections.singletonMap("mesh", true))
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(Collections.singletonMap("meshTag", "prod"))
+        );
+    }
 }

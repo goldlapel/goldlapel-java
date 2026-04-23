@@ -37,6 +37,8 @@ public class GoldLapelOptions {
     private Map<String, Object> config;
     private List<String> extraArgs;
     private boolean silent;
+    private boolean mesh;
+    private String meshTag;
 
     public Integer getProxyPort() {
         return proxyPort;
@@ -164,5 +166,37 @@ public class GoldLapelOptions {
 
     public void setSilent(boolean silent) {
         this.silent = silent;
+    }
+
+    /**
+     * Whether to opt into the mesh at startup. HQ enforces the license; if
+     * mesh isn't covered by the current plan the proxy continues running
+     * normally without clustering (concierge, not bouncer).
+     *
+     * <p>Equivalent CLI flag: {@code --mesh}. Env var: {@code GOLDLAPEL_MESH}.
+     * TOML key: {@code [mesh] enabled}. Precedence (highest to lowest):
+     * CLI &gt; env &gt; TOML &gt; default.
+     */
+    public boolean isMesh() {
+        return mesh;
+    }
+
+    public void setMesh(boolean mesh) {
+        this.mesh = mesh;
+    }
+
+    public String getMeshTag() {
+        return meshTag;
+    }
+
+    /**
+     * Optional mesh tag — instances sharing a tag cluster together. When
+     * unset, mesh-enabled instances join the account's default mesh.
+     *
+     * <p>Equivalent CLI flag: {@code --mesh-tag <tag>}. Env var:
+     * {@code GOLDLAPEL_MESH_TAG}. TOML key: {@code [mesh] tag}.
+     */
+    public void setMeshTag(String meshTag) {
+        this.meshTag = meshTag;
     }
 }

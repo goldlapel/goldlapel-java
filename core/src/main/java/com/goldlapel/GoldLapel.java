@@ -110,6 +110,8 @@ public class GoldLapel implements AutoCloseable {
     private final List<String> extraArgs;
     private final String client;
     private final boolean silent;
+    private final boolean mesh;
+    private final String meshTag;
     private Process process;
     private String proxyUrl;
     private Connection internalConn;
@@ -163,6 +165,9 @@ public class GoldLapel implements AutoCloseable {
             : new ArrayList<>();
         this.client = options.getClient() != null ? options.getClient() : "java";
         this.silent = options.isSilent();
+        this.mesh = options.isMesh();
+        String tag = options.getMeshTag();
+        this.meshTag = (tag == null || tag.isEmpty()) ? null : tag;
         this.process = null;
         this.proxyUrl = null;
     }
@@ -244,6 +249,13 @@ public class GoldLapel implements AutoCloseable {
         if (configFile != null) {
             cmd.add("--config");
             cmd.add(configFile);
+        }
+        if (mesh) {
+            cmd.add("--mesh");
+        }
+        if (meshTag != null) {
+            cmd.add("--mesh-tag");
+            cmd.add(meshTag);
         }
         cmd.addAll(configToArgs(config));
         cmd.addAll(extraArgs);
@@ -568,6 +580,15 @@ public class GoldLapel implements AutoCloseable {
     // DDL pattern cache. Keyed on "family:name".
     java.util.concurrent.ConcurrentHashMap<String, Map<String, Object>> ddlCache() {
         return ddlCache;
+    }
+
+    // Package-private accessors for tests to verify mesh wiring without spawning.
+    boolean isMesh() {
+        return mesh;
+    }
+
+    String meshTag() {
+        return meshTag;
     }
 
     public String getDashboardUrl() {
