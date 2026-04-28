@@ -56,6 +56,24 @@ System.out.println(gl.getDashboardUrl());
 
 Full API reference, configuration, reactive (Reactor / RxJava 3), Spring Boot integration, upgrading from v0.1, and production deployment: https://goldlapel.com/docs/java
 
+## Uninstalling
+
+Before removing the package, drop Gold Lapel's helper schema and cached matviews from your Postgres:
+
+```bash
+goldlapel clean
+```
+
+Then remove the `<dependency>` block from your `pom.xml` (or the equivalent line from `build.gradle`) and clear any local state:
+
+```bash
+mvn dependency:purge-local-repository -Dinclude=com.goldlapel:goldlapel
+rm -rf ~/.goldlapel
+rm -f goldlapel.toml     # only if you wrote one
+```
+
+Cancelling your subscription does not delete your data — only Gold Lapel's helper schema and cached matviews go away.
+
 ## License
 
 MIT. See `LICENSE`.
