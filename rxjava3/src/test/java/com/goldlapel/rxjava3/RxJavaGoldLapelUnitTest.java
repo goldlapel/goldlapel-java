@@ -94,6 +94,24 @@ class RxJavaGoldLapelUnitTest {
         return conn;
     }
 
+    /**
+     * Pre-populate the per-instance DDL pattern cache so
+     * {@code gl.documents.<verb>} skips the proxy round-trip in unit tests.
+     */
+    @SuppressWarnings("unchecked")
+    private static void seedDdlCache(GoldLapel sync, String family, String name) throws Exception {
+        java.util.Map<String, Object> tables = new java.util.LinkedHashMap<>();
+        tables.put("main", name);
+        java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("tables", tables);
+        entry.put("query_patterns", java.util.Collections.emptyMap());
+        java.lang.reflect.Method m = GoldLapel.class.getDeclaredMethod("ddlCache");
+        m.setAccessible(true);
+        java.util.concurrent.ConcurrentHashMap<String, java.util.Map<String, Object>> cache =
+            (java.util.concurrent.ConcurrentHashMap<String, java.util.Map<String, Object>>) m.invoke(sync);
+        cache.put(family + ":" + name, entry);
+    }
+
     private static Connection mockConnForPublish() throws Exception {
         Connection conn = mock(Connection.class);
         PreparedStatement ps = mock(PreparedStatement.class);
@@ -108,9 +126,10 @@ class RxJavaGoldLapelUnitTest {
     void docCountReturnsSingleAndEmitsValue() throws Exception {
         Connection internal = mockConnForDocCount(42);
         GoldLapel sync = syncWithConnection(internal);
+        seedDdlCache(sync, "doc_store", "events");
         RxJavaGoldLapel gl = newInstance(sync);
 
-        Single<Long> single = gl.docCount("events", "{}");
+        Single<Long> single = gl.documents.count("events", "{}");
         Long result = single.blockingGet();
         assertEquals(42L, result);
     }
@@ -119,9 +138,10 @@ class RxJavaGoldLapelUnitTest {
     void docCountEmitsViaTestObserver() throws Exception {
         Connection internal = mockConnForDocCount(7);
         GoldLapel sync = syncWithConnection(internal);
+        seedDdlCache(sync, "doc_store", "events");
         RxJavaGoldLapel gl = newInstance(sync);
 
-        TestObserver<Long> obs = gl.docCount("events", "{}").test();
+        TestObserver<Long> obs = gl.documents.count("events", "{}").test();
         obs.await();
         obs.assertComplete();
         obs.assertNoErrors();
@@ -134,9 +154,10 @@ class RxJavaGoldLapelUnitTest {
     void docDistinctReturnsFlowableAndEmitsItems() throws Exception {
         Connection internal = mockConnForDocDistinct("alpha", "beta", "gamma");
         GoldLapel sync = syncWithConnection(internal);
+        seedDdlCache(sync, "doc_store", "events");
         RxJavaGoldLapel gl = newInstance(sync);
 
-        Flowable<String> flowable = gl.docDistinct("events", "type", null);
+        Flowable<String> flowable = gl.documents.distinct("events", "type", null);
         TestSubscriber<String> ts = flowable.test();
         ts.await();
         ts.assertComplete();
@@ -213,9 +234,10 @@ class RxJavaGoldLapelUnitTest {
         Connection internal = mock(Connection.class);
         when(internal.prepareStatement(anyString())).thenThrow(new java.sql.SQLException("boom"));
         GoldLapel sync = syncWithConnection(internal);
+        seedDdlCache(sync, "doc_store", "events");
         RxJavaGoldLapel gl = newInstance(sync);
 
-        TestObserver<Long> obs = gl.docCount("events", "{}").test();
+        TestObserver<Long> obs = gl.documents.count("events", "{}").test();
         obs.await();
         obs.assertError(err -> err instanceof java.sql.SQLException
                             || err.getCause() instanceof java.sql.SQLException);
@@ -228,10 +250,11 @@ class RxJavaGoldLapelUnitTest {
         Connection internal = mockConnForDocCount(99);
         Connection explicit = mockConnForDocCount(3);
         GoldLapel sync = syncWithConnection(internal);
+        seedDdlCache(sync, "doc_store", "events");
         RxJavaGoldLapel gl = newInstance(sync);
 
-        assertEquals(3L, gl.docCount("events", "{}", explicit).blockingGet());
-        assertEquals(99L, gl.docCount("events", "{}").blockingGet());
+        assertEquals(3L, gl.documents.count("events", "{}", explicit).blockingGet());
+        assertEquals(99L, gl.documents.count("events", "{}").blockingGet());
     }
 
     // ── Lifecycle ─────────────────────────────────────────────

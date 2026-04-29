@@ -48,6 +48,21 @@ class InstanceMethodsTest {
         }
     }
 
+    /**
+     * Pre-populate the per-instance DDL cache so {@code gl.documents.<verb>}
+     * / {@code gl.streams.<verb>} skip the proxy round-trip in unit tests.
+     * Tests use the user-supplied collection name as the canonical table —
+     * matches how DocTest's {@code P(...)} helper builds patterns.
+     */
+    void seedDdlCache(String family, String name) {
+        Map<String, Object> tables = new java.util.LinkedHashMap<>();
+        tables.put("main", name);
+        Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("tables", tables);
+        entry.put("query_patterns", Collections.emptyMap());
+        gl.ddlCache().put(family + ":" + name, entry);
+    }
+
     void emptyResultSet(String... columnNames) throws SQLException {
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
@@ -109,12 +124,13 @@ class InstanceMethodsTest {
 
         @Test
         void delegatesToUtils() throws SQLException {
+            seedDdlCache("doc_store", "users");
             allowCreateStatement();
             singleRowResultSet("_id", "data", "created_at", "updated_at");
             when(rs.getObject(1)).thenReturn("uuid-1");
             when(rs.getObject(2)).thenReturn("{\"name\":\"alice\"}");
 
-            Map<String, Object> result = gl.docInsert("users", "{\"name\":\"alice\"}");
+            Map<String, Object> result = gl.documents.insert("users", "{\"name\":\"alice\"}");
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -134,8 +150,9 @@ class InstanceMethodsTest {
 
         @Test
         void delegatesToUtils() throws SQLException {
+            seedDdlCache("doc_store", "users");
             emptyResultSet("_id", "data", "created_at", "updated_at");
-            List<Map<String, Object>> results = gl.docFind("users", "{\"active\":true}", null, 10, null);
+            List<Map<String, Object>> results = gl.documents.find("users", "{\"active\":true}", null, 10, null);
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -154,8 +171,9 @@ class InstanceMethodsTest {
 
         @Test
         void delegatesToUtils() throws SQLException {
+            seedDdlCache("doc_store", "users");
             allowUpdate(3);
-            int count = gl.docUpdate("users", "{\"active\":true}", "{\"score\":10}");
+            int count = gl.documents.update("users", "{\"active\":true}", "{\"score\":10}");
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -412,8 +430,11 @@ class InstanceMethodsTest {
 
         @Test
         void docInsertThrows() {
-            assertThrows(IllegalStateException.class,
-                () -> bare.docInsert("col", "{}"));
+            // documents.insert now fetches DDL patterns first — the failure
+            // mode for a non-started instance is RuntimeException ("dashboard
+            // not reachable" / "no dashboard token"), not IllegalStateException.
+            assertThrows(RuntimeException.class,
+                () -> bare.documents.insert("col", "{}"));
         }
 
         @Test
@@ -452,7 +473,7 @@ class InstanceMethodsTest {
             // a non-started instance is RuntimeException ("dashboard not
             // reachable" / "no dashboard token"), not IllegalStateException.
             assertThrows(RuntimeException.class,
-                () -> bare.streamAdd("stream", "{}"));
+                () -> bare.streams.add("stream", "{}"));
         }
 
         @Test

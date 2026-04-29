@@ -33,8 +33,8 @@ import java.util.function.Function;
  *   <tr><td>{@code Flux<T>}</td><td>{@code Flowable<T>}</td></tr>
  * </table>
  *
- * <p>The underlying JDBC helpers ({@code hget}, {@code zscore}, {@code docFindOne},
- * etc.) return {@code null} when a row is not found. In Reactor those surface
+ * <p>The underlying JDBC helpers ({@code hget}, {@code zscore},
+ * {@code documents.findOne}, etc.) return {@code null} when a row is not found. In Reactor those surface
  * as an empty {@code Mono}; here they map to {@code Maybe<T>} so "not found"
  * is a clean {@code onComplete} rather than a {@link java.util.NoSuchElementException}
  * that {@code monoToSingle} would raise.
@@ -55,8 +55,8 @@ import java.util.function.Function;
  *
  * <pre>{@code
  * RxJavaGoldLapel.start("postgresql://user:pass@host/db")
- *     .flatMap(gl -> gl.docInsert("events", "{\"type\":\"signup\"}")
- *         .flatMap(inserted -> gl.docCount("events", "{}")
+ *     .flatMap(gl -> gl.documents.insert("events", "{\"type\":\"signup\"}")
+ *         .flatMap(inserted -> gl.documents.count("events", "{}")
  *             .flatMap(count -> gl.stop().toSingleDefault(count))))
  *     .subscribe(System.out::println);
  * }</pre>
@@ -65,8 +65,20 @@ public final class RxJavaGoldLapel implements AutoCloseable {
 
     private final ReactiveGoldLapel inner;
 
+    /**
+     * RxJava 3 document store sub-API — accessible as
+     * {@code gl.documents.<verb>(...)}. Final field (Option A from
+     * cross-wrapper consensus): direct field access, mirrors
+     * {@link com.goldlapel.GoldLapel#documents}.
+     */
+    public final RxJavaDocumentsApi documents;
+    /** RxJava 3 streams sub-API — accessible as {@code gl.streams.<verb>(...)}. */
+    public final RxJavaStreamsApi streams;
+
     RxJavaGoldLapel(ReactiveGoldLapel inner) {
         this.inner = inner;
+        this.documents = new RxJavaDocumentsApi(inner.documents);
+        this.streams = new RxJavaStreamsApi(inner.streams);
     }
 
     // ── Factory ───────────────────────────────────────────────
@@ -131,183 +143,7 @@ public final class RxJavaGoldLapel implements AutoCloseable {
     // ═══════════════════════════════════════════════════════════
 
     // ── Document store ────────────────────────────────────────
-
-    public Single<Map<String, Object>> docInsert(String collection, String documentJson) {
-        return RxJava3Adapter.monoToSingle(inner.docInsert(collection, documentJson));
-    }
-    public Single<Map<String, Object>> docInsert(String collection, String documentJson, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.docInsert(collection, documentJson, conn));
-    }
-
-    public Flowable<Map<String, Object>> docInsertMany(String collection, List<String> documents) {
-        return RxJava3Adapter.fluxToFlowable(inner.docInsertMany(collection, documents));
-    }
-    public Flowable<Map<String, Object>> docInsertMany(String collection, List<String> documents, Connection conn) {
-        return RxJava3Adapter.fluxToFlowable(inner.docInsertMany(collection, documents, conn));
-    }
-
-    public Flowable<Map<String, Object>> docFind(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip) {
-        return RxJava3Adapter.fluxToFlowable(inner.docFind(collection, filterJson, sortJson, limit, skip));
-    }
-    public Flowable<Map<String, Object>> docFind(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip, Connection conn) {
-        return RxJava3Adapter.fluxToFlowable(inner.docFind(collection, filterJson, sortJson, limit, skip, conn));
-    }
-
-    /** {@code Maybe} — empty when no document matches. */
-    public Maybe<Map<String, Object>> docFindOne(String collection, String filterJson) {
-        return RxJava3Adapter.monoToMaybe(inner.docFindOne(collection, filterJson));
-    }
-    public Maybe<Map<String, Object>> docFindOne(String collection, String filterJson, Connection conn) {
-        return RxJava3Adapter.monoToMaybe(inner.docFindOne(collection, filterJson, conn));
-    }
-
-    public Flowable<Map<String, Object>> docFindCursor(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip, int batchSize) {
-        return RxJava3Adapter.fluxToFlowable(
-            inner.docFindCursor(collection, filterJson, sortJson, limit, skip, batchSize));
-    }
-    public Flowable<Map<String, Object>> docFindCursor(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip, int batchSize, Connection conn) {
-        return RxJava3Adapter.fluxToFlowable(
-            inner.docFindCursor(collection, filterJson, sortJson, limit, skip, batchSize, conn));
-    }
-
-    public Single<Integer> docUpdate(String collection, String filterJson, String updateJson) {
-        return RxJava3Adapter.monoToSingle(inner.docUpdate(collection, filterJson, updateJson));
-    }
-    public Single<Integer> docUpdate(String collection, String filterJson, String updateJson, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.docUpdate(collection, filterJson, updateJson, conn));
-    }
-
-    public Single<Integer> docUpdateOne(String collection, String filterJson, String updateJson) {
-        return RxJava3Adapter.monoToSingle(inner.docUpdateOne(collection, filterJson, updateJson));
-    }
-    public Single<Integer> docUpdateOne(String collection, String filterJson, String updateJson, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.docUpdateOne(collection, filterJson, updateJson, conn));
-    }
-
-    public Single<Integer> docDelete(String collection, String filterJson) {
-        return RxJava3Adapter.monoToSingle(inner.docDelete(collection, filterJson));
-    }
-    public Single<Integer> docDelete(String collection, String filterJson, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.docDelete(collection, filterJson, conn));
-    }
-
-    public Single<Integer> docDeleteOne(String collection, String filterJson) {
-        return RxJava3Adapter.monoToSingle(inner.docDeleteOne(collection, filterJson));
-    }
-    public Single<Integer> docDeleteOne(String collection, String filterJson, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.docDeleteOne(collection, filterJson, conn));
-    }
-
-    /** {@code Maybe} — empty when no document matches. */
-    public Maybe<Map<String, Object>> docFindOneAndUpdate(String collection, String filterJson,
-            String updateJson) {
-        return RxJava3Adapter.monoToMaybe(inner.docFindOneAndUpdate(collection, filterJson, updateJson));
-    }
-    public Maybe<Map<String, Object>> docFindOneAndUpdate(String collection, String filterJson,
-            String updateJson, Connection conn) {
-        return RxJava3Adapter.monoToMaybe(inner.docFindOneAndUpdate(collection, filterJson, updateJson, conn));
-    }
-
-    /** {@code Maybe} — empty when no document matches. */
-    public Maybe<Map<String, Object>> docFindOneAndDelete(String collection, String filterJson) {
-        return RxJava3Adapter.monoToMaybe(inner.docFindOneAndDelete(collection, filterJson));
-    }
-    public Maybe<Map<String, Object>> docFindOneAndDelete(String collection, String filterJson, Connection conn) {
-        return RxJava3Adapter.monoToMaybe(inner.docFindOneAndDelete(collection, filterJson, conn));
-    }
-
-    public Flowable<String> docDistinct(String collection, String field, String filterJson) {
-        return RxJava3Adapter.fluxToFlowable(inner.docDistinct(collection, field, filterJson));
-    }
-    public Flowable<String> docDistinct(String collection, String field, String filterJson, Connection conn) {
-        return RxJava3Adapter.fluxToFlowable(inner.docDistinct(collection, field, filterJson, conn));
-    }
-
-    public Single<Long> docCount(String collection, String filterJson) {
-        return RxJava3Adapter.monoToSingle(inner.docCount(collection, filterJson));
-    }
-    public Single<Long> docCount(String collection, String filterJson, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.docCount(collection, filterJson, conn));
-    }
-
-    public Completable docCreateIndex(String collection, List<String> keys) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateIndex(collection, keys));
-    }
-    public Completable docCreateIndex(String collection, List<String> keys, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateIndex(collection, keys, conn));
-    }
-
-    public Flowable<Map<String, Object>> docAggregate(String collection, String pipelineJson) {
-        return RxJava3Adapter.fluxToFlowable(inner.docAggregate(collection, pipelineJson));
-    }
-    public Flowable<Map<String, Object>> docAggregate(String collection, String pipelineJson, Connection conn) {
-        return RxJava3Adapter.fluxToFlowable(inner.docAggregate(collection, pipelineJson, conn));
-    }
-
-    public Single<Thread> docWatch(String collection, BiConsumer<String, String> callback) {
-        return RxJava3Adapter.monoToSingle(inner.docWatch(collection, callback));
-    }
-    public Single<Thread> docWatch(String collection, BiConsumer<String, String> callback, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.docWatch(collection, callback, conn));
-    }
-
-    public Completable docUnwatch(String collection) {
-        return RxJava3Adapter.monoToCompletable(inner.docUnwatch(collection));
-    }
-    public Completable docUnwatch(String collection, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.docUnwatch(collection, conn));
-    }
-
-    public Completable docCreateTtlIndex(String collection, int expireAfterSeconds) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateTtlIndex(collection, expireAfterSeconds));
-    }
-    public Completable docCreateTtlIndex(String collection, int expireAfterSeconds, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateTtlIndex(collection, expireAfterSeconds, conn));
-    }
-    public Completable docCreateTtlIndex(String collection, int expireAfterSeconds, String field) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateTtlIndex(collection, expireAfterSeconds, field));
-    }
-    public Completable docCreateTtlIndex(String collection, int expireAfterSeconds, String field, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateTtlIndex(collection, expireAfterSeconds, field, conn));
-    }
-
-    public Completable docRemoveTtlIndex(String collection) {
-        return RxJava3Adapter.monoToCompletable(inner.docRemoveTtlIndex(collection));
-    }
-    public Completable docRemoveTtlIndex(String collection, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.docRemoveTtlIndex(collection, conn));
-    }
-
-    public Completable docCreateCollection(String collection, boolean unlogged) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateCollection(collection, unlogged));
-    }
-    public Completable docCreateCollection(String collection, boolean unlogged, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateCollection(collection, unlogged, conn));
-    }
-    public Completable docCreateCollection(String collection) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateCollection(collection));
-    }
-    public Completable docCreateCollection(String collection, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateCollection(collection, conn));
-    }
-
-    public Completable docCreateCapped(String collection, int maxDocuments) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateCapped(collection, maxDocuments));
-    }
-    public Completable docCreateCapped(String collection, int maxDocuments, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.docCreateCapped(collection, maxDocuments, conn));
-    }
-
-    public Completable docRemoveCap(String collection) {
-        return RxJava3Adapter.monoToCompletable(inner.docRemoveCap(collection));
-    }
-    public Completable docRemoveCap(String collection, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.docRemoveCap(collection, conn));
-    }
+    // Moved to gl.documents.<verb>(...) — see RxJavaDocumentsApi.
 
     // ── Search ────────────────────────────────────────────────
 
@@ -590,46 +426,8 @@ public final class RxJavaGoldLapel implements AutoCloseable {
         return RxJava3Adapter.monoToMaybe(inner.script(luaCode, args));
     }
 
-    // ── Streams ───────────────────────────────────────────────
-
-    public Single<Long> streamAdd(String stream, String payload) {
-        return RxJava3Adapter.monoToSingle(inner.streamAdd(stream, payload));
-    }
-    public Single<Long> streamAdd(String stream, String payload, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.streamAdd(stream, payload, conn));
-    }
-
-    public Completable streamCreateGroup(String stream, String group) {
-        return RxJava3Adapter.monoToCompletable(inner.streamCreateGroup(stream, group));
-    }
-    public Completable streamCreateGroup(String stream, String group, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.streamCreateGroup(stream, group, conn));
-    }
-
-    public Flowable<Map<String, Object>> streamRead(String stream, String group,
-            String consumer, int count) {
-        return RxJava3Adapter.fluxToFlowable(inner.streamRead(stream, group, consumer, count));
-    }
-    public Flowable<Map<String, Object>> streamRead(String stream, String group,
-            String consumer, int count, Connection conn) {
-        return RxJava3Adapter.fluxToFlowable(inner.streamRead(stream, group, consumer, count, conn));
-    }
-
-    public Single<Boolean> streamAck(String stream, String group, long messageId) {
-        return RxJava3Adapter.monoToSingle(inner.streamAck(stream, group, messageId));
-    }
-    public Single<Boolean> streamAck(String stream, String group, long messageId, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.streamAck(stream, group, messageId, conn));
-    }
-
-    public Flowable<Map<String, Object>> streamClaim(String stream, String group,
-            String consumer, long minIdleMs) {
-        return RxJava3Adapter.fluxToFlowable(inner.streamClaim(stream, group, consumer, minIdleMs));
-    }
-    public Flowable<Map<String, Object>> streamClaim(String stream, String group,
-            String consumer, long minIdleMs, Connection conn) {
-        return RxJava3Adapter.fluxToFlowable(inner.streamClaim(stream, group, consumer, minIdleMs, conn));
-    }
+    // ── Streams ────────────────────────────────────────
+    // Moved to gl.streams.<verb>(...) — see RxJavaStreamsApi.
 
     // ── Percolator ────────────────────────────────────────────
 

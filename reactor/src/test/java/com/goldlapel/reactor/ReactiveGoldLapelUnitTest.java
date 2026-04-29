@@ -67,6 +67,28 @@ class ReactiveGoldLapelUnitTest {
         return conn;
     }
 
+    /**
+     * Pre-populate the per-instance DDL pattern cache so
+     * {@code gl.documents.<verb>} skips the proxy round-trip in unit tests.
+     * Tests use the user-supplied collection name as the canonical table —
+     * matches how DocTest's {@code P(...)} helper builds patterns.
+     */
+    @SuppressWarnings("unchecked")
+    private static void seedDdlCache(GoldLapel sync, String family, String name) throws Exception {
+        java.util.Map<String, Object> tables = new java.util.LinkedHashMap<>();
+        tables.put("main", name);
+        java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("tables", tables);
+        entry.put("query_patterns", java.util.Collections.emptyMap());
+        // ddlCache() is package-private on GoldLapel — use reflection from the
+        // reactor package.
+        java.lang.reflect.Method m = GoldLapel.class.getDeclaredMethod("ddlCache");
+        m.setAccessible(true);
+        java.util.concurrent.ConcurrentHashMap<String, java.util.Map<String, Object>> cache =
+            (java.util.concurrent.ConcurrentHashMap<String, java.util.Map<String, Object>>) m.invoke(sync);
+        cache.put(family + ":" + name, entry);
+    }
+
     @Test
     void usingPutsConnectionInContext() throws Exception {
         Connection internal = mock(Connection.class);
@@ -152,14 +174,15 @@ class ReactiveGoldLapelUnitTest {
         Connection internal = mockConnForDocCount(99); // default/internal
         Connection scoped = mockConnForDocCount(42);   // visible inside using
         GoldLapel sync = syncWithConnection(internal);
+        seedDdlCache(sync, "doc_store", "events");
         ReactiveGoldLapel gl = newInstance(sync);
 
         StepVerifier.create(
-            gl.using(scoped, g -> g.docCount("events", "{}"))
+            gl.using(scoped, g -> g.documents.count("events", "{}"))
         ).expectNext(42L).verifyComplete();
 
         // Without using, the internal connection is used
-        StepVerifier.create(gl.docCount("events", "{}"))
+        StepVerifier.create(gl.documents.count("events", "{}"))
             .expectNext(99L)
             .verifyComplete();
     }
@@ -170,10 +193,11 @@ class ReactiveGoldLapelUnitTest {
         Connection scoped = mockConnForDocCount(42);
         Connection explicit = mockConnForDocCount(7);
         GoldLapel sync = syncWithConnection(internal);
+        seedDdlCache(sync, "doc_store", "events");
         ReactiveGoldLapel gl = newInstance(sync);
 
         StepVerifier.create(
-            gl.using(scoped, g -> g.docCount("events", "{}", explicit))
+            gl.using(scoped, g -> g.documents.count("events", "{}", explicit))
         ).expectNext(7L).verifyComplete();
     }
 
