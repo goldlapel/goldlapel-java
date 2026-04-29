@@ -9,6 +9,7 @@ import java.sql.Statement;
 import java.sql.Types;
 import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -1994,37 +1995,13 @@ public class Utils {
         }
     }
 
-    private static void ensureCollection(Connection conn, String collection) throws SQLException {
-        ensureCollection(conn, collection, false);
-    }
-
-    private static void ensureCollection(Connection conn, String collection, boolean unlogged) throws SQLException {
-        validateIdentifier(collection);
-        String prefix = unlogged ? "CREATE UNLOGGED TABLE" : "CREATE TABLE";
-        try (Statement st = conn.createStatement()) {
-            st.execute(
-                prefix + " IF NOT EXISTS " + collection + " (" +
-                "_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), " +
-                "data JSONB NOT NULL, " +
-                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), " +
-                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
-            );
-        }
-    }
-
     /**
-     * Explicitly create a collection table. Like MongoDB createCollection().
-     * Optionally creates an UNLOGGED table for high-throughput ephemeral data.
-     * UNLOGGED tables are not crash-safe but significantly faster for writes.
+     * Resolve the canonical doc-store table name from proxy-fetched patterns.
+     * Centralized here so every {@code docX} util shares the same null-check
+     * and table-extraction logic.
      */
-    public static void docCreateCollection(Connection conn, String collection,
-            boolean unlogged) throws SQLException {
-        validateIdentifier(collection);
-        ensureCollection(conn, collection, unlogged);
-    }
-
-    public static void docCreateCollection(Connection conn, String collection) throws SQLException {
-        docCreateCollection(conn, collection, false);
+    static String docTable(Map<String, Object> patterns) {
+        return Ddl.tableName(patterns, "main");
     }
 
     private static Map<String, Object> rowToMap(ResultSet rs) throws SQLException {
@@ -2043,10 +2020,11 @@ public class Utils {
      * Returns the inserted row (_id, data, created_at, updated_at).
      */
     public static Map<String, Object> docInsert(Connection conn, String collection,
-            String documentJson) throws SQLException {
-        ensureCollection(conn, collection);
+            String documentJson, Map<String, Object> patterns) throws SQLException {
+        validateIdentifier(collection);
+        String table = docTable(patterns);
         try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO " + collection + " (data) VALUES (?::jsonb) " +
+                "INSERT INTO " + table + " (data) VALUES (?::jsonb) " +
                 "RETURNING _id, data, created_at, updated_at")) {
             ps.setString(1, documentJson);
             ResultSet rs = ps.executeQuery();
@@ -2057,15 +2035,17 @@ public class Utils {
 
     /**
      * Insert multiple documents into a collection. Like MongoDB insertMany().
-     * Creates the collection table if it doesn't exist.
+     * The proxy owns table creation — {@code patterns} comes from
+     * {@code DocumentsApi.patterns(collection)}.
      * Returns the list of inserted rows.
      */
     public static List<Map<String, Object>> docInsertMany(Connection conn, String collection,
-            List<String> documents) throws SQLException {
-        ensureCollection(conn, collection);
+            List<String> documents, Map<String, Object> patterns) throws SQLException {
+        validateIdentifier(collection);
+        String table = docTable(patterns);
         List<Map<String, Object>> results = new ArrayList<>();
         try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO " + collection + " (data) VALUES (?::jsonb) " +
+                "INSERT INTO " + table + " (data) VALUES (?::jsonb) " +
                 "RETURNING _id, data, created_at, updated_at")) {
             for (String doc : documents) {
                 ps.setString(1, doc);
@@ -2125,10 +2105,12 @@ public class Utils {
      * Returns a list of matching rows.
      */
     public static List<Map<String, Object>> docFind(Connection conn, String collection,
-            String filterJson, String sortJson, Integer limit, Integer skip) throws SQLException {
+            String filterJson, String sortJson, Integer limit, Integer skip,
+            Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
         FilterResult filter = buildFilter(filterJson);
-        StringBuilder sql = new StringBuilder("SELECT _id, data, created_at, updated_at FROM " + collection);
+        StringBuilder sql = new StringBuilder("SELECT _id, data, created_at, updated_at FROM " + table);
         if (!filter.whereClause.isEmpty()) {
             sql.append(" WHERE ").append(filter.whereClause);
         }
@@ -2167,17 +2149,18 @@ public class Utils {
      * Returns the first matching row, or null if none found.
      */
     public static Map<String, Object> docFindOne(Connection conn, String collection,
-            String filterJson) throws SQLException {
-        List<Map<String, Object>> results = docFind(conn, collection, filterJson, null, 1, null);
+            String filterJson, Map<String, Object> patterns) throws SQLException {
+        List<Map<String, Object>> results = docFind(conn, collection, filterJson, null, 1, null, patterns);
         return results.isEmpty() ? null : results.get(0);
     }
 
     public static Iterator<Map<String, Object>> docFindCursor(Connection conn, String collection,
             String filterJson, String sortJson, Integer limit, Integer skip,
-            int batchSize) throws SQLException {
+            int batchSize, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
         FilterResult filter = buildFilter(filterJson);
-        StringBuilder sql = new StringBuilder("SELECT _id, data, created_at, updated_at FROM " + collection);
+        StringBuilder sql = new StringBuilder("SELECT _id, data, created_at, updated_at FROM " + table);
         if (!filter.whereClause.isEmpty()) {
             sql.append(" WHERE ").append(filter.whereClause);
         }
@@ -2272,12 +2255,13 @@ public class Utils {
      * Returns the number of updated rows.
      */
     public static int docUpdate(Connection conn, String collection, String filterJson,
-            String updateJson) throws SQLException {
+            String updateJson, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
         FilterResult filter = buildFilter(filterJson);
         UpdateResult update = buildUpdate(updateJson);
         StringBuilder sql = new StringBuilder(
-            "UPDATE " + collection + " SET data = " + update.expr + ", updated_at = NOW()");
+            "UPDATE " + table + " SET data = " + update.expr + ", updated_at = NOW()");
         if (!filter.whereClause.isEmpty()) {
             sql.append(" WHERE ").append(filter.whereClause);
         }
@@ -2300,13 +2284,14 @@ public class Utils {
      * Returns the number of updated rows (0 or 1).
      */
     public static int docUpdateOne(Connection conn, String collection, String filterJson,
-            String updateJson) throws SQLException {
+            String updateJson, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
         FilterResult filter = buildFilter(filterJson);
         UpdateResult update = buildUpdate(updateJson);
         String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
-        String sql = "UPDATE " + collection + " SET data = " + update.expr + ", updated_at = NOW() " +
-            "WHERE _id = (SELECT _id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1)";
+        String sql = "UPDATE " + table + " SET data = " + update.expr + ", updated_at = NOW() " +
+            "WHERE _id = (SELECT _id FROM " + table + " WHERE " + whereExpr + " LIMIT 1)";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int idx = 1;
             for (Object param : update.params) {
@@ -2324,10 +2309,11 @@ public class Utils {
      * Returns the number of deleted rows.
      */
     public static int docDelete(Connection conn, String collection,
-            String filterJson) throws SQLException {
+            String filterJson, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
         FilterResult filter = buildFilter(filterJson);
-        StringBuilder sql = new StringBuilder("DELETE FROM " + collection);
+        StringBuilder sql = new StringBuilder("DELETE FROM " + table);
         if (!filter.whereClause.isEmpty()) {
             sql.append(" WHERE ").append(filter.whereClause);
         }
@@ -2345,12 +2331,13 @@ public class Utils {
      * Returns the number of deleted rows (0 or 1).
      */
     public static int docDeleteOne(Connection conn, String collection,
-            String filterJson) throws SQLException {
+            String filterJson, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
         FilterResult filter = buildFilter(filterJson);
         String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
-        String sql = "DELETE FROM " + collection + " WHERE _id = " +
-            "(SELECT _id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1)";
+        String sql = "DELETE FROM " + table + " WHERE _id = " +
+            "(SELECT _id FROM " + table + " WHERE " + whereExpr + " LIMIT 1)";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int idx = 1;
             for (Object param : filter.params) {
@@ -2366,13 +2353,14 @@ public class Utils {
      * Returns the updated row, or null if no match found.
      */
     public static Map<String, Object> docFindOneAndUpdate(Connection conn, String collection,
-            String filterJson, String updateJson) throws SQLException {
+            String filterJson, String updateJson, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
         FilterResult filter = buildFilter(filterJson);
         UpdateResult update = buildUpdate(updateJson);
         String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
-        String sql = "UPDATE " + collection + " SET data = " + update.expr + ", updated_at = NOW() " +
-            "WHERE _id = (SELECT _id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1) " +
+        String sql = "UPDATE " + table + " SET data = " + update.expr + ", updated_at = NOW() " +
+            "WHERE _id = (SELECT _id FROM " + table + " WHERE " + whereExpr + " LIMIT 1) " +
             "RETURNING _id, data, created_at, updated_at";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int idx = 1;
@@ -2396,12 +2384,13 @@ public class Utils {
      * Returns the deleted row, or null if no match found.
      */
     public static Map<String, Object> docFindOneAndDelete(Connection conn, String collection,
-            String filterJson) throws SQLException {
+            String filterJson, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
         FilterResult filter = buildFilter(filterJson);
         String whereExpr = filter.whereClause.isEmpty() ? "TRUE" : filter.whereClause;
-        String sql = "DELETE FROM " + collection + " WHERE _id = " +
-            "(SELECT _id FROM " + collection + " WHERE " + whereExpr + " LIMIT 1) " +
+        String sql = "DELETE FROM " + table + " WHERE _id = " +
+            "(SELECT _id FROM " + table + " WHERE " + whereExpr + " LIMIT 1) " +
             "RETURNING _id, data, created_at, updated_at";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int idx = 1;
@@ -2422,11 +2411,12 @@ public class Utils {
      * Optional filterJson restricts which documents are considered.
      */
     public static List<String> docDistinct(Connection conn, String collection,
-            String field, String filterJson) throws SQLException {
+            String field, String filterJson, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
         String fieldExpr = fieldPath(field);
         FilterResult filter = buildFilter(filterJson);
-        StringBuilder sql = new StringBuilder("SELECT DISTINCT " + fieldExpr + " FROM " + collection);
+        StringBuilder sql = new StringBuilder("SELECT DISTINCT " + fieldExpr + " FROM " + table);
         List<String> whereParts = new ArrayList<>();
         whereParts.add(fieldExpr + " IS NOT NULL");
         if (!filter.whereClause.isEmpty()) {
@@ -2453,10 +2443,11 @@ public class Utils {
      * Returns the count.
      */
     public static long docCount(Connection conn, String collection,
-            String filterJson) throws SQLException {
+            String filterJson, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
         FilterResult filter = buildFilter(filterJson);
-        StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM " + collection);
+        StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM " + table);
         if (!filter.whereClause.isEmpty()) {
             sql.append(" WHERE ").append(filter.whereClause);
         }
@@ -2486,8 +2477,15 @@ public class Utils {
      * Returns a list of result rows as maps.
      */
     public static List<Map<String, Object>> docAggregate(Connection conn, String collection,
-            String pipelineJson) throws SQLException {
+            String pipelineJson, Map<String, Object> patterns,
+            Map<String, String> lookupTables) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
+        // lookupTables maps user-supplied $lookup.from collection names to
+        // their canonical proxy table references; resolved up-front by
+        // DocumentsApi.aggregate so we don't need to call back out to the
+        // proxy from inside the SQL builder.
+        if (lookupTables == null) lookupTables = Collections.emptyMap();
         List<Map<String, String>> stages = parsePipeline(pipelineJson);
 
         FilterResult matchResult = null;
@@ -2585,22 +2583,29 @@ public class Utils {
                     break;
                 }
                 case "$lookup": {
-                    String fromTable = stage.get("from");
+                    String fromName = stage.get("from");
                     String localField = stage.get("localField");
                     String foreignField = stage.get("foreignField");
                     String asField = stage.get("as");
-                    if (fromTable == null || localField == null || foreignField == null || asField == null) {
+                    if (fromName == null || localField == null || foreignField == null || asField == null) {
                         throw new IllegalArgumentException(
                                 "$lookup requires from, localField, foreignField, and as");
                     }
-                    validateIdentifier(fromTable);
+                    validateIdentifier(fromName);
                     validateFieldKey(localField);
                     validateFieldKey(foreignField);
                     validateIdentifier(asField);
+                    String fromTable = lookupTables.get(fromName);
+                    if (fromTable == null) {
+                        throw new IllegalStateException(
+                            "$lookup.from collection '" + fromName + "' has no resolved table — "
+                            + "DocumentsApi.aggregate must pre-fetch patterns for every $lookup.from."
+                        );
+                    }
                     lookupExprs.put(asField,
                         "COALESCE((SELECT json_agg(" + fromTable + ".data) FROM " + fromTable +
                         " WHERE " + fromTable + ".data->>'" + foreignField + "' = " +
-                        collection + ".data->>'" + localField + "'), '[]'::json) AS " + asField);
+                        table + ".data->>'" + localField + "'), '[]'::json) AS " + asField);
                     break;
                 }
                 default:
@@ -2628,7 +2633,7 @@ public class Utils {
                 sql.append(", ").append(lookupExpr);
             }
         }
-        sql.append(" FROM ").append(collection);
+        sql.append(" FROM ").append(table);
 
         // Append JOIN clauses (unwind)
         for (String joinClause : joinClauses) {
@@ -3102,8 +3107,15 @@ public class Utils {
      * or close the connection to stop watching.
      */
     public static Thread docWatch(Connection conn, String collection,
-            BiConsumer<String, String> callback) throws SQLException {
+            BiConsumer<String, String> callback, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
+        // Trigger / channel / function names hang off the user-supplied
+        // collection name (not the canonical proxy table) so two clients
+        // watching the same collection share a single channel and the
+        // wrapper-side names stay short — the canonical _goldlapel.doc_<n>
+        // schema-qualified reference is too long for a NAMEDATALEN-bounded
+        // function/trigger ident.
         String channel = collection + "_changes";
         String funcName = collection + "_notify_fn";
         String triggerName = collection + "_notify_trg";
@@ -3134,7 +3146,7 @@ public class Utils {
         try (Statement st = conn.createStatement()) {
             st.execute(
                 "CREATE OR REPLACE TRIGGER " + triggerName + " " +
-                "AFTER INSERT OR UPDATE OR DELETE ON " + collection + " " +
+                "AFTER INSERT OR UPDATE OR DELETE ON " + table + " " +
                 "FOR EACH ROW EXECUTE FUNCTION " + funcName + "()"
             );
         }
@@ -3167,14 +3179,16 @@ public class Utils {
      * Stop watching a collection for changes. Like MongoDB change stream close().
      * Drops the trigger, trigger function, and issues UNLISTEN.
      */
-    public static void docUnwatch(Connection conn, String collection) throws SQLException {
+    public static void docUnwatch(Connection conn, String collection,
+            Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
         String channel = collection + "_changes";
         String funcName = collection + "_notify_fn";
         String triggerName = collection + "_notify_trg";
 
         try (Statement st = conn.createStatement()) {
-            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
+            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + table);
         }
         try (Statement st = conn.createStatement()) {
             st.execute("DROP FUNCTION IF EXISTS " + funcName + "()");
@@ -3191,19 +3205,23 @@ public class Utils {
      * Uses a BEFORE INSERT trigger to purge expired rows on each insert.
      */
     public static void docCreateTtlIndex(Connection conn, String collection,
-            int expireAfterSeconds, String field) throws SQLException {
+            int expireAfterSeconds, String field, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
         validateIdentifier(field);
         if (expireAfterSeconds <= 0) {
             throw new IllegalArgumentException("expireAfterSeconds must be a positive integer");
         }
+        String table = docTable(patterns);
 
+        // Index/function/trigger names key off the user-supplied collection
+        // (validated identifier, NAMEDATALEN-bounded). DDL targets the
+        // canonical proxy table.
         String idxName = collection + "_ttl_idx";
         String funcName = collection + "_ttl_fn";
         String triggerName = collection + "_ttl_trg";
 
         try (Statement st = conn.createStatement()) {
-            st.execute("CREATE INDEX IF NOT EXISTS " + idxName + " ON " + collection + " (" + field + ")");
+            st.execute("CREATE INDEX IF NOT EXISTS " + idxName + " ON " + table + " (" + field + ")");
         }
 
         try (Statement st = conn.createStatement()) {
@@ -3211,7 +3229,7 @@ public class Utils {
                 "CREATE OR REPLACE FUNCTION " + funcName + "() " +
                 "RETURNS TRIGGER LANGUAGE plpgsql AS $$ " +
                 "BEGIN " +
-                "DELETE FROM " + collection + " WHERE " + field +
+                "DELETE FROM " + table + " WHERE " + field +
                 " < NOW() - INTERVAL '" + expireAfterSeconds + " seconds'; " +
                 "RETURN NEW; " +
                 "END; $$"
@@ -3223,7 +3241,7 @@ public class Utils {
         try (Statement st = conn.createStatement()) {
             st.execute(
                 "CREATE OR REPLACE TRIGGER " + triggerName + " " +
-                "BEFORE INSERT ON " + collection + " " +
+                "BEFORE INSERT ON " + table + " " +
                 "FOR EACH ROW EXECUTE FUNCTION " + funcName + "()"
             );
         }
@@ -3233,23 +3251,25 @@ public class Utils {
      * Create a TTL index with the default field "created_at".
      */
     public static void docCreateTtlIndex(Connection conn, String collection,
-            int expireAfterSeconds) throws SQLException {
-        docCreateTtlIndex(conn, collection, expireAfterSeconds, "created_at");
+            int expireAfterSeconds, Map<String, Object> patterns) throws SQLException {
+        docCreateTtlIndex(conn, collection, expireAfterSeconds, "created_at", patterns);
     }
 
     /**
      * Remove a TTL index from a collection.
      * Drops the trigger, trigger function, and index.
      */
-    public static void docRemoveTtlIndex(Connection conn, String collection) throws SQLException {
+    public static void docRemoveTtlIndex(Connection conn, String collection,
+            Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
 
         String idxName = collection + "_ttl_idx";
         String funcName = collection + "_ttl_fn";
         String triggerName = collection + "_ttl_trg";
 
         try (Statement st = conn.createStatement()) {
-            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
+            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + table);
         }
         try (Statement st = conn.createStatement()) {
             st.execute("DROP FUNCTION IF EXISTS " + funcName + "()");
@@ -3266,13 +3286,12 @@ public class Utils {
      * Creates the collection table if it doesn't exist.
      */
     public static void docCreateCapped(Connection conn, String collection,
-            int maxDocuments) throws SQLException {
+            int maxDocuments, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
         if (maxDocuments <= 0) {
             throw new IllegalArgumentException("maxDocuments must be a positive integer");
         }
-
-        ensureCollection(conn, collection);
+        String table = docTable(patterns);
 
         String funcName = collection + "_cap_fn";
         String triggerName = collection + "_cap_trg";
@@ -3282,10 +3301,10 @@ public class Utils {
                 "CREATE OR REPLACE FUNCTION " + funcName + "() " +
                 "RETURNS TRIGGER LANGUAGE plpgsql AS $$ " +
                 "BEGIN " +
-                "DELETE FROM " + collection + " WHERE _id IN (" +
-                "SELECT _id FROM " + collection + " " +
+                "DELETE FROM " + table + " WHERE _id IN (" +
+                "SELECT _id FROM " + table + " " +
                 "ORDER BY created_at ASC, _id ASC " +
-                "LIMIT GREATEST((SELECT COUNT(*) FROM " + collection + ") - " + maxDocuments + ", 0)" +
+                "LIMIT GREATEST((SELECT COUNT(*) FROM " + table + ") - " + maxDocuments + ", 0)" +
                 "); " +
                 "RETURN NEW; " +
                 "END; $$"
@@ -3297,7 +3316,7 @@ public class Utils {
         try (Statement st = conn.createStatement()) {
             st.execute(
                 "CREATE OR REPLACE TRIGGER " + triggerName + " " +
-                "AFTER INSERT ON " + collection + " " +
+                "AFTER INSERT ON " + table + " " +
                 "FOR EACH ROW EXECUTE FUNCTION " + funcName + "()"
             );
         }
@@ -3307,14 +3326,16 @@ public class Utils {
      * Remove the cap from a collection.
      * Drops the trigger and trigger function. Existing documents are kept.
      */
-    public static void docRemoveCap(Connection conn, String collection) throws SQLException {
+    public static void docRemoveCap(Connection conn, String collection,
+            Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
+        String table = docTable(patterns);
 
         String funcName = collection + "_cap_fn";
         String triggerName = collection + "_cap_trg";
 
         try (Statement st = conn.createStatement()) {
-            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + collection);
+            st.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON " + table);
         }
         try (Statement st = conn.createStatement()) {
             st.execute("DROP FUNCTION IF EXISTS " + funcName + "()");
@@ -3327,13 +3348,17 @@ public class Utils {
      * Uses btree expression index on (data->>'field') for each key.
      */
     public static void docCreateIndex(Connection conn, String collection,
-            List<String> keys) throws SQLException {
+            List<String> keys, Map<String, Object> patterns) throws SQLException {
         validateIdentifier(collection);
         if (keys == null || keys.isEmpty()) {
             throw new IllegalArgumentException("Index keys must not be empty");
         }
+        String table = docTable(patterns);
         StringBuilder indexCols = new StringBuilder();
-        StringBuilder indexName = new StringBuilder("idx_" + collection);
+        // Strip schema prefix from index name — Postgres rejects dots in
+        // unquoted identifiers. Mirrors goldlapel/utils.py:_doc_index_name.
+        String bareTable = table.contains(".") ? table.substring(table.lastIndexOf('.') + 1) : table;
+        StringBuilder indexName = new StringBuilder("idx_" + bareTable);
         for (int i = 0; i < keys.size(); i++) {
             String key = keys.get(i);
             // `key` is a JSONB field key (interpolated as data->>'key'), not
@@ -3346,7 +3371,34 @@ public class Utils {
         }
         try (Statement st = conn.createStatement()) {
             st.execute("CREATE INDEX IF NOT EXISTS " + indexName +
-                " ON " + collection + " (" + indexCols + ")");
+                " ON " + table + " (" + indexCols + ")");
         }
+    }
+
+    /**
+     * Walk a parsed pipeline once to find every {@code $lookup.from}
+     * reference and resolve each to its canonical proxy table via the
+     * {@link DocumentsApi} (idempotent + cached). Used by
+     * {@link DocumentsApi#aggregate}.
+     */
+    public static Map<String, String> resolveLookupTables(DocumentsApi documentsApi, String pipelineJson) {
+        Map<String, String> resolved = new LinkedHashMap<>();
+        if (pipelineJson == null) return resolved;
+        List<Map<String, String>> stages;
+        try {
+            stages = parsePipeline(pipelineJson);
+        } catch (RuntimeException ignored) {
+            // Defer the parse error to docAggregate where it'll surface with
+            // the same message users got before.
+            return resolved;
+        }
+        for (Map<String, String> stage : stages) {
+            if (!"$lookup".equals(stage.get("_type"))) continue;
+            String from = stage.get("from");
+            if (from == null || resolved.containsKey(from)) continue;
+            Map<String, Object> lp = documentsApi.patterns(from);
+            resolved.put(from, docTable(lp));
+        }
+        return resolved;
     }
 }

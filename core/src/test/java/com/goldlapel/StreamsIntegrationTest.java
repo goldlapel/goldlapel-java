@@ -62,7 +62,7 @@ class StreamsIntegrationTest {
 
     @Test
     void streamAdd_createsPrefixedTable() throws SQLException {
-        gl.streamAdd(streamName, "{\"type\":\"click\"}");
+        gl.streams.add(streamName, "{\"type\":\"click\"}");
 
         try (Connection direct = DriverManager.getConnection(toJdbc(PG_URL));
              PreparedStatement ps = direct.prepareStatement(
@@ -87,7 +87,7 @@ class StreamsIntegrationTest {
 
     @Test
     void schemaMeta_rowRecorded() throws SQLException {
-        gl.streamAdd(streamName, "{\"type\":\"click\"}");
+        gl.streams.add(streamName, "{\"type\":\"click\"}");
 
         try (Connection direct = DriverManager.getConnection(toJdbc(PG_URL));
              PreparedStatement ps = direct.prepareStatement(
@@ -106,12 +106,12 @@ class StreamsIntegrationTest {
 
     @Test
     void addAndRead_fullRoundTrip() throws SQLException {
-        gl.streamCreateGroup(streamName, "workers");
-        long id1 = gl.streamAdd(streamName, "{\"i\":1}");
-        long id2 = gl.streamAdd(streamName, "{\"i\":2}");
+        gl.streams.createGroup(streamName, "workers");
+        long id1 = gl.streams.add(streamName, "{\"i\":1}");
+        long id2 = gl.streams.add(streamName, "{\"i\":2}");
         assertTrue(id2 > id1);
 
-        List<Map<String, Object>> messages = gl.streamRead(streamName, "workers", "c", 10);
+        List<Map<String, Object>> messages = gl.streams.read(streamName, "workers", "c", 10);
         assertEquals(2, messages.size());
         assertEquals(id1, (long) (Long) messages.get(0).get("id"));
         assertEquals(id2, (long) (Long) messages.get(1).get("id"));
@@ -119,19 +119,19 @@ class StreamsIntegrationTest {
 
     @Test
     void ackRemovesPending() throws SQLException {
-        gl.streamCreateGroup(streamName, "workers");
-        long id = gl.streamAdd(streamName, "{\"i\":1}");
-        gl.streamRead(streamName, "workers", "c", 10);
-        assertTrue(gl.streamAck(streamName, "workers", id));
-        assertFalse(gl.streamAck(streamName, "workers", id));
+        gl.streams.createGroup(streamName, "workers");
+        long id = gl.streams.add(streamName, "{\"i\":1}");
+        gl.streams.read(streamName, "workers", "c", 10);
+        assertTrue(gl.streams.ack(streamName, "workers", id));
+        assertFalse(gl.streams.ack(streamName, "workers", id));
     }
 
     @Test
     void claimReassignsIdle() throws SQLException {
-        gl.streamCreateGroup(streamName, "workers");
-        gl.streamAdd(streamName, "{\"i\":1}");
-        gl.streamRead(streamName, "workers", "consumer-a", 10);
-        List<Map<String, Object>> claimed = gl.streamClaim(streamName, "workers", "consumer-b", 0L);
+        gl.streams.createGroup(streamName, "workers");
+        gl.streams.add(streamName, "{\"i\":1}");
+        gl.streams.read(streamName, "workers", "consumer-a", 10);
+        List<Map<String, Object>> claimed = gl.streams.claim(streamName, "workers", "consumer-b", 0L);
         assertEquals(1, claimed.size());
     }
 
@@ -147,10 +147,10 @@ class StreamsIntegrationTest {
      */
     @Test
     void concurrentConsumersDoNotDoubleClaim() throws Exception {
-        gl.streamCreateGroup(streamName, "workers");
+        gl.streams.createGroup(streamName, "workers");
         final int N = 40;
         for (int i = 0; i < N; i++) {
-            gl.streamAdd(streamName, "{\"i\":" + i + "}");
+            gl.streams.add(streamName, "{\"i\":" + i + "}");
         }
 
         ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -164,7 +164,7 @@ class StreamsIntegrationTest {
                 List<Long> mine = new ArrayList<>();
                 while (true) {
                     List<Map<String, Object>> batch =
-                        gl.streamRead(streamName, "workers", me, 4);
+                        gl.streams.read(streamName, "workers", me, 4);
                     if (batch.isEmpty()) break;
                     for (Map<String, Object> m : batch) {
                         mine.add((Long) m.get("id"));

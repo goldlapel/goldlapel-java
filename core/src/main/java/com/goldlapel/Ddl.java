@@ -45,7 +45,8 @@ public final class Ddl {
     private Ddl() {}
 
     private static final Map<String, String> SUPPORTED_VERSIONS = Map.of(
-        "stream", "v1"
+        "stream", "v1",
+        "doc_store", "v1"
     );
 
     /** Resolve the dashboard token from env or the on-disk file. */
@@ -87,13 +88,31 @@ public final class Ddl {
      * @return a map with keys "tables" and "query_patterns", each a
      *         {@code Map<String, String>}.
      */
-    @SuppressWarnings("unchecked")
     public static Map<String, Object> fetchPatterns(
         ConcurrentHashMap<String, Map<String, Object>> cache,
         String family,
         String name,
         int dashboardPort,
         String dashboardToken
+    ) {
+        return fetchPatterns(cache, family, name, dashboardPort, dashboardToken, null);
+    }
+
+    /**
+     * Fetch (and cache) canonical patterns with per-family creation options
+     * (e.g. doc_store accepts {@code {"unlogged": true}}). Options are sent
+     * only on the create call — once the table exists its shape is fixed and
+     * subsequent options are silently ignored on the proxy side (idempotent
+     * {@code CREATE TABLE IF NOT EXISTS}).
+     */
+    @SuppressWarnings("unchecked")
+    public static Map<String, Object> fetchPatterns(
+        ConcurrentHashMap<String, Map<String, Object>> cache,
+        String family,
+        String name,
+        int dashboardPort,
+        String dashboardToken,
+        Map<String, Object> options
     ) {
         String key = family + ":" + name;
         Map<String, Object> cached = cache.get(key);
@@ -113,8 +132,14 @@ public final class Ddl {
         }
 
         String url = "http://127.0.0.1:" + dashboardPort + "/api/ddl/" + family + "/create";
-        String body = "{\"name\":" + jsonString(name)
-            + ",\"schema_version\":" + jsonString(supportedVersion(family)) + "}";
+        StringBuilder bodyBuf = new StringBuilder();
+        bodyBuf.append("{\"name\":").append(jsonString(name))
+               .append(",\"schema_version\":").append(jsonString(supportedVersion(family)));
+        if (options != null && !options.isEmpty()) {
+            bodyBuf.append(",\"options\":").append(jsonObject(options));
+        }
+        bodyBuf.append("}");
+        String body = bodyBuf.toString();
 
         int status;
         String respBody;
@@ -184,6 +209,31 @@ public final class Ddl {
         return (Map<String, String>) entry.get("query_patterns");
     }
 
+    /**
+     * Resolve the canonical table reference for a fetched helper entry. The
+     * proxy emits {@code tables: { main: "_goldlapel.doc_users" }} and
+     * (for doc-store) optional secondary tables; doc-store callers want
+     * {@code main}. Throws if the entry is null or malformed.
+     */
+    @SuppressWarnings("unchecked")
+    public static String tableName(Map<String, Object> entry, String slot) {
+        if (entry == null) {
+            throw new RuntimeException(
+                "DDL patterns are missing — call via gl.documents.<verb>(...) / "
+                + "gl.streams.<verb>(...) so patterns are fetched from the proxy."
+            );
+        }
+        Object tables = entry.get("tables");
+        if (!(tables instanceof Map)) {
+            throw new RuntimeException("DDL entry has no tables map: " + entry);
+        }
+        Object t = ((Map<String, Object>) tables).get(slot);
+        if (!(t instanceof String)) {
+            throw new RuntimeException("DDL entry has no '" + slot + "' table: " + tables);
+        }
+        return (String) t;
+    }
+
     /** Remove all cached entries. */
     public static void invalidate(ConcurrentHashMap<String, Map<String, Object>> cache) {
         cache.clear();
@@ -192,6 +242,25 @@ public final class Ddl {
     // Package-private for tests — swap the URL builder to hit a fake dashboard.
     // (Kept minimal; full swap would require an HttpClient indirection. For
     // unit tests we cover this path with a real HttpServer.)
+
+    private static String jsonObject(Map<String, Object> obj) {
+        StringBuilder b = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<String, Object> e : obj.entrySet()) {
+            if (!first) b.append(",");
+            first = false;
+            b.append(jsonString(e.getKey())).append(":").append(jsonValue(e.getValue()));
+        }
+        return b.append("}").toString();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String jsonValue(Object v) {
+        if (v == null) return "null";
+        if (v instanceof Boolean || v instanceof Number) return v.toString();
+        if (v instanceof Map) return jsonObject((Map<String, Object>) v);
+        return jsonString(v.toString());
+    }
 
     private static String jsonString(String s) {
         StringBuilder b = new StringBuilder("\"");

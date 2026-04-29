@@ -30,7 +30,7 @@ import java.util.function.Function;
  *
  * <pre>{@code
  * ReactiveGoldLapel.start("postgresql://user:pass@host/db")
- *     .flatMap(gl -> gl.docInsert("events", "{\"type\":\"signup\"}")
+ *     .flatMap(gl -> gl.documents.insert("events", "{\"type\":\"signup\"}")
  *         .thenMany(gl.search("events", "type", "signup"))
  *         .collectList()
  *         .flatMap(results -> gl.stop().thenReturn(results)))
@@ -39,7 +39,7 @@ import java.util.function.Function;
  *
  * <h2>Design</h2>
  *
- * <p>The wrapper methods ({@link #docInsert}, {@link #search}, etc.) delegate
+ * <p>The wrapper methods ({@link #documents}, {@link #search}, etc.) delegate
  * to the sync {@link Utils} helpers, run on {@link Schedulers#boundedElastic()}.
  * This gives full API parity with zero behavioural drift from the sync path.
  * Reactor docs explicitly recommend {@code boundedElastic} for bridging
@@ -56,8 +56,8 @@ import java.util.function.Function;
  * chain (analogous to the sync {@code using(conn, Runnable)}):
  *
  * <pre>{@code
- * gl.using(conn, g -> g.docInsert("events", json)
- *         .then(g.docCount("events", "{}")))
+ * gl.using(conn, g -> g.documents.insert("events", json)
+ *         .then(g.documents.count("events", "{}")))
  *   .subscribe();
  * }</pre>
  *
@@ -71,12 +71,23 @@ public final class ReactiveGoldLapel implements AutoCloseable {
     /** Context key used by {@link #using} to scope a JDBC connection over a Mono chain. */
     static final String CONN_KEY = "com.goldlapel.reactor.conn";
 
-    private final GoldLapel sync;
+    final GoldLapel sync;
     private final ConnectionFactory r2dbcFactory;
+
+    /**
+     * Reactive document store sub-API — accessible as {@code gl.documents}.
+     * Final field (Option A from cross-wrapper consensus): direct field
+     * access matching the sync flavour's {@link GoldLapel#documents}.
+     */
+    public final ReactiveDocumentsApi documents;
+    /** Reactive streams sub-API — accessible as {@code gl.streams}. */
+    public final ReactiveStreamsApi streams;
 
     private ReactiveGoldLapel(GoldLapel sync, ConnectionFactory r2dbcFactory) {
         this.sync = sync;
         this.r2dbcFactory = r2dbcFactory;
+        this.documents = new ReactiveDocumentsApi(this);
+        this.streams = new ReactiveStreamsApi(this);
     }
 
     // ── Factory ───────────────────────────────────────────────
@@ -238,8 +249,8 @@ public final class ReactiveGoldLapel implements AutoCloseable {
      *
      * <pre>{@code
      * gl.using(conn, g ->
-     *     g.docInsert("events", json)
-     *      .then(g.docCount("events", "{}"))
+     *     g.documents.insert("events", json)
+     *      .then(g.documents.count("events", "{}"))
      * ).subscribe();
      * }</pre>
      *
@@ -269,7 +280,7 @@ public final class ReactiveGoldLapel implements AutoCloseable {
     // Core adapter: wrap a blocking ThrowingSupplier in a Mono that reads
     // the scoped conn from Reactor Context, runs on boundedElastic, and
     // propagates SQLException as Mono.error.
-    private <T> Mono<T> call(Connection explicit, ConnFunction<T> body) {
+    <T> Mono<T> call(Connection explicit, ConnFunction<T> body) {
         return Mono.deferContextual(ctx -> {
             Connection conn = resolveConn(ctx, explicit);
             return Mono.<T>fromCallable(() -> body.apply(conn))
@@ -278,7 +289,7 @@ public final class ReactiveGoldLapel implements AutoCloseable {
     }
 
     // Void variant — Mono<Void> with no value on completion.
-    private Mono<Void> run(Connection explicit, ConnRunnable body) {
+    Mono<Void> run(Connection explicit, ConnRunnable body) {
         return Mono.deferContextual(ctx -> {
             Connection conn = resolveConn(ctx, explicit);
             return Mono.<Void>fromCallable(() -> { body.apply(conn); return null; })
@@ -288,17 +299,17 @@ public final class ReactiveGoldLapel implements AutoCloseable {
     }
 
     // Stream variant — expose a List<T>-returning helper as Flux<T>.
-    private <T> Flux<T> flux(Connection explicit, ConnFunction<List<T>> body) {
+    <T> Flux<T> flux(Connection explicit, ConnFunction<List<T>> body) {
         return this.<List<T>>call(explicit, body).flatMapMany(Flux::fromIterable);
     }
 
     @FunctionalInterface
-    private interface ConnFunction<T> {
+    interface ConnFunction<T> {
         T apply(Connection conn) throws SQLException;
     }
 
     @FunctionalInterface
-    private interface ConnRunnable {
+    interface ConnRunnable {
         void apply(Connection conn) throws SQLException;
     }
 
@@ -306,49 +317,11 @@ public final class ReactiveGoldLapel implements AutoCloseable {
     // Wrapper methods — Mono<T> / Flux<T> parity with sync API
     // ═══════════════════════════════════════════════════════════
 
-    // ── Document store ────────────────────────────────────────
-
-    public Mono<Map<String, Object>> docInsert(String collection, String documentJson) {
-        return call(null, c -> Utils.docInsert(c, collection, documentJson));
-    }
-    public Mono<Map<String, Object>> docInsert(String collection, String documentJson, Connection conn) {
-        return call(conn, c -> Utils.docInsert(c, collection, documentJson));
-    }
-
-    public Flux<Map<String, Object>> docInsertMany(String collection, List<String> documents) {
-        return flux(null, c -> Utils.docInsertMany(c, collection, documents));
-    }
-    public Flux<Map<String, Object>> docInsertMany(String collection, List<String> documents, Connection conn) {
-        return flux(conn, c -> Utils.docInsertMany(c, collection, documents));
-    }
-
-    public Flux<Map<String, Object>> docFind(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip) {
-        return flux(null, c -> Utils.docFind(c, collection, filterJson, sortJson, limit, skip));
-    }
-    public Flux<Map<String, Object>> docFind(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip, Connection conn) {
-        return flux(conn, c -> Utils.docFind(c, collection, filterJson, sortJson, limit, skip));
-    }
-
-    public Mono<Map<String, Object>> docFindOne(String collection, String filterJson) {
-        return call(null, c -> Utils.docFindOne(c, collection, filterJson));
-    }
-    public Mono<Map<String, Object>> docFindOne(String collection, String filterJson, Connection conn) {
-        return call(conn, c -> Utils.docFindOne(c, collection, filterJson));
-    }
-
-    public Flux<Map<String, Object>> docFindCursor(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip, int batchSize) {
-        return cursorFlux(null, c -> Utils.docFindCursor(c, collection, filterJson, sortJson, limit, skip, batchSize));
-    }
-    public Flux<Map<String, Object>> docFindCursor(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip, int batchSize, Connection conn) {
-        return cursorFlux(conn, c -> Utils.docFindCursor(c, collection, filterJson, sortJson, limit, skip, batchSize));
-    }
+    // ── Document store: gl.documents.<verb>(...). See ReactiveDocumentsApi.
+    // ── Streams:        gl.streams.<verb>(...).    See ReactiveStreamsApi.
 
     // Iterator→Flux bridge: pull batches on boundedElastic via generate().
-    private <T> Flux<T> cursorFlux(Connection explicit, ConnFunction<Iterator<T>> openCursor) {
+    <T> Flux<T> cursorFlux(Connection explicit, ConnFunction<Iterator<T>> openCursor) {
         return Mono.<Iterator<T>>deferContextual(ctx -> {
             Connection conn = resolveConn(ctx, explicit);
             return Mono.<Iterator<T>>fromCallable(() -> openCursor.apply(conn))
@@ -364,142 +337,7 @@ public final class ReactiveGoldLapel implements AutoCloseable {
         }).subscribeOn(Schedulers.boundedElastic()));
     }
 
-    public Mono<Integer> docUpdate(String collection, String filterJson, String updateJson) {
-        return call(null, c -> Utils.docUpdate(c, collection, filterJson, updateJson));
-    }
-    public Mono<Integer> docUpdate(String collection, String filterJson, String updateJson, Connection conn) {
-        return call(conn, c -> Utils.docUpdate(c, collection, filterJson, updateJson));
-    }
-
-    public Mono<Integer> docUpdateOne(String collection, String filterJson, String updateJson) {
-        return call(null, c -> Utils.docUpdateOne(c, collection, filterJson, updateJson));
-    }
-    public Mono<Integer> docUpdateOne(String collection, String filterJson, String updateJson, Connection conn) {
-        return call(conn, c -> Utils.docUpdateOne(c, collection, filterJson, updateJson));
-    }
-
-    public Mono<Integer> docDelete(String collection, String filterJson) {
-        return call(null, c -> Utils.docDelete(c, collection, filterJson));
-    }
-    public Mono<Integer> docDelete(String collection, String filterJson, Connection conn) {
-        return call(conn, c -> Utils.docDelete(c, collection, filterJson));
-    }
-
-    public Mono<Integer> docDeleteOne(String collection, String filterJson) {
-        return call(null, c -> Utils.docDeleteOne(c, collection, filterJson));
-    }
-    public Mono<Integer> docDeleteOne(String collection, String filterJson, Connection conn) {
-        return call(conn, c -> Utils.docDeleteOne(c, collection, filterJson));
-    }
-
-    public Mono<Map<String, Object>> docFindOneAndUpdate(String collection, String filterJson,
-            String updateJson) {
-        return call(null, c -> Utils.docFindOneAndUpdate(c, collection, filterJson, updateJson));
-    }
-    public Mono<Map<String, Object>> docFindOneAndUpdate(String collection, String filterJson,
-            String updateJson, Connection conn) {
-        return call(conn, c -> Utils.docFindOneAndUpdate(c, collection, filterJson, updateJson));
-    }
-
-    public Mono<Map<String, Object>> docFindOneAndDelete(String collection, String filterJson) {
-        return call(null, c -> Utils.docFindOneAndDelete(c, collection, filterJson));
-    }
-    public Mono<Map<String, Object>> docFindOneAndDelete(String collection, String filterJson, Connection conn) {
-        return call(conn, c -> Utils.docFindOneAndDelete(c, collection, filterJson));
-    }
-
-    public Flux<String> docDistinct(String collection, String field, String filterJson) {
-        return flux(null, c -> Utils.docDistinct(c, collection, field, filterJson));
-    }
-    public Flux<String> docDistinct(String collection, String field, String filterJson, Connection conn) {
-        return flux(conn, c -> Utils.docDistinct(c, collection, field, filterJson));
-    }
-
-    public Mono<Long> docCount(String collection, String filterJson) {
-        return call(null, c -> Utils.docCount(c, collection, filterJson));
-    }
-    public Mono<Long> docCount(String collection, String filterJson, Connection conn) {
-        return call(conn, c -> Utils.docCount(c, collection, filterJson));
-    }
-
-    public Mono<Void> docCreateIndex(String collection, List<String> keys) {
-        return run(null, c -> Utils.docCreateIndex(c, collection, keys));
-    }
-    public Mono<Void> docCreateIndex(String collection, List<String> keys, Connection conn) {
-        return run(conn, c -> Utils.docCreateIndex(c, collection, keys));
-    }
-
-    public Flux<Map<String, Object>> docAggregate(String collection, String pipelineJson) {
-        return flux(null, c -> Utils.docAggregate(c, collection, pipelineJson));
-    }
-    public Flux<Map<String, Object>> docAggregate(String collection, String pipelineJson, Connection conn) {
-        return flux(conn, c -> Utils.docAggregate(c, collection, pipelineJson));
-    }
-
-    // docWatch uses a background Thread in sync; the reactive equivalent
-    // keeps the same contract — returns a Mono<Thread> that callers can
-    // still interrupt. A dedicated Flux<(channel, payload)> shape is deferred
-    // to a follow-up to avoid designing a new API under pressure here.
-    public Mono<Thread> docWatch(String collection, BiConsumer<String, String> callback) {
-        return call(null, c -> Utils.docWatch(c, collection, callback));
-    }
-    public Mono<Thread> docWatch(String collection, BiConsumer<String, String> callback, Connection conn) {
-        return call(conn, c -> Utils.docWatch(c, collection, callback));
-    }
-
-    public Mono<Void> docUnwatch(String collection) {
-        return run(null, c -> Utils.docUnwatch(c, collection));
-    }
-    public Mono<Void> docUnwatch(String collection, Connection conn) {
-        return run(conn, c -> Utils.docUnwatch(c, collection));
-    }
-
-    public Mono<Void> docCreateTtlIndex(String collection, int expireAfterSeconds) {
-        return run(null, c -> Utils.docCreateTtlIndex(c, collection, expireAfterSeconds));
-    }
-    public Mono<Void> docCreateTtlIndex(String collection, int expireAfterSeconds, Connection conn) {
-        return run(conn, c -> Utils.docCreateTtlIndex(c, collection, expireAfterSeconds));
-    }
-    public Mono<Void> docCreateTtlIndex(String collection, int expireAfterSeconds, String field) {
-        return run(null, c -> Utils.docCreateTtlIndex(c, collection, expireAfterSeconds, field));
-    }
-    public Mono<Void> docCreateTtlIndex(String collection, int expireAfterSeconds, String field, Connection conn) {
-        return run(conn, c -> Utils.docCreateTtlIndex(c, collection, expireAfterSeconds, field));
-    }
-
-    public Mono<Void> docRemoveTtlIndex(String collection) {
-        return run(null, c -> Utils.docRemoveTtlIndex(c, collection));
-    }
-    public Mono<Void> docRemoveTtlIndex(String collection, Connection conn) {
-        return run(conn, c -> Utils.docRemoveTtlIndex(c, collection));
-    }
-
-    public Mono<Void> docCreateCollection(String collection, boolean unlogged) {
-        return run(null, c -> Utils.docCreateCollection(c, collection, unlogged));
-    }
-    public Mono<Void> docCreateCollection(String collection, boolean unlogged, Connection conn) {
-        return run(conn, c -> Utils.docCreateCollection(c, collection, unlogged));
-    }
-    public Mono<Void> docCreateCollection(String collection) {
-        return run(null, c -> Utils.docCreateCollection(c, collection));
-    }
-    public Mono<Void> docCreateCollection(String collection, Connection conn) {
-        return run(conn, c -> Utils.docCreateCollection(c, collection));
-    }
-
-    public Mono<Void> docCreateCapped(String collection, int maxDocuments) {
-        return run(null, c -> Utils.docCreateCapped(c, collection, maxDocuments));
-    }
-    public Mono<Void> docCreateCapped(String collection, int maxDocuments, Connection conn) {
-        return run(conn, c -> Utils.docCreateCapped(c, collection, maxDocuments));
-    }
-
-    public Mono<Void> docRemoveCap(String collection) {
-        return run(null, c -> Utils.docRemoveCap(c, collection));
-    }
-    public Mono<Void> docRemoveCap(String collection, Connection conn) {
-        return run(conn, c -> Utils.docRemoveCap(c, collection));
-    }
+    // (doc methods moved to ReactiveDocumentsApi; access via gl.documents.<verb>)
 
     // ── Search ────────────────────────────────────────────────
 
@@ -779,50 +617,7 @@ public final class ReactiveGoldLapel implements AutoCloseable {
         return call(null, c -> Utils.script(c, luaCode, args));
     }
 
-    // ── Streams ───────────────────────────────────────────────
-    //
-    // Each stream op fetches canonical DDL + query patterns from the proxy
-    // on first use (cached thereafter). The DDL fetch runs in the blocking
-    // scheduler because it's a one-shot HTTP round-trip — not a hot path.
-
-    public Mono<Long> streamAdd(String stream, String payload) {
-        return call(null, c -> Utils.streamAdd(c, stream, payload, sync.streamPatterns(stream)));
-    }
-    public Mono<Long> streamAdd(String stream, String payload, Connection conn) {
-        return call(conn, c -> Utils.streamAdd(c, stream, payload, sync.streamPatterns(stream)));
-    }
-
-    public Mono<Void> streamCreateGroup(String stream, String group) {
-        return run(null, c -> Utils.streamCreateGroup(c, stream, group, sync.streamPatterns(stream)));
-    }
-    public Mono<Void> streamCreateGroup(String stream, String group, Connection conn) {
-        return run(conn, c -> Utils.streamCreateGroup(c, stream, group, sync.streamPatterns(stream)));
-    }
-
-    public Flux<Map<String, Object>> streamRead(String stream, String group,
-            String consumer, int count) {
-        return flux(null, c -> Utils.streamRead(c, stream, group, consumer, count, sync.streamPatterns(stream)));
-    }
-    public Flux<Map<String, Object>> streamRead(String stream, String group,
-            String consumer, int count, Connection conn) {
-        return flux(conn, c -> Utils.streamRead(c, stream, group, consumer, count, sync.streamPatterns(stream)));
-    }
-
-    public Mono<Boolean> streamAck(String stream, String group, long messageId) {
-        return call(null, c -> Utils.streamAck(c, stream, group, messageId, sync.streamPatterns(stream)));
-    }
-    public Mono<Boolean> streamAck(String stream, String group, long messageId, Connection conn) {
-        return call(conn, c -> Utils.streamAck(c, stream, group, messageId, sync.streamPatterns(stream)));
-    }
-
-    public Flux<Map<String, Object>> streamClaim(String stream, String group,
-            String consumer, long minIdleMs) {
-        return flux(null, c -> Utils.streamClaim(c, stream, group, consumer, minIdleMs, sync.streamPatterns(stream)));
-    }
-    public Flux<Map<String, Object>> streamClaim(String stream, String group,
-            String consumer, long minIdleMs, Connection conn) {
-        return flux(conn, c -> Utils.streamClaim(c, stream, group, consumer, minIdleMs, sync.streamPatterns(stream)));
-    }
+    // (stream methods moved to ReactiveStreamsApi; access via gl.streams.<verb>)
 
     // ── Percolator ────────────────────────────────────────────
 

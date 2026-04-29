@@ -49,13 +49,13 @@ class RxJavaIntegrationTest {
 
         Single<Long> pipeline = RxJavaGoldLapel.start(upstream, opts -> opts.setProxyPort(proxyPort))
             .flatMap(gl ->
-                gl.docCreateCollection(coll)
-                  .andThen(gl.docInsert(coll, "{\"type\":\"signup\",\"n\":1}"))
-                  .flatMap(ignored -> gl.docInsert(coll, "{\"type\":\"signup\",\"n\":2}"))
-                  .flatMap(ignored -> gl.docInsert(coll, "{\"type\":\"login\",\"n\":3}"))
-                  .flatMap(ignored -> gl.docCount(coll, "{}"))
+                gl.documents.createCollection(coll)
+                  .andThen(gl.documents.insert(coll, "{\"type\":\"signup\",\"n\":1}"))
+                  .flatMap(ignored -> gl.documents.insert(coll, "{\"type\":\"signup\",\"n\":2}"))
+                  .flatMap(ignored -> gl.documents.insert(coll, "{\"type\":\"login\",\"n\":3}"))
+                  .flatMap(ignored -> gl.documents.count(coll, "{}"))
                   .flatMap(count ->
-                      gl.docFind(coll, "{\"type\":\"signup\"}", null, null, null)
+                      gl.documents.find(coll, "{\"type\":\"signup\"}", null, null, null)
                         .count()
                         .flatMap(signups ->
                             gl.stop().toSingleDefault(count + signups * 100L)

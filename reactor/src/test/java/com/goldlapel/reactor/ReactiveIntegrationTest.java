@@ -64,13 +64,13 @@ class ReactiveIntegrationTest {
 
         Mono<Long> pipeline = ReactiveGoldLapel.start(upstream, opts -> opts.setProxyPort(proxyPort))
             .flatMap(gl ->
-                gl.docCreateCollection(coll)
-                  .then(gl.docInsert(coll, "{\"type\":\"signup\",\"n\":1}"))
-                  .then(gl.docInsert(coll, "{\"type\":\"signup\",\"n\":2}"))
-                  .then(gl.docInsert(coll, "{\"type\":\"login\",\"n\":3}"))
-                  .then(gl.docCount(coll, "{}"))
+                gl.documents.createCollection(coll)
+                  .then(gl.documents.insert(coll, "{\"type\":\"signup\",\"n\":1}"))
+                  .then(gl.documents.insert(coll, "{\"type\":\"signup\",\"n\":2}"))
+                  .then(gl.documents.insert(coll, "{\"type\":\"login\",\"n\":3}"))
+                  .then(gl.documents.count(coll, "{}"))
                   .flatMap(count ->
-                      gl.docFind(coll, "{\"type\":\"signup\"}", null, null, null)
+                      gl.documents.find(coll, "{\"type\":\"signup\"}", null, null, null)
                         .count()
                         .flatMap(signups -> gl.stop().thenReturn(count + signups * 100))
                   )
@@ -100,10 +100,10 @@ class ReactiveIntegrationTest {
                     try {
                         java.sql.Connection myConn = DriverManager.getConnection(jdbcUrl, props);
                         return gl.using(myConn, g ->
-                                g.docCreateCollection(coll)
-                                 .then(g.docInsert(coll, "{\"x\":1}"))
-                                 .then(g.docInsert(coll, "{\"x\":2}"))
-                                 .then(g.docCount(coll, "{}"))
+                                g.documents.createCollection(coll)
+                                 .then(g.documents.insert(coll, "{\"x\":1}"))
+                                 .then(g.documents.insert(coll, "{\"x\":2}"))
+                                 .then(g.documents.count(coll, "{}"))
                             )
                             .flatMap(count -> {
                                 try { myConn.close(); } catch (SQLException ignored) {}

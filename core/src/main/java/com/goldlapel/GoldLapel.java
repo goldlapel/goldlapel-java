@@ -13,7 +13,6 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -43,7 +42,7 @@ import java.util.function.BiConsumer;
  *     try (Connection conn = DriverManager.getConnection(gl.getJdbcUrl(), props)) {
  *         // ... raw JDBC ...
  *     }
- *     gl.docInsert("events", "{\"type\":\"signup\"}");
+ *     gl.documents.insert("events", "{\"type\":\"signup\"}");
  * } // gl.close() auto-stops the proxy
  * }</pre>
  */
@@ -115,6 +114,19 @@ public class GoldLapel implements AutoCloseable {
     private Process process;
     private String proxyUrl;
     private Connection internalConn;
+
+    // Nested namespaces — see DocumentsApi and StreamsApi. These are the
+    // canonical schema-to-core sub-API instances. Each holds a back-reference
+    // to this client for shared state (license, dashboard token, http
+    // session, conn, DDL pattern cache). Other namespaces (search, cache,
+    // queues, counters, hashes, zsets, geo, …) stay flat for now; they
+    // migrate to nested form one-at-a-time as their own schema-to-core phase
+    // fires. Final fields (Option A from cross-wrapper consensus): direct
+    // access, no method-call indirection.
+    /** Document store sub-API — accessible as {@code gl.documents.<verb>(...)}. */
+    public final DocumentsApi documents;
+    /** Streams sub-API — accessible as {@code gl.streams.<verb>(...)}. */
+    public final StreamsApi streams;
     // Dashboard token — provisioned per-session on startProxy. Exposed to the
     // DDL client via dashboardToken(). Non-final because we clear it on stop().
     private volatile String dashboardToken;
@@ -170,6 +182,13 @@ public class GoldLapel implements AutoCloseable {
         this.meshTag = (tag == null || tag.isEmpty()) ? null : tag;
         this.process = null;
         this.proxyUrl = null;
+
+        // Nested namespaces. Constructed last so they capture the fully
+        // initialized parent — DocumentsApi/StreamsApi only ever read from
+        // the parent at call time, so even if other fields shifted later
+        // they would observe the latest values via the back-reference.
+        this.documents = new DocumentsApi(this);
+        this.streams = new StreamsApi(this);
     }
 
     // ── Factory ───────────────────────────────────────────────
@@ -612,8 +631,10 @@ public class GoldLapel implements AutoCloseable {
     }
 
     // Resolve the connection a wrapper method should use when no explicit
-    // override is provided: scoped (using) > internal.
-    private Connection resolveConn() {
+    // override is provided: scoped (using) > internal. Package-private so
+    // sub-API classes (DocumentsApi, StreamsApi) read through the same
+    // resolution path as flat methods on this class.
+    Connection resolveConn() {
         Connection scoped = scopedConn.get();
         if (scoped != null) return scoped;
         return connection();
@@ -627,7 +648,7 @@ public class GoldLapel implements AutoCloseable {
      *
      * <pre>{@code
      * gl.using(conn, () -> {
-     *     gl.docInsert("events", "{\"type\":\"order\"}");
+     *     gl.documents.insert("events", "{\"type\":\"order\"}");
      * });
      * }</pre>
      */
@@ -654,7 +675,7 @@ public class GoldLapel implements AutoCloseable {
      * {@code using} propagates the callback's return value (JS/PHP/Ruby/.NET/Reactor).
      *
      * <pre>{@code
-     * long count = gl.using(conn, () -> gl.docCount("events", "{}"));
+     * long count = gl.using(conn, () -> gl.documents.count("events", "{}"));
      * }</pre>
      */
     public <T> T using(Connection conn, ThrowingSupplier<T> body) throws SQLException {
@@ -684,205 +705,7 @@ public class GoldLapel implements AutoCloseable {
 
     // ── Wrapper methods (each has a no-conn and an explicit-conn overload) ─
 
-    // Document store
-
-    public Map<String, Object> docInsert(String collection, String documentJson) throws SQLException {
-        return Utils.docInsert(resolveConn(), collection, documentJson);
-    }
-
-    public Map<String, Object> docInsert(String collection, String documentJson, Connection conn) throws SQLException {
-        return Utils.docInsert(conn, collection, documentJson);
-    }
-
-    public List<Map<String, Object>> docInsertMany(String collection, List<String> documents) throws SQLException {
-        return Utils.docInsertMany(resolveConn(), collection, documents);
-    }
-
-    public List<Map<String, Object>> docInsertMany(String collection, List<String> documents, Connection conn) throws SQLException {
-        return Utils.docInsertMany(conn, collection, documents);
-    }
-
-    public List<Map<String, Object>> docFind(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip) throws SQLException {
-        return Utils.docFind(resolveConn(), collection, filterJson, sortJson, limit, skip);
-    }
-
-    public List<Map<String, Object>> docFind(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip, Connection conn) throws SQLException {
-        return Utils.docFind(conn, collection, filterJson, sortJson, limit, skip);
-    }
-
-    public Map<String, Object> docFindOne(String collection, String filterJson) throws SQLException {
-        return Utils.docFindOne(resolveConn(), collection, filterJson);
-    }
-
-    public Map<String, Object> docFindOne(String collection, String filterJson, Connection conn) throws SQLException {
-        return Utils.docFindOne(conn, collection, filterJson);
-    }
-
-    public Iterator<Map<String, Object>> docFindCursor(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip, int batchSize) throws SQLException {
-        return Utils.docFindCursor(resolveConn(), collection, filterJson, sortJson, limit, skip, batchSize);
-    }
-
-    public Iterator<Map<String, Object>> docFindCursor(String collection, String filterJson,
-            String sortJson, Integer limit, Integer skip, int batchSize, Connection conn) throws SQLException {
-        return Utils.docFindCursor(conn, collection, filterJson, sortJson, limit, skip, batchSize);
-    }
-
-    public int docUpdate(String collection, String filterJson, String updateJson) throws SQLException {
-        return Utils.docUpdate(resolveConn(), collection, filterJson, updateJson);
-    }
-
-    public int docUpdate(String collection, String filterJson, String updateJson, Connection conn) throws SQLException {
-        return Utils.docUpdate(conn, collection, filterJson, updateJson);
-    }
-
-    public int docUpdateOne(String collection, String filterJson, String updateJson) throws SQLException {
-        return Utils.docUpdateOne(resolveConn(), collection, filterJson, updateJson);
-    }
-
-    public int docUpdateOne(String collection, String filterJson, String updateJson, Connection conn) throws SQLException {
-        return Utils.docUpdateOne(conn, collection, filterJson, updateJson);
-    }
-
-    public int docDelete(String collection, String filterJson) throws SQLException {
-        return Utils.docDelete(resolveConn(), collection, filterJson);
-    }
-
-    public int docDelete(String collection, String filterJson, Connection conn) throws SQLException {
-        return Utils.docDelete(conn, collection, filterJson);
-    }
-
-    public int docDeleteOne(String collection, String filterJson) throws SQLException {
-        return Utils.docDeleteOne(resolveConn(), collection, filterJson);
-    }
-
-    public int docDeleteOne(String collection, String filterJson, Connection conn) throws SQLException {
-        return Utils.docDeleteOne(conn, collection, filterJson);
-    }
-
-    public Map<String, Object> docFindOneAndUpdate(String collection, String filterJson,
-            String updateJson) throws SQLException {
-        return Utils.docFindOneAndUpdate(resolveConn(), collection, filterJson, updateJson);
-    }
-
-    public Map<String, Object> docFindOneAndUpdate(String collection, String filterJson,
-            String updateJson, Connection conn) throws SQLException {
-        return Utils.docFindOneAndUpdate(conn, collection, filterJson, updateJson);
-    }
-
-    public Map<String, Object> docFindOneAndDelete(String collection, String filterJson) throws SQLException {
-        return Utils.docFindOneAndDelete(resolveConn(), collection, filterJson);
-    }
-
-    public Map<String, Object> docFindOneAndDelete(String collection, String filterJson, Connection conn) throws SQLException {
-        return Utils.docFindOneAndDelete(conn, collection, filterJson);
-    }
-
-    public List<String> docDistinct(String collection, String field, String filterJson) throws SQLException {
-        return Utils.docDistinct(resolveConn(), collection, field, filterJson);
-    }
-
-    public List<String> docDistinct(String collection, String field, String filterJson, Connection conn) throws SQLException {
-        return Utils.docDistinct(conn, collection, field, filterJson);
-    }
-
-    public long docCount(String collection, String filterJson) throws SQLException {
-        return Utils.docCount(resolveConn(), collection, filterJson);
-    }
-
-    public long docCount(String collection, String filterJson, Connection conn) throws SQLException {
-        return Utils.docCount(conn, collection, filterJson);
-    }
-
-    public void docCreateIndex(String collection, List<String> keys) throws SQLException {
-        Utils.docCreateIndex(resolveConn(), collection, keys);
-    }
-
-    public void docCreateIndex(String collection, List<String> keys, Connection conn) throws SQLException {
-        Utils.docCreateIndex(conn, collection, keys);
-    }
-
-    public List<Map<String, Object>> docAggregate(String collection, String pipelineJson) throws SQLException {
-        return Utils.docAggregate(resolveConn(), collection, pipelineJson);
-    }
-
-    public List<Map<String, Object>> docAggregate(String collection, String pipelineJson, Connection conn) throws SQLException {
-        return Utils.docAggregate(conn, collection, pipelineJson);
-    }
-
-    public Thread docWatch(String collection, BiConsumer<String, String> callback) throws SQLException {
-        return Utils.docWatch(resolveConn(), collection, callback);
-    }
-
-    public Thread docWatch(String collection, BiConsumer<String, String> callback, Connection conn) throws SQLException {
-        return Utils.docWatch(conn, collection, callback);
-    }
-
-    public void docUnwatch(String collection) throws SQLException {
-        Utils.docUnwatch(resolveConn(), collection);
-    }
-
-    public void docUnwatch(String collection, Connection conn) throws SQLException {
-        Utils.docUnwatch(conn, collection);
-    }
-
-    public void docCreateTtlIndex(String collection, int expireAfterSeconds) throws SQLException {
-        Utils.docCreateTtlIndex(resolveConn(), collection, expireAfterSeconds);
-    }
-
-    public void docCreateTtlIndex(String collection, int expireAfterSeconds, Connection conn) throws SQLException {
-        Utils.docCreateTtlIndex(conn, collection, expireAfterSeconds);
-    }
-
-    public void docCreateTtlIndex(String collection, int expireAfterSeconds, String field) throws SQLException {
-        Utils.docCreateTtlIndex(resolveConn(), collection, expireAfterSeconds, field);
-    }
-
-    public void docCreateTtlIndex(String collection, int expireAfterSeconds, String field, Connection conn) throws SQLException {
-        Utils.docCreateTtlIndex(conn, collection, expireAfterSeconds, field);
-    }
-
-    public void docRemoveTtlIndex(String collection) throws SQLException {
-        Utils.docRemoveTtlIndex(resolveConn(), collection);
-    }
-
-    public void docRemoveTtlIndex(String collection, Connection conn) throws SQLException {
-        Utils.docRemoveTtlIndex(conn, collection);
-    }
-
-    public void docCreateCollection(String collection, boolean unlogged) throws SQLException {
-        Utils.docCreateCollection(resolveConn(), collection, unlogged);
-    }
-
-    public void docCreateCollection(String collection, boolean unlogged, Connection conn) throws SQLException {
-        Utils.docCreateCollection(conn, collection, unlogged);
-    }
-
-    public void docCreateCollection(String collection) throws SQLException {
-        Utils.docCreateCollection(resolveConn(), collection);
-    }
-
-    public void docCreateCollection(String collection, Connection conn) throws SQLException {
-        Utils.docCreateCollection(conn, collection);
-    }
-
-    public void docCreateCapped(String collection, int maxDocuments) throws SQLException {
-        Utils.docCreateCapped(resolveConn(), collection, maxDocuments);
-    }
-
-    public void docCreateCapped(String collection, int maxDocuments, Connection conn) throws SQLException {
-        Utils.docCreateCapped(conn, collection, maxDocuments);
-    }
-
-    public void docRemoveCap(String collection) throws SQLException {
-        Utils.docRemoveCap(resolveConn(), collection);
-    }
-
-    public void docRemoveCap(String collection, Connection conn) throws SQLException {
-        Utils.docRemoveCap(conn, collection);
-    }
+    // Document store: gl.documents.<verb>(...). See DocumentsApi.
 
     // Search
 
@@ -1226,64 +1049,21 @@ public class GoldLapel implements AutoCloseable {
         return Utils.script(resolveConn(), luaCode, args);
     }
 
-    // Streams — proxy-owned DDL. Each call fetches (and caches) canonical
-    // query patterns from the dashboard's /api/ddl/stream/create endpoint on
-    // first use; subsequent calls use the cached patterns.
+    // Streams: gl.streams.<verb>(...). See StreamsApi. Proxy-owned DDL —
+    // each call fetches (and caches) canonical query patterns from the
+    // dashboard's /api/ddl/stream/create endpoint on first use; subsequent
+    // calls use the cached patterns.
 
     /**
      * Fetch (and cache per-instance) canonical stream DDL + query patterns.
-     * Public so reactor/rxjava3 wrappers in sibling artifacts can reuse the
-     * same cache.
+     * Public so {@link StreamsApi} and reactor/rxjava3 wrappers in sibling
+     * artifacts can reuse the same cache.
      */
-    @SuppressWarnings("unchecked")
     public Map<String, String> streamPatterns(String stream) {
+        Utils.validateIdentifier(stream);
         String token = dashboardToken != null ? dashboardToken : Ddl.tokenFromEnvOrFile();
         Map<String, Object> entry = Ddl.fetchPatterns(ddlCache, "stream", stream, dashboardPort, token);
         return Ddl.queryPatterns(entry);
-    }
-
-    public long streamAdd(String stream, String payload) throws SQLException {
-        return Utils.streamAdd(resolveConn(), stream, payload, streamPatterns(stream));
-    }
-
-    public long streamAdd(String stream, String payload, Connection conn) throws SQLException {
-        return Utils.streamAdd(conn, stream, payload, streamPatterns(stream));
-    }
-
-    public void streamCreateGroup(String stream, String group) throws SQLException {
-        Utils.streamCreateGroup(resolveConn(), stream, group, streamPatterns(stream));
-    }
-
-    public void streamCreateGroup(String stream, String group, Connection conn) throws SQLException {
-        Utils.streamCreateGroup(conn, stream, group, streamPatterns(stream));
-    }
-
-    public List<Map<String, Object>> streamRead(String stream, String group,
-            String consumer, int count) throws SQLException {
-        return Utils.streamRead(resolveConn(), stream, group, consumer, count, streamPatterns(stream));
-    }
-
-    public List<Map<String, Object>> streamRead(String stream, String group,
-            String consumer, int count, Connection conn) throws SQLException {
-        return Utils.streamRead(conn, stream, group, consumer, count, streamPatterns(stream));
-    }
-
-    public boolean streamAck(String stream, String group, long messageId) throws SQLException {
-        return Utils.streamAck(resolveConn(), stream, group, messageId, streamPatterns(stream));
-    }
-
-    public boolean streamAck(String stream, String group, long messageId, Connection conn) throws SQLException {
-        return Utils.streamAck(conn, stream, group, messageId, streamPatterns(stream));
-    }
-
-    public List<Map<String, Object>> streamClaim(String stream, String group,
-            String consumer, long minIdleMs) throws SQLException {
-        return Utils.streamClaim(resolveConn(), stream, group, consumer, minIdleMs, streamPatterns(stream));
-    }
-
-    public List<Map<String, Object>> streamClaim(String stream, String group,
-            String consumer, long minIdleMs, Connection conn) throws SQLException {
-        return Utils.streamClaim(conn, stream, group, consumer, minIdleMs, streamPatterns(stream));
     }
 
     // Percolator

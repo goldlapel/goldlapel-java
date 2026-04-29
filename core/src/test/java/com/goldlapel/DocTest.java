@@ -69,6 +69,39 @@ class DocTest {
         when(ps.executeUpdate()).thenReturn(count);
     }
 
+    /**
+     * Build a fake patterns map that resolves {@code main} to the supplied
+     * table name. Tests pass these directly to the {@code Utils.docX} helpers
+     * — the proxy is not contacted in unit tests. Using {@code collection}
+     * as the table keeps the existing SQL assertions ("INSERT INTO users")
+     * valid since the canonical table reference and the user-supplied name
+     * coincide here. End-to-end behavior with the real proxy
+     * ({@code _goldlapel.doc_<collection>}) is exercised in the integration
+     * suite ({@code GOLDLAPEL_INTEGRATION=1}).
+     */
+    static Map<String, Object> patterns(String collection) {
+        Map<String, Object> tables = new java.util.LinkedHashMap<>();
+        tables.put("main", collection);
+        Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("tables", tables);
+        entry.put("query_patterns", Collections.emptyMap());
+        return entry;
+    }
+
+    /** Convenience overload resolving to a non-null patterns map. */
+    static Map<String, Object> P(String collection) { return patterns(collection); }
+
+    /**
+     * Build a fake lookupTables map mapping each {@code from} name to the
+     * same name (i.e. table = collection in unit tests). Used by aggregate
+     * pipelines that include a {@code $lookup} stage.
+     */
+    static Map<String, String> L(String... fromNames) {
+        Map<String, String> m = new java.util.LinkedHashMap<>();
+        for (String n : fromNames) m.put(n, n);
+        return m;
+    }
+
 
     // -------------------------------------------------------------------------
     // parseSortClause (unit tests on the helper)
@@ -141,7 +174,7 @@ class DocTest {
             when(rs.getObject(1)).thenReturn("uuid-1");
             when(rs.getObject(2)).thenReturn("{\"name\":\"alice\"}");
 
-            Map<String, Object> result = Utils.docInsert(conn, "users", "{\"name\":\"alice\"}");
+            Map<String, Object> result = Utils.docInsert(conn, "users", "{\"name\":\"alice\"}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -153,26 +186,14 @@ class DocTest {
             assertEquals("uuid-1", result.get("_id"));
         }
 
-        @Test
-        void createsTable() throws SQLException {
-            allowCreateStatement();
-            singleRowResultSet("_id", "data", "created_at", "updated_at");
-            when(rs.getObject(1)).thenReturn("uuid-1");
-
-            Utils.docInsert(conn, "users", "{\"a\":1}");
-
-            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
-            verify(stmt).execute(ddlCaptor.capture());
-            String ddl = ddlCaptor.getValue();
-            assertTrue(ddl.contains("CREATE TABLE IF NOT EXISTS users"));
-            assertTrue(ddl.contains("data JSONB NOT NULL"));
-            assertTrue(ddl.contains("UUID PRIMARY KEY DEFAULT gen_random_uuid()"));
-        }
+        // The "createsTable on first insert" test is gone — the proxy now
+        // owns doc-store DDL. End-to-end create + insert is exercised in the
+        // integration suite.
 
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docInsert(conn, "bad table", "{}"));
+                    () -> Utils.docInsert(conn, "bad table", "{}", P("bad table")));
         }
     }
 
@@ -198,7 +219,7 @@ class DocTest {
             when(rs.getObject(1)).thenReturn("uuid-1", "uuid-2");
 
             List<String> docs = Arrays.asList("{\"a\":1}", "{\"b\":2}");
-            List<Map<String, Object>> results = Utils.docInsertMany(conn, "items", docs);
+            List<Map<String, Object>> results = Utils.docInsertMany(conn, "items", docs, P("items"));
 
             assertEquals(2, results.size());
             verify(ps, times(2)).setString(eq(1), anyString());
@@ -209,14 +230,14 @@ class DocTest {
             allowCreateStatement();
             when(conn.prepareStatement(anyString())).thenReturn(ps);
 
-            List<Map<String, Object>> results = Utils.docInsertMany(conn, "items", Collections.emptyList());
+            List<Map<String, Object>> results = Utils.docInsertMany(conn, "items", Collections.emptyList(), P("items"));
             assertTrue(results.isEmpty());
         }
 
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docInsertMany(conn, "1bad", Collections.emptyList()));
+                    () -> Utils.docInsertMany(conn, "1bad", Collections.emptyList(), P("1bad")));
         }
     }
 
@@ -230,7 +251,7 @@ class DocTest {
         @Test
         void sqlWithFilterSortLimitSkip() throws SQLException {
             emptyResultSet("_id", "data", "created_at", "updated_at");
-            Utils.docFind(conn, "users", "{\"active\":true}", "{\"name\": 1}", 10, 5);
+            Utils.docFind(conn, "users", "{\"active\":true}", "{\"name\": 1}", 10, 5, P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -248,7 +269,7 @@ class DocTest {
         @Test
         void sqlNoFilter() throws SQLException {
             emptyResultSet("_id", "data", "created_at", "updated_at");
-            Utils.docFind(conn, "users", null, null, null, null);
+            Utils.docFind(conn, "users", null, null, null, null, P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -262,7 +283,7 @@ class DocTest {
         @Test
         void sqlFilterOnly() throws SQLException {
             emptyResultSet("_id", "data", "created_at", "updated_at");
-            Utils.docFind(conn, "users", "{\"x\":1}", null, null, null);
+            Utils.docFind(conn, "users", "{\"x\":1}", null, null, null, P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -282,7 +303,7 @@ class DocTest {
             when(rs.getObject(1)).thenReturn("uuid-1", "uuid-2");
             when(rs.getObject(2)).thenReturn("{\"a\":1}", "{\"b\":2}");
 
-            List<Map<String, Object>> results = Utils.docFind(conn, "users", null, null, null, null);
+            List<Map<String, Object>> results = Utils.docFind(conn, "users", null, null, null, null, P("users"));
             assertEquals(2, results.size());
             assertEquals("uuid-1", results.get(0).get("_id"));
             assertEquals("uuid-2", results.get(1).get("_id"));
@@ -291,7 +312,7 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docFind(conn, "bad table", null, null, null, null));
+                    () -> Utils.docFind(conn, "bad table", null, null, null, null, P("bad table")));
         }
     }
 
@@ -314,7 +335,7 @@ class DocTest {
             when(rs.getObject(1)).thenReturn("uuid-42");
             when(rs.getObject(2)).thenReturn("{\"name\":\"bob\"}");
 
-            Map<String, Object> result = Utils.docFindOne(conn, "users", "{\"name\":\"bob\"}");
+            Map<String, Object> result = Utils.docFindOne(conn, "users", "{\"name\":\"bob\"}", P("users"));
             assertNotNull(result);
             assertEquals("uuid-42", result.get("_id"));
         }
@@ -322,14 +343,14 @@ class DocTest {
         @Test
         void returnsNullWhenEmpty() throws SQLException {
             emptyResultSet("_id", "data", "created_at", "updated_at");
-            Map<String, Object> result = Utils.docFindOne(conn, "users", "{\"x\":1}");
+            Map<String, Object> result = Utils.docFindOne(conn, "users", "{\"x\":1}", P("users"));
             assertNull(result);
         }
 
         @Test
         void delegatesToDocFind() throws SQLException {
             emptyResultSet("_id", "data", "created_at", "updated_at");
-            Utils.docFindOne(conn, "users", "{\"a\":1}");
+            Utils.docFindOne(conn, "users", "{\"a\":1}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -348,7 +369,7 @@ class DocTest {
         @Test
         void sqlAndParams() throws SQLException {
             allowUpdate(3);
-            int count = Utils.docUpdate(conn, "users", "{\"active\":true}", "{\"score\":10}");
+            int count = Utils.docUpdate(conn, "users", "{\"active\":true}", "{\"score\":10}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -363,7 +384,7 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docUpdate(conn, "bad table", "{}", "{}"));
+                    () -> Utils.docUpdate(conn, "bad table", "{}", "{}", P("bad table")));
         }
     }
 
@@ -377,7 +398,7 @@ class DocTest {
         @Test
         void sqlAndParams() throws SQLException {
             allowUpdate(1);
-            int count = Utils.docUpdateOne(conn, "users", "{\"name\":\"alice\"}", "{\"age\":30}");
+            int count = Utils.docUpdateOne(conn, "users", "{\"name\":\"alice\"}", "{\"age\":30}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -392,14 +413,14 @@ class DocTest {
         @Test
         void returnsZeroWhenNoMatch() throws SQLException {
             allowUpdate(0);
-            int count = Utils.docUpdateOne(conn, "users", "{\"x\":1}", "{\"y\":2}");
+            int count = Utils.docUpdateOne(conn, "users", "{\"x\":1}", "{\"y\":2}", P("users"));
             assertEquals(0, count);
         }
 
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docUpdateOne(conn, "1bad", "{}", "{}"));
+                    () -> Utils.docUpdateOne(conn, "1bad", "{}", "{}", P("1bad")));
         }
     }
 
@@ -413,7 +434,7 @@ class DocTest {
         @Test
         void sqlAndParams() throws SQLException {
             allowUpdate(5);
-            int count = Utils.docDelete(conn, "users", "{\"inactive\":true}");
+            int count = Utils.docDelete(conn, "users", "{\"inactive\":true}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -425,7 +446,7 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docDelete(conn, "bad table", "{}"));
+                    () -> Utils.docDelete(conn, "bad table", "{}", P("bad table")));
         }
     }
 
@@ -439,7 +460,7 @@ class DocTest {
         @Test
         void sqlAndParams() throws SQLException {
             allowUpdate(1);
-            int count = Utils.docDeleteOne(conn, "users", "{\"name\":\"bob\"}");
+            int count = Utils.docDeleteOne(conn, "users", "{\"name\":\"bob\"}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -451,14 +472,14 @@ class DocTest {
         @Test
         void returnsZeroWhenNoMatch() throws SQLException {
             allowUpdate(0);
-            int count = Utils.docDeleteOne(conn, "users", "{\"x\":1}");
+            int count = Utils.docDeleteOne(conn, "users", "{\"x\":1}", P("users"));
             assertEquals(0, count);
         }
 
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docDeleteOne(conn, "1bad", "{}"));
+                    () -> Utils.docDeleteOne(conn, "1bad", "{}", P("1bad")));
         }
     }
 
@@ -476,7 +497,7 @@ class DocTest {
             when(rs.next()).thenReturn(true);
             when(rs.getLong(1)).thenReturn(42L);
 
-            long count = Utils.docCount(conn, "users", "{\"active\":true}");
+            long count = Utils.docCount(conn, "users", "{\"active\":true}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -492,7 +513,7 @@ class DocTest {
             when(rs.next()).thenReturn(true);
             when(rs.getLong(1)).thenReturn(100L);
 
-            long count = Utils.docCount(conn, "users", null);
+            long count = Utils.docCount(conn, "users", null, P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -507,7 +528,7 @@ class DocTest {
             when(rs.next()).thenReturn(true);
             when(rs.getLong(1)).thenReturn(100L);
 
-            long count = Utils.docCount(conn, "users", "");
+            long count = Utils.docCount(conn, "users", "", P("users"));
             verify(conn).prepareStatement(sqlCaptor.capture());
             assertFalse(sqlCaptor.getValue().contains("WHERE"));
         }
@@ -515,7 +536,7 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCount(conn, "bad table", null));
+                    () -> Utils.docCount(conn, "bad table", null, P("bad table")));
         }
     }
 
@@ -534,7 +555,7 @@ class DocTest {
                 "{\"$group\": {\"_id\": \"$region\", \"total\": {\"$sum\": \"$amount\"}}}, " +
                 "{\"$sort\": {\"total\": -1}}, " +
                 "{\"$limit\": 10}, " +
-                "{\"$skip\": 5}]");
+                "{\"$skip\": 5}]", P("orders"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -560,7 +581,7 @@ class DocTest {
                 "\"total\": {\"$sum\": \"$price\"}, " +
                 "\"mean\": {\"$avg\": \"$price\"}, " +
                 "\"lo\": {\"$min\": \"$price\"}, " +
-                "\"hi\": {\"$max\": \"$price\"}}}]");
+                "\"hi\": {\"$max\": \"$price\"}}}]", P("orders"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -576,7 +597,7 @@ class DocTest {
         void nullGroupId() throws SQLException {
             emptyResultSet("total");
             Utils.docAggregate(conn, "orders",
-                "[{\"$group\": {\"_id\": null, \"total\": {\"$sum\": \"$amount\"}}}]");
+                "[{\"$group\": {\"_id\": null, \"total\": {\"$sum\": \"$amount\"}}}]", P("orders"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -589,7 +610,7 @@ class DocTest {
         void matchOnly() throws SQLException {
             emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docAggregate(conn, "users",
-                "[{\"$match\": {\"active\":true}}]");
+                "[{\"$match\": {\"active\":true}}]", P("users"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -603,7 +624,7 @@ class DocTest {
         void sortContextBeforeGroup() throws SQLException {
             emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docAggregate(conn, "users",
-                "[{\"$sort\": {\"name\": 1}}]");
+                "[{\"$sort\": {\"name\": 1}}]", P("users"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -616,7 +637,7 @@ class DocTest {
             emptyResultSet("_id", "cnt");
             Utils.docAggregate(conn, "users",
                 "[{\"$group\": {\"_id\": \"$role\", \"cnt\": {\"$sum\": 1}}}, " +
-                "{\"$sort\": {\"cnt\": -1}}]");
+                "{\"$sort\": {\"cnt\": -1}}]", P("users"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -628,26 +649,26 @@ class DocTest {
         @Test
         void unsupportedStageThrows() {
             assertThrows(IllegalArgumentException.class,
-                () -> Utils.docAggregate(conn, "users", "[{\"$bucket\": {}}]"));
+                () -> Utils.docAggregate(conn, "users", "[{\"$bucket\": {}}]", P("users"), Collections.emptyMap()));
         }
 
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                () -> Utils.docAggregate(conn, "bad table", "[]"));
+                () -> Utils.docAggregate(conn, "bad table", "[]", P("bad table"), Collections.emptyMap()));
         }
 
         @Test
         void nullPipelineThrows() {
             assertThrows(IllegalArgumentException.class,
-                () -> Utils.docAggregate(conn, "users", null));
+                () -> Utils.docAggregate(conn, "users", null, P("users"), Collections.emptyMap()));
         }
 
         @Test
         void countAccumulator() throws SQLException {
             emptyResultSet("_id", "n");
             Utils.docAggregate(conn, "events",
-                "[{\"$group\": {\"_id\": \"$type\", \"n\": {\"$count\": {}}}}]");
+                "[{\"$group\": {\"_id\": \"$type\", \"n\": {\"$count\": {}}}}]", P("events"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -657,7 +678,7 @@ class DocTest {
         @Test
         void emptyPipeline() throws SQLException {
             emptyResultSet("_id", "data", "created_at", "updated_at");
-            Utils.docAggregate(conn, "users", "[]");
+            Utils.docAggregate(conn, "users", "[]", P("users"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -671,7 +692,7 @@ class DocTest {
             emptyResultSet("_id", "total");
             Utils.docAggregate(conn, "orders",
                 "[{\"$group\": {\"_id\": {\"region\": \"$region\", \"year\": \"$year\"}, " +
-                "\"total\": {\"$sum\": \"$amount\"}}}]");
+                "\"total\": {\"$sum\": \"$amount\"}}}]", P("orders"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -686,7 +707,7 @@ class DocTest {
             Utils.docAggregate(conn, "orders",
                 "[{\"$group\": {\"_id\": {\"status\": \"$status\", \"region\": \"$region\"}, " +
                 "\"cnt\": {\"$sum\": 1}}}, " +
-                "{\"$sort\": {\"cnt\": -1}}]");
+                "{\"$sort\": {\"cnt\": -1}}]", P("orders"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -700,7 +721,7 @@ class DocTest {
         void pushAccumulator() throws SQLException {
             emptyResultSet("_id", "names");
             Utils.docAggregate(conn, "users",
-                "[{\"$group\": {\"_id\": \"$role\", \"names\": {\"$push\": \"$name\"}}}]");
+                "[{\"$group\": {\"_id\": \"$role\", \"names\": {\"$push\": \"$name\"}}}]", P("users"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -712,7 +733,7 @@ class DocTest {
         void addToSetAccumulator() throws SQLException {
             emptyResultSet("_id", "cities");
             Utils.docAggregate(conn, "users",
-                "[{\"$group\": {\"_id\": \"$country\", \"cities\": {\"$addToSet\": \"$city\"}}}]");
+                "[{\"$group\": {\"_id\": \"$country\", \"cities\": {\"$addToSet\": \"$city\"}}}]", P("users"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -726,7 +747,7 @@ class DocTest {
             Utils.docAggregate(conn, "orders",
                 "[{\"$match\": {\"active\":true}}, " +
                 "{\"$group\": {\"_id\": {\"dept\": \"$dept\", \"role\": \"$role\"}, " +
-                "\"total\": {\"$sum\": \"$salary\"}}}]");
+                "\"total\": {\"$sum\": \"$salary\"}}}]", P("orders"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -741,7 +762,7 @@ class DocTest {
             emptyResultSet("_id", "items");
             Utils.docAggregate(conn, "orders",
                 "[{\"$group\": {\"_id\": {\"store\": \"$store\", \"day\": \"$day\"}, " +
-                "\"items\": {\"$push\": \"$product\"}}}]");
+                "\"items\": {\"$push\": \"$product\"}}}]", P("orders"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -754,7 +775,7 @@ class DocTest {
         void addToSetWithNullGroupId() throws SQLException {
             emptyResultSet("tags");
             Utils.docAggregate(conn, "posts",
-                "[{\"$group\": {\"_id\": null, \"tags\": {\"$addToSet\": \"$tag\"}}}]");
+                "[{\"$group\": {\"_id\": null, \"tags\": {\"$addToSet\": \"$tag\"}}}]", P("posts"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -769,7 +790,7 @@ class DocTest {
         void projectInclude() throws SQLException {
             emptyResultSet("name", "age");
             Utils.docAggregate(conn, "users",
-                "[{\"$project\": {\"name\": 1, \"age\": 1}}]");
+                "[{\"$project\": {\"name\": 1, \"age\": 1}}]", P("users"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -782,7 +803,7 @@ class DocTest {
         void projectExclude() throws SQLException {
             emptyResultSet("name");
             Utils.docAggregate(conn, "users",
-                "[{\"$project\": {\"name\": 1, \"_id\": 0}}]");
+                "[{\"$project\": {\"name\": 1, \"_id\": 0}}]", P("users"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -794,7 +815,7 @@ class DocTest {
         void projectRename() throws SQLException {
             emptyResultSet("fullName");
             Utils.docAggregate(conn, "users",
-                "[{\"$project\": {\"fullName\": \"$name\"}}]");
+                "[{\"$project\": {\"fullName\": \"$name\"}}]", P("users"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -805,7 +826,7 @@ class DocTest {
         void projectDotNotation() throws SQLException {
             emptyResultSet("city");
             Utils.docAggregate(conn, "users",
-                "[{\"$project\": {\"city\": \"$address.city\"}}]");
+                "[{\"$project\": {\"city\": \"$address.city\"}}]", P("users"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -818,7 +839,7 @@ class DocTest {
         void unwindString() throws SQLException {
             emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docAggregate(conn, "orders",
-                "[{\"$unwind\": \"$items\"}]");
+                "[{\"$unwind\": \"$items\"}]", P("orders"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -829,7 +850,7 @@ class DocTest {
         void unwindObject() throws SQLException {
             emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docAggregate(conn, "orders",
-                "[{\"$unwind\": {\"path\": \"$tags\"}}]");
+                "[{\"$unwind\": {\"path\": \"$tags\"}}]", P("orders"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -841,7 +862,7 @@ class DocTest {
             emptyResultSet("_id", "cnt");
             Utils.docAggregate(conn, "orders",
                 "[{\"$unwind\": \"$items\"}, " +
-                "{\"$group\": {\"_id\": \"$items\", \"cnt\": {\"$sum\": 1}}}]");
+                "{\"$group\": {\"_id\": \"$items\", \"cnt\": {\"$sum\": 1}}}]", P("orders"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -856,7 +877,7 @@ class DocTest {
             emptyResultSet("_id", "total");
             Utils.docAggregate(conn, "orders",
                 "[{\"$unwind\": \"$scores\"}, " +
-                "{\"$group\": {\"_id\": \"$category\", \"total\": {\"$sum\": \"$scores\"}}}]");
+                "{\"$group\": {\"_id\": \"$category\", \"total\": {\"$sum\": \"$scores\"}}}]", P("orders"), Collections.emptyMap());
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -873,7 +894,7 @@ class DocTest {
             emptyResultSet("_id", "data", "created_at", "updated_at", "items");
             Utils.docAggregate(conn, "orders",
                 "[{\"$lookup\": {\"from\": \"products\", \"localField\": \"productId\", " +
-                "\"foreignField\": \"pid\", \"as\": \"items\"}}]");
+                "\"foreignField\": \"pid\", \"as\": \"items\"}}]", P("orders"), L("products"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -889,7 +910,7 @@ class DocTest {
             Utils.docAggregate(conn, "orders",
                 "[{\"$match\": {\"status\": \"active\"}}, " +
                 "{\"$lookup\": {\"from\": \"inventory\", \"localField\": \"sku\", " +
-                "\"foreignField\": \"sku\", \"as\": \"details\"}}]");
+                "\"foreignField\": \"sku\", \"as\": \"details\"}}]", P("orders"), L("inventory"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -904,7 +925,7 @@ class DocTest {
         void lookupMissingFieldThrows() {
             assertThrows(IllegalArgumentException.class,
                 () -> Utils.docAggregate(conn, "orders",
-                    "[{\"$lookup\": {\"from\": \"products\", \"localField\": \"pid\"}}]"));
+                    "[{\"$lookup\": {\"from\": \"products\", \"localField\": \"pid\"}}]", P("orders"), Collections.emptyMap()));
         }
 
         @Test
@@ -913,7 +934,7 @@ class DocTest {
             Utils.docAggregate(conn, "orders",
                 "[{\"$lookup\": {\"from\": \"items\", \"localField\": \"itemId\", " +
                 "\"foreignField\": \"iid\", \"as\": \"matched\"}}, " +
-                "{\"$project\": {\"orderId\": \"$oid\", \"matched\": 1}}]");
+                "{\"$project\": {\"orderId\": \"$oid\", \"matched\": 1}}]", P("orders"), L("items"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -934,7 +955,7 @@ class DocTest {
         @Test
         void singleKey() throws SQLException {
             allowCreateStatement();
-            Utils.docCreateIndex(conn, "users", Collections.singletonList("name"));
+            Utils.docCreateIndex(conn, "users", Collections.singletonList("name"), P("users"));
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
             verify(stmt).execute(ddlCaptor.capture());
@@ -946,7 +967,7 @@ class DocTest {
         @Test
         void multipleKeys() throws SQLException {
             allowCreateStatement();
-            Utils.docCreateIndex(conn, "users", Arrays.asList("name", "age"));
+            Utils.docCreateIndex(conn, "users", Arrays.asList("name", "age"), P("users"));
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
             verify(stmt).execute(ddlCaptor.capture());
@@ -958,26 +979,26 @@ class DocTest {
         @Test
         void emptyKeysThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCreateIndex(conn, "users", Collections.emptyList()));
+                    () -> Utils.docCreateIndex(conn, "users", Collections.emptyList(), P("users")));
         }
 
         @Test
         void nullKeysThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCreateIndex(conn, "users", null));
+                    () -> Utils.docCreateIndex(conn, "users", null, P("users")));
         }
 
         @Test
         void invalidKeyThrows() throws SQLException {
             allowCreateStatement();
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCreateIndex(conn, "users", Collections.singletonList("bad key")));
+                    () -> Utils.docCreateIndex(conn, "users", Collections.singletonList("bad key"), P("users")));
         }
 
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCreateIndex(conn, "bad table", Collections.singletonList("name")));
+                    () -> Utils.docCreateIndex(conn, "bad table", Collections.singletonList("name"), P("bad table")));
         }
     }
 
@@ -1217,7 +1238,7 @@ class DocTest {
         @Test
         void docFindWithGt() throws SQLException {
             emptyResultSet("_id", "data", "created_at", "updated_at");
-            Utils.docFind(conn, "users", "{\"age\": {\"$gt\": 21}}", null, null, null);
+            Utils.docFind(conn, "users", "{\"age\": {\"$gt\": 21}}", null, null, null, P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1232,7 +1253,7 @@ class DocTest {
             when(rs.next()).thenReturn(true);
             when(rs.getLong(1)).thenReturn(5L);
 
-            long count = Utils.docCount(conn, "users", "{\"score\": {\"$gte\": 90}}");
+            long count = Utils.docCount(conn, "users", "{\"score\": {\"$gte\": 90}}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1244,7 +1265,7 @@ class DocTest {
         @Test
         void docDeleteWithIn() throws SQLException {
             allowUpdate(3);
-            int count = Utils.docDelete(conn, "users", "{\"status\": {\"$in\": [\"banned\", \"spam\"]}}");
+            int count = Utils.docDelete(conn, "users", "{\"status\": {\"$in\": [\"banned\", \"spam\"]}}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1258,7 +1279,7 @@ class DocTest {
         void docUpdateWithLt() throws SQLException {
             allowUpdate(2);
             int count = Utils.docUpdate(conn, "users",
-                "{\"score\": {\"$lt\": 50}}", "{\"flagged\":true}");
+                "{\"score\": {\"$lt\": 50}}", "{\"flagged\":true}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1272,7 +1293,7 @@ class DocTest {
         @Test
         void docDeleteOneWithRegex() throws SQLException {
             allowUpdate(1);
-            int count = Utils.docDeleteOne(conn, "users", "{\"name\": {\"$regex\": \"^test\"}}");
+            int count = Utils.docDeleteOne(conn, "users", "{\"name\": {\"$regex\": \"^test\"}}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1297,7 +1318,7 @@ class DocTest {
             when(conn.unwrap(PGConnection.class)).thenReturn(pgConn);
             when(pgConn.getNotifications(5000)).thenReturn(null);
 
-            Thread t = Utils.docWatch(conn, "events", (ch, payload) -> {});
+            Thread t = Utils.docWatch(conn, "events", (ch, payload) -> {}, P("events"));
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
             // CREATE FN + CREATE OR REPLACE TRIGGER + LISTEN = 3 DDLs.
@@ -1327,7 +1348,7 @@ class DocTest {
             when(conn.unwrap(PGConnection.class)).thenReturn(pgConn);
             when(pgConn.getNotifications(5000)).thenReturn(null);
 
-            Thread t = Utils.docWatch(conn, "orders", (ch, payload) -> {});
+            Thread t = Utils.docWatch(conn, "orders", (ch, payload) -> {}, P("orders"));
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
             verify(stmt, atLeast(3)).execute(ddlCaptor.capture());
@@ -1347,7 +1368,7 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docWatch(conn, "bad table", (ch, p) -> {}));
+                    () -> Utils.docWatch(conn, "bad table", (ch, p) -> {}, P("bad table")));
         }
     }
 
@@ -1362,7 +1383,7 @@ class DocTest {
         void dropsTriggersAndUnlistens() throws SQLException {
             when(conn.createStatement()).thenReturn(stmt);
 
-            Utils.docUnwatch(conn, "events");
+            Utils.docUnwatch(conn, "events", P("events"));
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
             verify(stmt, times(3)).execute(ddlCaptor.capture());
@@ -1376,7 +1397,7 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docUnwatch(conn, "bad table"));
+                    () -> Utils.docUnwatch(conn, "bad table", P("bad table")));
         }
     }
 
@@ -1391,7 +1412,7 @@ class DocTest {
         void createsIndexTriggerAndFunction() throws SQLException {
             when(conn.createStatement()).thenReturn(stmt);
 
-            Utils.docCreateTtlIndex(conn, "sessions", 3600);
+            Utils.docCreateTtlIndex(conn, "sessions", 3600, P("sessions"));
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
             // CREATE INDEX + CREATE FN + CREATE OR REPLACE TRIGGER = 3 DDLs.
@@ -1416,7 +1437,7 @@ class DocTest {
         void customField() throws SQLException {
             when(conn.createStatement()).thenReturn(stmt);
 
-            Utils.docCreateTtlIndex(conn, "logs", 7200, "updated_at");
+            Utils.docCreateTtlIndex(conn, "logs", 7200, "updated_at", P("logs"));
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
             verify(stmt, atLeast(1)).execute(ddlCaptor.capture());
@@ -1430,19 +1451,19 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCreateTtlIndex(conn, "bad table", 3600));
+                    () -> Utils.docCreateTtlIndex(conn, "bad table", 3600, P("bad table")));
         }
 
         @Test
         void zeroSecondsThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCreateTtlIndex(conn, "logs", 0));
+                    () -> Utils.docCreateTtlIndex(conn, "logs", 0, P("logs")));
         }
 
         @Test
         void negativeSecondsThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCreateTtlIndex(conn, "logs", -100));
+                    () -> Utils.docCreateTtlIndex(conn, "logs", -100, P("logs")));
         }
     }
 
@@ -1457,7 +1478,7 @@ class DocTest {
         void dropsTriggerFunctionAndIndex() throws SQLException {
             when(conn.createStatement()).thenReturn(stmt);
 
-            Utils.docRemoveTtlIndex(conn, "sessions");
+            Utils.docRemoveTtlIndex(conn, "sessions", P("sessions"));
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
             verify(stmt, times(3)).execute(ddlCaptor.capture());
@@ -1471,55 +1492,22 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docRemoveTtlIndex(conn, "1bad"));
+                    () -> Utils.docRemoveTtlIndex(conn, "1bad", P("1bad")));
         }
     }
 
 
     // -------------------------------------------------------------------------
-    // docCreateCollection
+    // docCreateCollection — REMOVED (Phase 4 schema-to-core).
+    //
+    // The proxy now owns doc-store DDL. Collection creation is materialized
+    // by gl.documents.<verb>(...) on first use (or eagerly via
+    // gl.documents.createCollection(name) which is just `patterns(name)`
+    // with no SQL emitted by the wrapper). The previous wrapper-side
+    // CREATE TABLE assertions belong to the proxy's DDL test suite, not
+    // here. End-to-end behavior with the real proxy is exercised in the
+    // integration suite (GOLDLAPEL_INTEGRATION=1).
     // -------------------------------------------------------------------------
-
-    @Nested class DocCreateCollectionTest {
-
-        @Test
-        void createsRegularTableByDefault() throws SQLException {
-            when(conn.createStatement()).thenReturn(stmt);
-
-            Utils.docCreateCollection(conn, "users");
-
-            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
-            verify(stmt).execute(ddlCaptor.capture());
-            String sql = ddlCaptor.getValue();
-
-            assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS users"));
-            assertFalse(sql.contains("UNLOGGED"));
-            assertTrue(sql.contains("UUID PRIMARY KEY DEFAULT gen_random_uuid()"));
-            assertTrue(sql.contains("data JSONB NOT NULL"));
-            assertTrue(sql.contains("created_at TIMESTAMPTZ"));
-            assertTrue(sql.contains("updated_at TIMESTAMPTZ"));
-        }
-
-        @Test
-        void createsUnloggedTable() throws SQLException {
-            when(conn.createStatement()).thenReturn(stmt);
-
-            Utils.docCreateCollection(conn, "ephemeral", true);
-
-            ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
-            verify(stmt).execute(ddlCaptor.capture());
-            String sql = ddlCaptor.getValue();
-
-            assertTrue(sql.contains("CREATE UNLOGGED TABLE IF NOT EXISTS ephemeral"));
-            assertFalse(sql.startsWith("CREATE TABLE"));
-        }
-
-        @Test
-        void invalidCollectionThrows() {
-            assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCreateCollection(conn, "bad table"));
-        }
-    }
 
 
     // -------------------------------------------------------------------------
@@ -1529,19 +1517,21 @@ class DocTest {
     @Nested class DocCreateCappedTest {
 
         @Test
-        void ensuresCollectionAndCreatesTrigger() throws SQLException {
+        void createsTriggerOnCanonicalTable() throws SQLException {
             when(conn.createStatement()).thenReturn(stmt);
 
-            Utils.docCreateCapped(conn, "logs", 1000);
+            Utils.docCreateCapped(conn, "logs", 1000, P("logs"));
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
-            // ensureCollection + CREATE FN + CREATE OR REPLACE TRIGGER = 3 DDLs.
-            // Atomic CREATE OR REPLACE TRIGGER (PG14+) replaces the old
-            // DROP + CREATE pair — matches the Go wrapper.
-            verify(stmt, atLeast(3)).execute(ddlCaptor.capture());
+            // CREATE FN + CREATE OR REPLACE TRIGGER = 2 DDLs. The proxy now
+            // owns table creation (Phase 4 schema-to-core), so the wrapper
+            // no longer emits CREATE TABLE here. Atomic CREATE OR REPLACE
+            // TRIGGER (PG14+) replaces the old DROP + CREATE pair.
+            verify(stmt, atLeast(2)).execute(ddlCaptor.capture());
             List<String> ddls = ddlCaptor.getAllValues();
 
-            assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE TABLE IF NOT EXISTS logs")));
+            assertTrue(ddls.stream().noneMatch(s -> s.contains("CREATE TABLE")),
+                "wrapper must not emit CREATE TABLE — proxy owns doc-store DDL");
             assertTrue(ddls.stream().anyMatch(s -> s.contains("CREATE OR REPLACE FUNCTION logs_cap_fn()")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("- 1000, 0)")));
             assertTrue(ddls.stream().anyMatch(s -> s.contains("ORDER BY created_at ASC, _id ASC")));
@@ -1557,19 +1547,19 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCreateCapped(conn, "bad table", 100));
+                    () -> Utils.docCreateCapped(conn, "bad table", 100, P("bad table")));
         }
 
         @Test
         void zeroMaxDocsThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCreateCapped(conn, "logs", 0));
+                    () -> Utils.docCreateCapped(conn, "logs", 0, P("logs")));
         }
 
         @Test
         void negativeMaxDocsThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docCreateCapped(conn, "logs", -5));
+                    () -> Utils.docCreateCapped(conn, "logs", -5, P("logs")));
         }
     }
 
@@ -1584,7 +1574,7 @@ class DocTest {
         void dropsTriggerAndFunction() throws SQLException {
             when(conn.createStatement()).thenReturn(stmt);
 
-            Utils.docRemoveCap(conn, "logs");
+            Utils.docRemoveCap(conn, "logs", P("logs"));
 
             ArgumentCaptor<String> ddlCaptor = ArgumentCaptor.forClass(String.class);
             verify(stmt, times(2)).execute(ddlCaptor.capture());
@@ -1597,7 +1587,7 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                    () -> Utils.docRemoveCap(conn, "1bad"));
+                    () -> Utils.docRemoveCap(conn, "1bad", P("1bad")));
         }
     }
 
@@ -1670,7 +1660,7 @@ class DocTest {
             emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docFind(conn, "users",
                 "{\"$or\": [{\"role\": \"admin\"}, {\"role\": \"editor\"}]}",
-                null, null, null);
+                null, null, null, P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1685,7 +1675,7 @@ class DocTest {
             when(rs.getLong(1)).thenReturn(10L);
 
             long count = Utils.docCount(conn, "users",
-                "{\"$not\": {\"banned\": true}}");
+                "{\"$not\": {\"banned\": true}}", P("users"));
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
             assertTrue(sql.contains("WHERE NOT (data @> ?::jsonb)"));
@@ -1863,7 +1853,7 @@ class DocTest {
         void docUpdateWithSet() throws SQLException {
             allowUpdate(2);
             int count = Utils.docUpdate(conn, "users",
-                "{\"active\": true}", "{\"$set\": {\"role\": \"admin\"}}");
+                "{\"active\": true}", "{\"$set\": {\"role\": \"admin\"}}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1878,7 +1868,7 @@ class DocTest {
         void docUpdateOneWithInc() throws SQLException {
             allowUpdate(1);
             int count = Utils.docUpdateOne(conn, "users",
-                "{\"name\": \"alice\"}", "{\"$inc\": {\"score\": 10}}");
+                "{\"name\": \"alice\"}", "{\"$inc\": {\"score\": 10}}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1894,7 +1884,7 @@ class DocTest {
         void docUpdateWithPush() throws SQLException {
             allowUpdate(1);
             Utils.docUpdate(conn, "users", "{\"name\": \"bob\"}",
-                "{\"$push\": {\"tags\": \"vip\"}}");
+                "{\"$push\": {\"tags\": \"vip\"}}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1916,7 +1906,7 @@ class DocTest {
             when(rs.getObject(2)).thenReturn("{\"name\":\"alice\",\"score\":100}");
 
             Map<String, Object> result = Utils.docFindOneAndUpdate(conn, "users",
-                "{\"name\":\"alice\"}", "{\"$inc\": {\"score\": 10}}");
+                "{\"name\":\"alice\"}", "{\"$inc\": {\"score\": 10}}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1935,7 +1925,7 @@ class DocTest {
             when(rs.getObject(1)).thenReturn("uuid-1");
 
             Utils.docFindOneAndUpdate(conn, "users",
-                "{\"name\":\"alice\"}", "{\"score\": 99}");
+                "{\"name\":\"alice\"}", "{\"score\": 99}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1950,14 +1940,14 @@ class DocTest {
             when(rs.next()).thenReturn(false);
 
             Map<String, Object> result = Utils.docFindOneAndUpdate(conn, "users",
-                "{\"name\":\"nobody\"}", "{\"x\": 1}");
+                "{\"name\":\"nobody\"}", "{\"x\": 1}", P("users"));
             assertNull(result);
         }
 
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                () -> Utils.docFindOneAndUpdate(conn, "bad table", "{}", "{}"));
+                () -> Utils.docFindOneAndUpdate(conn, "bad table", "{}", "{}", P("bad table")));
         }
     }
 
@@ -1975,7 +1965,7 @@ class DocTest {
             when(rs.getObject(2)).thenReturn("{\"name\":\"bob\"}");
 
             Map<String, Object> result = Utils.docFindOneAndDelete(conn, "users",
-                "{\"name\":\"bob\"}");
+                "{\"name\":\"bob\"}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -1994,7 +1984,7 @@ class DocTest {
             when(rs.next()).thenReturn(false);
 
             Map<String, Object> result = Utils.docFindOneAndDelete(conn, "users",
-                "{\"name\":\"nobody\"}");
+                "{\"name\":\"nobody\"}", P("users"));
             assertNull(result);
         }
 
@@ -2003,7 +1993,7 @@ class DocTest {
             singleRowResultSet("_id", "data", "created_at", "updated_at");
             when(rs.getObject(1)).thenReturn("uuid-1");
 
-            Utils.docFindOneAndDelete(conn, "users", null);
+            Utils.docFindOneAndDelete(conn, "users", null, P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -2014,7 +2004,7 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                () -> Utils.docFindOneAndDelete(conn, "1bad", "{}"));
+                () -> Utils.docFindOneAndDelete(conn, "1bad", "{}", P("1bad")));
         }
     }
 
@@ -2033,7 +2023,7 @@ class DocTest {
             when(rs.getString(1)).thenReturn("admin", "user");
 
             List<String> result = Utils.docDistinct(conn, "users", "role",
-                "{\"active\": true}");
+                "{\"active\": true}", P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -2053,7 +2043,7 @@ class DocTest {
             when(rs.next()).thenReturn(true, false);
             when(rs.getString(1)).thenReturn("red");
 
-            List<String> result = Utils.docDistinct(conn, "items", "color", null);
+            List<String> result = Utils.docDistinct(conn, "items", "color", null, P("items"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -2070,7 +2060,7 @@ class DocTest {
             when(ps.executeQuery()).thenReturn(rs);
             when(rs.next()).thenReturn(false);
 
-            Utils.docDistinct(conn, "users", "address.city", null);
+            Utils.docDistinct(conn, "users", "address.city", null, P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -2084,14 +2074,14 @@ class DocTest {
             when(ps.executeQuery()).thenReturn(rs);
             when(rs.next()).thenReturn(false);
 
-            List<String> result = Utils.docDistinct(conn, "users", "name", null);
+            List<String> result = Utils.docDistinct(conn, "users", "name", null, P("users"));
             assertTrue(result.isEmpty());
         }
 
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                () -> Utils.docDistinct(conn, "bad table", "name", null));
+                () -> Utils.docDistinct(conn, "bad table", "name", null, P("bad table")));
         }
     }
 
@@ -2199,7 +2189,7 @@ class DocTest {
             emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docFind(conn, "items",
                 "{\"scores\": {\"$elemMatch\": {\"$gt\": 80, \"$lt\": 90}}}",
-                null, null, null);
+                null, null, null, P("items"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -2298,7 +2288,7 @@ class DocTest {
             emptyResultSet("_id", "data", "created_at", "updated_at");
             Utils.docFind(conn, "articles",
                 "{\"$text\": {\"$search\": \"postgres\"}}",
-                null, null, null);
+                null, null, null, P("articles"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -2313,7 +2303,7 @@ class DocTest {
             when(rs.getLong(1)).thenReturn(3L);
 
             long count = Utils.docCount(conn, "articles",
-                "{\"body\": {\"$text\": {\"$search\": \"mongodb\"}}}");
+                "{\"body\": {\"$text\": {\"$search\": \"mongodb\"}}}", P("articles"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -2343,7 +2333,7 @@ class DocTest {
             when(rs.getObject(2)).thenReturn("{\"a\":1}", "{\"b\":2}");
 
             Iterator<Map<String, Object>> it = Utils.docFindCursor(
-                conn, "users", null, null, null, null, 100);
+                conn, "users", null, null, null, null, 100, P("users"));
 
             assertTrue(it.hasNext());
             Map<String, Object> row1 = it.next();
@@ -2367,7 +2357,7 @@ class DocTest {
             when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
 
-            Utils.docFindCursor(conn, "items", null, null, null, null, 50);
+            Utils.docFindCursor(conn, "items", null, null, null, null, 50, P("items"));
 
             verify(ps).setFetchSize(50);
         }
@@ -2384,7 +2374,7 @@ class DocTest {
             when(meta.getColumnLabel(2)).thenReturn("data");
 
             Utils.docFindCursor(conn, "users",
-                "{\"active\": true}", "{\"name\": 1}", 10, 5, 100);
+                "{\"active\": true}", "{\"name\": 1}", 10, 5, 100, P("users"));
 
             verify(conn).prepareStatement(sqlCaptor.capture());
             String sql = sqlCaptor.getValue();
@@ -2405,7 +2395,7 @@ class DocTest {
             when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
 
-            Utils.docFindCursor(conn, "items", null, null, null, null, 100);
+            Utils.docFindCursor(conn, "items", null, null, null, null, 100, P("items"));
 
             verify(conn).setAutoCommit(false);
         }
@@ -2424,7 +2414,7 @@ class DocTest {
             when(rs.getObject(2)).thenReturn("{\"a\":1}");
 
             Iterator<Map<String, Object>> it = Utils.docFindCursor(
-                conn, "items", null, null, null, null, 100);
+                conn, "items", null, null, null, null, 100, P("items"));
 
             it.next(); // consume the single row
             assertFalse(it.hasNext());
@@ -2444,7 +2434,7 @@ class DocTest {
             when(meta.getColumnLabel(2)).thenReturn("data");
 
             Iterator<Map<String, Object>> it = Utils.docFindCursor(
-                conn, "items", null, null, null, null, 100);
+                conn, "items", null, null, null, null, 100, P("items"));
 
             assertFalse(it.hasNext());
         }
@@ -2461,7 +2451,7 @@ class DocTest {
             when(meta.getColumnLabel(2)).thenReturn("data");
 
             Iterator<Map<String, Object>> it = Utils.docFindCursor(
-                conn, "items", null, null, null, null, 100);
+                conn, "items", null, null, null, null, 100, P("items"));
 
             assertThrows(NoSuchElementException.class, it::next);
         }
@@ -2469,7 +2459,7 @@ class DocTest {
         @Test
         void invalidCollectionThrows() {
             assertThrows(IllegalArgumentException.class,
-                () -> Utils.docFindCursor(conn, "bad table", null, null, null, null, 100));
+                () -> Utils.docFindCursor(conn, "bad table", null, null, null, null, 100, P("bad table")));
         }
 
         @Test
@@ -2483,7 +2473,7 @@ class DocTest {
             when(meta.getColumnLabel(1)).thenReturn("_id");
             when(meta.getColumnLabel(2)).thenReturn("data");
 
-            Utils.docFindCursor(conn, "items", null, null, null, null, 100);
+            Utils.docFindCursor(conn, "items", null, null, null, null, 100, P("items"));
 
             // should not toggle autocommit at all
             verify(conn, never()).setAutoCommit(anyBoolean());
@@ -2545,7 +2535,7 @@ class DocTest {
             emptyResultSet("_id", "data", "created_at", "updated_at");
             String sortJson = "{\"" + longKey() + "\": 1}";
             assertDoesNotThrow(() ->
-                    Utils.docFind(conn, "users", null, sortJson, null, null));
+                    Utils.docFind(conn, "users", null, sortJson, null, null, P("users")));
         }
 
         @Test
@@ -2555,7 +2545,7 @@ class DocTest {
             allowCreateStatement();
             assertDoesNotThrow(() ->
                     Utils.docCreateIndex(conn, "users",
-                            Collections.singletonList(longKey())));
+                            Collections.singletonList(longKey()), P("users")));
         }
     }
 }
