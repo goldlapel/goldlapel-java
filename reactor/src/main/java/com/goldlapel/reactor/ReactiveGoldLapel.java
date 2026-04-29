@@ -82,12 +82,27 @@ public final class ReactiveGoldLapel implements AutoCloseable {
     public final ReactiveDocumentsApi documents;
     /** Reactive streams sub-API — accessible as {@code gl.streams}. */
     public final ReactiveStreamsApi streams;
+    /** Reactive counters sub-API — Phase 5 schema-to-core. */
+    public final ReactiveCountersApi counters;
+    /** Reactive sorted-sets sub-API — Phase 5 schema-to-core. */
+    public final ReactiveZsetsApi zsets;
+    /** Reactive hashes sub-API — Phase 5 schema-to-core. */
+    public final ReactiveHashesApi hashes;
+    /** Reactive queues sub-API (at-least-once with visibility timeout). */
+    public final ReactiveQueuesApi queues;
+    /** Reactive geo sub-API (PostGIS GEOGRAPHY-native). */
+    public final ReactiveGeosApi geos;
 
     private ReactiveGoldLapel(GoldLapel sync, ConnectionFactory r2dbcFactory) {
         this.sync = sync;
         this.r2dbcFactory = r2dbcFactory;
         this.documents = new ReactiveDocumentsApi(this);
         this.streams = new ReactiveStreamsApi(this);
+        this.counters = new ReactiveCountersApi(this);
+        this.zsets = new ReactiveZsetsApi(this);
+        this.hashes = new ReactiveHashesApi(this);
+        this.queues = new ReactiveQueuesApi(this);
+        this.geos = new ReactiveGeosApi(this);
     }
 
     // ── Factory ───────────────────────────────────────────────
@@ -461,138 +476,10 @@ public final class ReactiveGoldLapel implements AutoCloseable {
         return call(conn, c -> Utils.subscribe(c, channel, callback, blocking));
     }
 
-    public Mono<Void> enqueue(String queueTable, String payloadJson) {
-        return run(null, c -> Utils.enqueue(c, queueTable, payloadJson));
-    }
-    public Mono<Void> enqueue(String queueTable, String payloadJson, Connection conn) {
-        return run(conn, c -> Utils.enqueue(c, queueTable, payloadJson));
-    }
-
-    public Mono<String> dequeue(String queueTable) {
-        return call(null, c -> Utils.dequeue(c, queueTable));
-    }
-    public Mono<String> dequeue(String queueTable, Connection conn) {
-        return call(conn, c -> Utils.dequeue(c, queueTable));
-    }
-
-    // ── Counters ──────────────────────────────────────────────
-
-    public Mono<Long> incr(String table, String key, long amount) {
-        return call(null, c -> Utils.incr(c, table, key, amount));
-    }
-    public Mono<Long> incr(String table, String key, long amount, Connection conn) {
-        return call(conn, c -> Utils.incr(c, table, key, amount));
-    }
-
-    public Mono<Long> getCounter(String table, String key) {
-        return call(null, c -> Utils.getCounter(c, table, key));
-    }
-    public Mono<Long> getCounter(String table, String key, Connection conn) {
-        return call(conn, c -> Utils.getCounter(c, table, key));
-    }
-
-    // ── Hashes ────────────────────────────────────────────────
-
-    public Mono<Void> hset(String table, String key, String field, String valueJson) {
-        return run(null, c -> Utils.hset(c, table, key, field, valueJson));
-    }
-    public Mono<Void> hset(String table, String key, String field, String valueJson, Connection conn) {
-        return run(conn, c -> Utils.hset(c, table, key, field, valueJson));
-    }
-
-    public Mono<String> hget(String table, String key, String field) {
-        return call(null, c -> Utils.hget(c, table, key, field));
-    }
-    public Mono<String> hget(String table, String key, String field, Connection conn) {
-        return call(conn, c -> Utils.hget(c, table, key, field));
-    }
-
-    public Mono<String> hgetall(String table, String key) {
-        return call(null, c -> Utils.hgetall(c, table, key));
-    }
-    public Mono<String> hgetall(String table, String key, Connection conn) {
-        return call(conn, c -> Utils.hgetall(c, table, key));
-    }
-
-    public Mono<Boolean> hdel(String table, String key, String field) {
-        return call(null, c -> Utils.hdel(c, table, key, field));
-    }
-    public Mono<Boolean> hdel(String table, String key, String field, Connection conn) {
-        return call(conn, c -> Utils.hdel(c, table, key, field));
-    }
-
-    // ── Sorted sets ───────────────────────────────────────────
-
-    public Mono<Void> zadd(String table, String member, double score) {
-        return run(null, c -> Utils.zadd(c, table, member, score));
-    }
-    public Mono<Void> zadd(String table, String member, double score, Connection conn) {
-        return run(conn, c -> Utils.zadd(c, table, member, score));
-    }
-
-    public Mono<Double> zincrby(String table, String member, double amount) {
-        return call(null, c -> Utils.zincrby(c, table, member, amount));
-    }
-    public Mono<Double> zincrby(String table, String member, double amount, Connection conn) {
-        return call(conn, c -> Utils.zincrby(c, table, member, amount));
-    }
-
-    public Flux<Map.Entry<String, Double>> zrange(String table, int start, int stop, boolean desc) {
-        return flux(null, c -> Utils.zrange(c, table, start, stop, desc));
-    }
-    public Flux<Map.Entry<String, Double>> zrange(String table, int start, int stop, boolean desc, Connection conn) {
-        return flux(conn, c -> Utils.zrange(c, table, start, stop, desc));
-    }
-
-    public Mono<Long> zrank(String table, String member, boolean desc) {
-        return call(null, c -> Utils.zrank(c, table, member, desc));
-    }
-    public Mono<Long> zrank(String table, String member, boolean desc, Connection conn) {
-        return call(conn, c -> Utils.zrank(c, table, member, desc));
-    }
-
-    public Mono<Double> zscore(String table, String member) {
-        return call(null, c -> Utils.zscore(c, table, member));
-    }
-    public Mono<Double> zscore(String table, String member, Connection conn) {
-        return call(conn, c -> Utils.zscore(c, table, member));
-    }
-
-    public Mono<Boolean> zrem(String table, String member) {
-        return call(null, c -> Utils.zrem(c, table, member));
-    }
-    public Mono<Boolean> zrem(String table, String member, Connection conn) {
-        return call(conn, c -> Utils.zrem(c, table, member));
-    }
-
-    // ── Geo ───────────────────────────────────────────────────
-
-    public Flux<Map<String, Object>> georadius(String table, String geomColumn, double lon,
-            double lat, double radiusMeters, int limit) {
-        return flux(null, c -> Utils.georadius(c, table, geomColumn, lon, lat, radiusMeters, limit));
-    }
-    public Flux<Map<String, Object>> georadius(String table, String geomColumn, double lon,
-            double lat, double radiusMeters, int limit, Connection conn) {
-        return flux(conn, c -> Utils.georadius(c, table, geomColumn, lon, lat, radiusMeters, limit));
-    }
-
-    public Mono<Void> geoadd(String table, String nameColumn, String geomColumn, String name,
-            double lon, double lat) {
-        return run(null, c -> Utils.geoadd(c, table, nameColumn, geomColumn, name, lon, lat));
-    }
-    public Mono<Void> geoadd(String table, String nameColumn, String geomColumn, String name,
-            double lon, double lat, Connection conn) {
-        return run(conn, c -> Utils.geoadd(c, table, nameColumn, geomColumn, name, lon, lat));
-    }
-
-    public Mono<Double> geodist(String table, String geomColumn, String nameColumn,
-            String nameA, String nameB) {
-        return call(null, c -> Utils.geodist(c, table, geomColumn, nameColumn, nameA, nameB));
-    }
-    public Mono<Double> geodist(String table, String geomColumn, String nameColumn,
-            String nameA, String nameB, Connection conn) {
-        return call(conn, c -> Utils.geodist(c, table, geomColumn, nameColumn, nameA, nameB));
-    }
+    // Phase 5 Redis-compat families: gl.counters / gl.zsets / gl.hashes /
+    // gl.queues / gl.geos. The legacy flat methods (incr, hset, zadd,
+    // enqueue/dequeue, geoadd, …) are gone — see the per-family Reactive*Api
+    // classes.
 
     // ── Misc ──────────────────────────────────────────────────
 
