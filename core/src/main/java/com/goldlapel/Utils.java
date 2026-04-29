@@ -727,7 +727,10 @@ public class Utils {
     public static java.sql.Timestamp queueExtend(Connection conn, String name, long messageId,
             long additionalMs, Map<String, String> patterns) throws SQLException {
         // Returns the new visible_at, or null if the id wasn't a claimed msg.
-        // Bind order: $1=id, $2=additional_ms (matches the proxy's pattern).
+        // Proxy contract: $1=id, $2=additional_ms in source-text order
+        // (proxy uses a CTE so $1+$2 appear textually before downstream
+        // refs). JDBC binds `?` by source-position; $N→? translation
+        // preserves the source order, so this mirrors the contract.
         validateIdentifier(name);
         String sql = requirePattern(patterns, "extend", "queueExtend");
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -931,8 +934,9 @@ public class Utils {
      *
      * <p>Proxy contract: {@code $1} and {@code $2} are both the anchor
      * member name (one for the join, one for the self-exclusion);
-     * {@code $3=radius_m, $4=limit}. Bind order is
-     * {@code (member, member, radius_m, limit)}.
+     * {@code $3=radius_m, $4=limit}. Proxy emits the WHERE clauses in
+     * source-text $N order, so JDBC's `?` source-position binding
+     * matches the $N indices: {@code (member, member, radius_m, limit)}.
      */
     public static List<Map<String, Object>> geoRadiusByMember(Connection conn, String name,
             String member, double radius, String unit, int limit,

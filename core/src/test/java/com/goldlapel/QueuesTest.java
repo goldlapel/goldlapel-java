@@ -62,9 +62,11 @@ class QueuesTest {
         p.put("ack", "DELETE FROM " + main + " WHERE id = $1");
         p.put("nack", "UPDATE " + main + " SET status = 'ready', visible_at = NOW() "
             + "WHERE id = $1 AND status = 'claimed' RETURNING id");
-        p.put("extend", "UPDATE " + main
-            + " SET visible_at = visible_at + INTERVAL '1 millisecond' * $2 "
-            + "WHERE id = $1 AND status = 'claimed' RETURNING visible_at");
+        p.put("extend", "WITH target AS (SELECT $1::bigint AS id, "
+            + "$2::bigint AS additional_ms) UPDATE " + main + " m "
+            + "SET visible_at = m.visible_at + INTERVAL '1 millisecond' * target.additional_ms "
+            + "FROM target WHERE m.id = target.id AND m.status = 'claimed' "
+            + "RETURNING m.visible_at");
         p.put("peek", "SELECT id, payload, visible_at, status, created_at FROM "
             + main + " WHERE status = 'ready' AND visible_at <= NOW() "
             + "ORDER BY visible_at, id LIMIT 1");

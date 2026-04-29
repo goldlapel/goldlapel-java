@@ -86,8 +86,9 @@ class GeosTest {
             + "ST_Y(b.location::geometry) AS lat, "
             + "ST_Distance(b.location, a.location) AS distance_m "
             + "FROM " + main + " a, " + main + " b "
-            + "WHERE a.member = $1 AND ST_DWithin(b.location, a.location, $3) "
-            + "AND b.member <> $2 ORDER BY distance_m LIMIT $4");
+            + "WHERE a.member = $1 AND b.member <> $2 "
+            + "AND ST_DWithin(b.location, a.location, $3) "
+            + "ORDER BY distance_m LIMIT $4");
         p.put("geo_remove", "DELETE FROM " + main + " WHERE member = $1");
         p.put("geo_count", "SELECT COUNT(*) FROM " + main);
         return p;
