@@ -46,7 +46,12 @@ public final class Ddl {
 
     private static final Map<String, String> SUPPORTED_VERSIONS = Map.of(
         "stream", "v1",
-        "doc_store", "v1"
+        "doc_store", "v1",
+        "counter", "v1",
+        "zset", "v1",
+        "hash", "v1",
+        "queue", "v1",
+        "geo", "v1"
     );
 
     /** Resolve the dashboard token from env or the on-disk file. */

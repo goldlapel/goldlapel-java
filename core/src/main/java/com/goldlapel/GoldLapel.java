@@ -115,18 +115,33 @@ public class GoldLapel implements AutoCloseable {
     private String proxyUrl;
     private Connection internalConn;
 
-    // Nested namespaces — see DocumentsApi and StreamsApi. These are the
-    // canonical schema-to-core sub-API instances. Each holds a back-reference
-    // to this client for shared state (license, dashboard token, http
-    // session, conn, DDL pattern cache). Other namespaces (search, cache,
-    // queues, counters, hashes, zsets, geo, …) stay flat for now; they
-    // migrate to nested form one-at-a-time as their own schema-to-core phase
-    // fires. Final fields (Option A from cross-wrapper consensus): direct
+    // Nested namespaces — canonical schema-to-core sub-API instances. Each
+    // holds a back-reference to this client for shared state (license,
+    // dashboard token, http session, conn, DDL pattern cache).
+    //
+    // As of Phase 5, the Redis-compat helper families (counter / zset /
+    // hash / queue / geo) are nested too, alongside streams (Phase 1+2)
+    // and documents (Phase 4). Search / pubsub / percolator stay flat —
+    // they'll migrate when their own schema-to-core phase fires.
+    //
+    // Final fields (Option A from cross-wrapper consensus): direct
     // access, no method-call indirection.
     /** Document store sub-API — accessible as {@code gl.documents.<verb>(...)}. */
     public final DocumentsApi documents;
     /** Streams sub-API — accessible as {@code gl.streams.<verb>(...)}. */
     public final StreamsApi streams;
+    /** Counters sub-API — accessible as {@code gl.counters.<verb>(...)}. */
+    public final CountersApi counters;
+    /** Sorted-sets sub-API — accessible as {@code gl.zsets.<verb>(...)}. */
+    public final ZsetsApi zsets;
+    /** Hashes sub-API — accessible as {@code gl.hashes.<verb>(...)}. */
+    public final HashesApi hashes;
+    /** Queues sub-API (at-least-once with visibility timeout) — accessible
+     *  as {@code gl.queues.<verb>(...)}. */
+    public final QueuesApi queues;
+    /** Geo sub-API (PostGIS GEOGRAPHY-native) — accessible as
+     *  {@code gl.geos.<verb>(...)}. */
+    public final GeosApi geos;
     // Dashboard token — provisioned per-session on startProxy. Exposed to the
     // DDL client via dashboardToken(). Non-final because we clear it on stop().
     private volatile String dashboardToken;
@@ -184,11 +199,16 @@ public class GoldLapel implements AutoCloseable {
         this.proxyUrl = null;
 
         // Nested namespaces. Constructed last so they capture the fully
-        // initialized parent — DocumentsApi/StreamsApi only ever read from
-        // the parent at call time, so even if other fields shifted later
-        // they would observe the latest values via the back-reference.
+        // initialized parent — sub-APIs only ever read from the parent at
+        // call time, so even if other fields shifted later they would
+        // observe the latest values via the back-reference.
         this.documents = new DocumentsApi(this);
         this.streams = new StreamsApi(this);
+        this.counters = new CountersApi(this);
+        this.zsets = new ZsetsApi(this);
+        this.hashes = new HashesApi(this);
+        this.queues = new QueuesApi(this);
+        this.geos = new GeosApi(this);
     }
 
     // ── Factory ───────────────────────────────────────────────
@@ -705,7 +725,9 @@ public class GoldLapel implements AutoCloseable {
 
     // ── Wrapper methods (each has a no-conn and an explicit-conn overload) ─
 
-    // Document store: gl.documents.<verb>(...). See DocumentsApi.
+    // Phase 4: gl.documents.<verb>(...). See DocumentsApi.
+    // Phase 5: gl.counters / gl.zsets / gl.hashes / gl.queues / gl.geos.
+    //          See per-family Api classes.
 
     // Search
 
@@ -862,157 +884,10 @@ public class GoldLapel implements AutoCloseable {
         return Utils.subscribe(conn, channel, callback, blocking);
     }
 
-    public void enqueue(String queueTable, String payloadJson) throws SQLException {
-        Utils.enqueue(resolveConn(), queueTable, payloadJson);
-    }
-
-    public void enqueue(String queueTable, String payloadJson, Connection conn) throws SQLException {
-        Utils.enqueue(conn, queueTable, payloadJson);
-    }
-
-    public String dequeue(String queueTable) throws SQLException {
-        return Utils.dequeue(resolveConn(), queueTable);
-    }
-
-    public String dequeue(String queueTable, Connection conn) throws SQLException {
-        return Utils.dequeue(conn, queueTable);
-    }
-
-    // Counters
-
-    public long incr(String table, String key, long amount) throws SQLException {
-        return Utils.incr(resolveConn(), table, key, amount);
-    }
-
-    public long incr(String table, String key, long amount, Connection conn) throws SQLException {
-        return Utils.incr(conn, table, key, amount);
-    }
-
-    public long getCounter(String table, String key) throws SQLException {
-        return Utils.getCounter(resolveConn(), table, key);
-    }
-
-    public long getCounter(String table, String key, Connection conn) throws SQLException {
-        return Utils.getCounter(conn, table, key);
-    }
-
-    // Hashes
-
-    public void hset(String table, String key, String field, String valueJson) throws SQLException {
-        Utils.hset(resolveConn(), table, key, field, valueJson);
-    }
-
-    public void hset(String table, String key, String field, String valueJson, Connection conn) throws SQLException {
-        Utils.hset(conn, table, key, field, valueJson);
-    }
-
-    public String hget(String table, String key, String field) throws SQLException {
-        return Utils.hget(resolveConn(), table, key, field);
-    }
-
-    public String hget(String table, String key, String field, Connection conn) throws SQLException {
-        return Utils.hget(conn, table, key, field);
-    }
-
-    public String hgetall(String table, String key) throws SQLException {
-        return Utils.hgetall(resolveConn(), table, key);
-    }
-
-    public String hgetall(String table, String key, Connection conn) throws SQLException {
-        return Utils.hgetall(conn, table, key);
-    }
-
-    public boolean hdel(String table, String key, String field) throws SQLException {
-        return Utils.hdel(resolveConn(), table, key, field);
-    }
-
-    public boolean hdel(String table, String key, String field, Connection conn) throws SQLException {
-        return Utils.hdel(conn, table, key, field);
-    }
-
-    // Sorted sets
-
-    public void zadd(String table, String member, double score) throws SQLException {
-        Utils.zadd(resolveConn(), table, member, score);
-    }
-
-    public void zadd(String table, String member, double score, Connection conn) throws SQLException {
-        Utils.zadd(conn, table, member, score);
-    }
-
-    public double zincrby(String table, String member, double amount) throws SQLException {
-        return Utils.zincrby(resolveConn(), table, member, amount);
-    }
-
-    public double zincrby(String table, String member, double amount, Connection conn) throws SQLException {
-        return Utils.zincrby(conn, table, member, amount);
-    }
-
-    public List<Map.Entry<String, Double>> zrange(String table, int start, int stop,
-            boolean desc) throws SQLException {
-        return Utils.zrange(resolveConn(), table, start, stop, desc);
-    }
-
-    public List<Map.Entry<String, Double>> zrange(String table, int start, int stop,
-            boolean desc, Connection conn) throws SQLException {
-        return Utils.zrange(conn, table, start, stop, desc);
-    }
-
-    public Long zrank(String table, String member, boolean desc) throws SQLException {
-        return Utils.zrank(resolveConn(), table, member, desc);
-    }
-
-    public Long zrank(String table, String member, boolean desc, Connection conn) throws SQLException {
-        return Utils.zrank(conn, table, member, desc);
-    }
-
-    public Double zscore(String table, String member) throws SQLException {
-        return Utils.zscore(resolveConn(), table, member);
-    }
-
-    public Double zscore(String table, String member, Connection conn) throws SQLException {
-        return Utils.zscore(conn, table, member);
-    }
-
-    public boolean zrem(String table, String member) throws SQLException {
-        return Utils.zrem(resolveConn(), table, member);
-    }
-
-    public boolean zrem(String table, String member, Connection conn) throws SQLException {
-        return Utils.zrem(conn, table, member);
-    }
-
-    // Geo
-
-    public List<Map<String, Object>> georadius(String table, String geomColumn, double lon,
-            double lat, double radiusMeters, int limit) throws SQLException {
-        return Utils.georadius(resolveConn(), table, geomColumn, lon, lat, radiusMeters, limit);
-    }
-
-    public List<Map<String, Object>> georadius(String table, String geomColumn, double lon,
-            double lat, double radiusMeters, int limit, Connection conn) throws SQLException {
-        return Utils.georadius(conn, table, geomColumn, lon, lat, radiusMeters, limit);
-    }
-
-    public void geoadd(String table, String nameColumn, String geomColumn, String name,
-            double lon, double lat) throws SQLException {
-        Utils.geoadd(resolveConn(), table, nameColumn, geomColumn, name, lon, lat);
-    }
-
-    public void geoadd(String table, String nameColumn, String geomColumn, String name,
-            double lon, double lat, Connection conn) throws SQLException {
-        Utils.geoadd(conn, table, nameColumn, geomColumn, name, lon, lat);
-    }
-
-    public Double geodist(String table, String geomColumn, String nameColumn,
-            String nameA, String nameB) throws SQLException {
-        return Utils.geodist(resolveConn(), table, geomColumn, nameColumn, nameA, nameB);
-    }
-
-    public Double geodist(String table, String geomColumn, String nameColumn,
-            String nameA, String nameB, Connection conn) throws SQLException {
-        return Utils.geodist(conn, table, geomColumn, nameColumn, nameA, nameB);
-    }
+    // Phase 5 Redis-compat families: gl.counters / gl.zsets / gl.hashes /
+    // gl.queues / gl.geos. The legacy flat methods (incr, hset, zadd,
+    // enqueue/dequeue, geoadd, …) are gone — see the per-family API classes
+    // (CountersApi, ZsetsApi, HashesApi, QueuesApi, GeosApi).
 
     // Misc
 

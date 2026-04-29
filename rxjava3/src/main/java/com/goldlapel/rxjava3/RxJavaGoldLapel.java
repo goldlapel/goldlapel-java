@@ -74,11 +74,26 @@ public final class RxJavaGoldLapel implements AutoCloseable {
     public final RxJavaDocumentsApi documents;
     /** RxJava 3 streams sub-API — accessible as {@code gl.streams.<verb>(...)}. */
     public final RxJavaStreamsApi streams;
+    /** RxJava 3 counters sub-API — Phase 5. */
+    public final RxJavaCountersApi counters;
+    /** RxJava 3 sorted-sets sub-API — Phase 5. */
+    public final RxJavaZsetsApi zsets;
+    /** RxJava 3 hashes sub-API — Phase 5. */
+    public final RxJavaHashesApi hashes;
+    /** RxJava 3 queues sub-API (claim/ack at-least-once) — Phase 5. */
+    public final RxJavaQueuesApi queues;
+    /** RxJava 3 geo sub-API — Phase 5. */
+    public final RxJavaGeosApi geos;
 
     RxJavaGoldLapel(ReactiveGoldLapel inner) {
         this.inner = inner;
         this.documents = new RxJavaDocumentsApi(inner.documents);
         this.streams = new RxJavaStreamsApi(inner.streams);
+        this.counters = new RxJavaCountersApi(inner.counters);
+        this.zsets = new RxJavaZsetsApi(inner.zsets);
+        this.hashes = new RxJavaHashesApi(inner.hashes);
+        this.queues = new RxJavaQueuesApi(inner.queues);
+        this.geos = new RxJavaGeosApi(inner.geos);
     }
 
     // ── Factory ───────────────────────────────────────────────
@@ -267,144 +282,9 @@ public final class RxJavaGoldLapel implements AutoCloseable {
         return RxJava3Adapter.monoToSingle(inner.subscribe(channel, callback, blocking, conn));
     }
 
-    public Completable enqueue(String queueTable, String payloadJson) {
-        return RxJava3Adapter.monoToCompletable(inner.enqueue(queueTable, payloadJson));
-    }
-    public Completable enqueue(String queueTable, String payloadJson, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.enqueue(queueTable, payloadJson, conn));
-    }
-
-    /** {@code Maybe} — empty when the queue is empty. */
-    public Maybe<String> dequeue(String queueTable) {
-        return RxJava3Adapter.monoToMaybe(inner.dequeue(queueTable));
-    }
-    public Maybe<String> dequeue(String queueTable, Connection conn) {
-        return RxJava3Adapter.monoToMaybe(inner.dequeue(queueTable, conn));
-    }
-
-    // ── Counters ──────────────────────────────────────────────
-
-    public Single<Long> incr(String table, String key, long amount) {
-        return RxJava3Adapter.monoToSingle(inner.incr(table, key, amount));
-    }
-    public Single<Long> incr(String table, String key, long amount, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.incr(table, key, amount, conn));
-    }
-
-    public Single<Long> getCounter(String table, String key) {
-        return RxJava3Adapter.monoToSingle(inner.getCounter(table, key));
-    }
-    public Single<Long> getCounter(String table, String key, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.getCounter(table, key, conn));
-    }
-
-    // ── Hashes ────────────────────────────────────────────────
-
-    public Completable hset(String table, String key, String field, String valueJson) {
-        return RxJava3Adapter.monoToCompletable(inner.hset(table, key, field, valueJson));
-    }
-    public Completable hset(String table, String key, String field, String valueJson, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.hset(table, key, field, valueJson, conn));
-    }
-
-    /** {@code Maybe} — empty when the field is absent. */
-    public Maybe<String> hget(String table, String key, String field) {
-        return RxJava3Adapter.monoToMaybe(inner.hget(table, key, field));
-    }
-    public Maybe<String> hget(String table, String key, String field, Connection conn) {
-        return RxJava3Adapter.monoToMaybe(inner.hget(table, key, field, conn));
-    }
-
-    /** {@code Maybe} — empty when the key is absent. */
-    public Maybe<String> hgetall(String table, String key) {
-        return RxJava3Adapter.monoToMaybe(inner.hgetall(table, key));
-    }
-    public Maybe<String> hgetall(String table, String key, Connection conn) {
-        return RxJava3Adapter.monoToMaybe(inner.hgetall(table, key, conn));
-    }
-
-    public Single<Boolean> hdel(String table, String key, String field) {
-        return RxJava3Adapter.monoToSingle(inner.hdel(table, key, field));
-    }
-    public Single<Boolean> hdel(String table, String key, String field, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.hdel(table, key, field, conn));
-    }
-
-    // ── Sorted sets ───────────────────────────────────────────
-
-    public Completable zadd(String table, String member, double score) {
-        return RxJava3Adapter.monoToCompletable(inner.zadd(table, member, score));
-    }
-    public Completable zadd(String table, String member, double score, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.zadd(table, member, score, conn));
-    }
-
-    public Single<Double> zincrby(String table, String member, double amount) {
-        return RxJava3Adapter.monoToSingle(inner.zincrby(table, member, amount));
-    }
-    public Single<Double> zincrby(String table, String member, double amount, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.zincrby(table, member, amount, conn));
-    }
-
-    public Flowable<Map.Entry<String, Double>> zrange(String table, int start, int stop, boolean desc) {
-        return RxJava3Adapter.fluxToFlowable(inner.zrange(table, start, stop, desc));
-    }
-    public Flowable<Map.Entry<String, Double>> zrange(String table, int start, int stop, boolean desc, Connection conn) {
-        return RxJava3Adapter.fluxToFlowable(inner.zrange(table, start, stop, desc, conn));
-    }
-
-    /** {@code Maybe} — empty when the member is not in the set. */
-    public Maybe<Long> zrank(String table, String member, boolean desc) {
-        return RxJava3Adapter.monoToMaybe(inner.zrank(table, member, desc));
-    }
-    public Maybe<Long> zrank(String table, String member, boolean desc, Connection conn) {
-        return RxJava3Adapter.monoToMaybe(inner.zrank(table, member, desc, conn));
-    }
-
-    /** {@code Maybe} — empty when the member is not in the set. */
-    public Maybe<Double> zscore(String table, String member) {
-        return RxJava3Adapter.monoToMaybe(inner.zscore(table, member));
-    }
-    public Maybe<Double> zscore(String table, String member, Connection conn) {
-        return RxJava3Adapter.monoToMaybe(inner.zscore(table, member, conn));
-    }
-
-    public Single<Boolean> zrem(String table, String member) {
-        return RxJava3Adapter.monoToSingle(inner.zrem(table, member));
-    }
-    public Single<Boolean> zrem(String table, String member, Connection conn) {
-        return RxJava3Adapter.monoToSingle(inner.zrem(table, member, conn));
-    }
-
-    // ── Geo ───────────────────────────────────────────────────
-
-    public Flowable<Map<String, Object>> georadius(String table, String geomColumn, double lon,
-            double lat, double radiusMeters, int limit) {
-        return RxJava3Adapter.fluxToFlowable(inner.georadius(table, geomColumn, lon, lat, radiusMeters, limit));
-    }
-    public Flowable<Map<String, Object>> georadius(String table, String geomColumn, double lon,
-            double lat, double radiusMeters, int limit, Connection conn) {
-        return RxJava3Adapter.fluxToFlowable(inner.georadius(table, geomColumn, lon, lat, radiusMeters, limit, conn));
-    }
-
-    public Completable geoadd(String table, String nameColumn, String geomColumn, String name,
-            double lon, double lat) {
-        return RxJava3Adapter.monoToCompletable(inner.geoadd(table, nameColumn, geomColumn, name, lon, lat));
-    }
-    public Completable geoadd(String table, String nameColumn, String geomColumn, String name,
-            double lon, double lat, Connection conn) {
-        return RxJava3Adapter.monoToCompletable(inner.geoadd(table, nameColumn, geomColumn, name, lon, lat, conn));
-    }
-
-    /** {@code Maybe} — empty when either endpoint is missing from the table. */
-    public Maybe<Double> geodist(String table, String geomColumn, String nameColumn,
-            String nameA, String nameB) {
-        return RxJava3Adapter.monoToMaybe(inner.geodist(table, geomColumn, nameColumn, nameA, nameB));
-    }
-    public Maybe<Double> geodist(String table, String geomColumn, String nameColumn,
-            String nameA, String nameB, Connection conn) {
-        return RxJava3Adapter.monoToMaybe(inner.geodist(table, geomColumn, nameColumn, nameA, nameB, conn));
-    }
+    // Phase 5 Redis-compat families: gl.counters / gl.zsets / gl.hashes /
+    // gl.queues / gl.geos. Legacy flat methods (incr, hset, zadd,
+    // enqueue/dequeue, geoadd, …) are gone — see RxJava*Api classes.
 
     // ── Misc ──────────────────────────────────────────────────
 

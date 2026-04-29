@@ -4,6 +4,59 @@
 
 ### Breaking changes
 
+**Phase 5 of schema-to-core: 5 Redis-compat families moved under nested
+namespaces.** The flat `gl.incr` / `gl.getCounter`, `gl.zadd` / `gl.zrange`
+/ `gl.zincrby` / `gl.zrank` / `gl.zscore` / `gl.zrem`, `gl.hset` / `gl.hget`
+/ `gl.hgetall` / `gl.hdel`, `gl.enqueue` / `gl.dequeue`, and `gl.geoadd` /
+`gl.georadius` / `gl.geodist` methods are gone. Counter, sorted-set, hash,
+queue, and geo operations now live under their nested namespaces:
+
+| Old (flat)                                              | New (nested)                                                              |
+| ------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `gl.incr(table, key, amount)`                           | `gl.counters.incr(name, key, amount)`                                     |
+| `gl.getCounter(table, key)`                             | `gl.counters.get(name, key)`                                              |
+| `gl.zadd(table, member, score)`                         | `gl.zsets.add(name, zsetKey, member, score)` *(zset_key now first arg)*   |
+| `gl.zincrby(table, member, amount)`                     | `gl.zsets.incrBy(name, zsetKey, member, delta)`                           |
+| `gl.zrange(table, start, stop, desc)`                   | `gl.zsets.range(name, zsetKey, start, stop, desc)`                        |
+| `gl.zrank(table, member, desc)`                         | `gl.zsets.rank(name, zsetKey, member, desc)`                              |
+| `gl.zscore(table, member)`                              | `gl.zsets.score(name, zsetKey, member)`                                   |
+| `gl.zrem(table, member)`                                | `gl.zsets.remove(name, zsetKey, member)`                                  |
+| `gl.hset(table, key, field, valueJson)`                 | `gl.hashes.set(name, hashKey, field, valueJson)` *(row-per-field storage)*|
+| `gl.hget(table, key, field)`                            | `gl.hashes.get(name, hashKey, field)`                                     |
+| `gl.hgetall(table, key)` *→ JSON String*                | `gl.hashes.getAll(name, hashKey)` *→ `Map<String,String>`*                |
+| `gl.hdel(table, key, field)`                            | `gl.hashes.delete(name, hashKey, field)`                                  |
+| `gl.enqueue(table, payload)`                            | `gl.queues.enqueue(name, payload)`                                        |
+| `gl.dequeue(table)` *(delete-on-fetch)*                 | `gl.queues.claim(name, visibilityMs)` + `gl.queues.ack(name, id)` *(at-least-once)* |
+| `gl.geoadd(table, ncol, gcol, name, lon, lat)`          | `gl.geos.add(name, member, lon, lat)` *(GEOGRAPHY-native, idempotent)*    |
+| `gl.georadius(table, gcol, lon, lat, radius, limit)`    | `gl.geos.radius(name, lon, lat, radius, unit, limit)`                     |
+| `gl.geodist(table, gcol, ncol, a, b)`                   | `gl.geos.dist(name, a, b, unit)`                                          |
+
+**Phase 5 schema changes:**
+
+- **Counter:** `(key, value, updated_at)` per row — `updated_at` stamped on every write.
+- **Zset:** `zset_key` column added so a single namespace table holds many sorted sets — Redis ZADD shape.
+- **Hash:** Storage flipped from JSONB-blob-per-key to row-per-field (`hash_key`, `field`, `value JSONB`).
+- **Queue:** At-least-once delivery with visibility timeout. `dequeue` (delete-on-fetch) replaced by explicit `claim`/`ack` pair. **No `dequeue` compat shim.**
+- **Geo:** GEOGRAPHY-native (drops `::geography` casts on column refs), `member TEXT PRIMARY KEY` (idempotent `add`).
+
+**Geo radius bind-order contract** (load-bearing — the proxy CTE-anchors so each `$N` appears once in rendered SQL):
+
+- `gl.geos.radius(...)`: 4 args `(lon, lat, radius_m, limit)` — no duplicates.
+- `gl.geos.radiusByMember(...)`: 4 args `(member, member, radius_m, limit)` — `$1` and `$2` both hold the anchor member.
+
+The five family namespaces (`counters`, `zsets`, `hashes`, `queues`, `geos`)
+are `public final` fields on `GoldLapel`, `ReactiveGoldLapel`, and
+`RxJavaGoldLapel` — same shape as the existing `documents` and `streams`
+namespaces (and Python/JS/Ruby/PHP/Go/.NET wrappers).
+
+**Phase 5 DDL is owned by the proxy.** Each `gl.<family>.<verb>` call fetches
+the canonical query patterns from `POST /api/ddl/<family>/create` (idempotent),
+caches them per session, and runs the proxy-emitted SQL verbatim (after
+`$N → ?` JDBC translation). The wrapper no longer hand-writes `CREATE TABLE`
+for any of these families.
+
+---
+
 **Doc-store and stream methods moved under nested namespaces.** The flat
 `gl.docX` and `gl.streamX` methods are gone; document and stream operations
 now live under `gl.documents.<verb>` and `gl.streams.<verb>`. No
@@ -45,9 +98,9 @@ Migration map (sync `GoldLapel`, `ReactiveGoldLapel`, and `RxJavaGoldLapel`):
 `ReactiveGoldLapel`, and `RxJavaGoldLapel` — direct field access matches the
 shape of the cross-wrapper consensus (Python, JS, Ruby, PHP, Go, .NET).
 
-Other namespaces (`gl.search`, `gl.publish` / `gl.subscribe`, `gl.incr`,
-`gl.zadd`, `gl.hset`, `gl.geoadd`, …) remain flat and will migrate to nested
-form in subsequent releases (one namespace per schema-to-core phase).
+Other namespaces (`gl.search`, `gl.publish` / `gl.subscribe`, percolator) remain
+flat and will migrate to nested form in subsequent releases (one namespace per
+schema-to-core phase).
 
 **Doc-store DDL is now owned by the proxy.** The wrapper no longer emits
 `CREATE TABLE _goldlapel.doc_<name>` SQL when a collection is first used.

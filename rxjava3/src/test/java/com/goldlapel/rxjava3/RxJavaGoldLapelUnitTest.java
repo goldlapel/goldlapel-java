@@ -100,11 +100,20 @@ class RxJavaGoldLapelUnitTest {
      */
     @SuppressWarnings("unchecked")
     private static void seedDdlCache(GoldLapel sync, String family, String name) throws Exception {
+        seedDdlCacheWithPatterns(sync, family, name, java.util.Collections.emptyMap());
+    }
+
+    /** Variant that lets a test stuff specific {@code $N}-placeholder SQL into
+     *  the patterns map so the wrapper has something to translate to JDBC
+     *  before binding. */
+    @SuppressWarnings("unchecked")
+    private static void seedDdlCacheWithPatterns(GoldLapel sync, String family, String name,
+            java.util.Map<String, String> queryPatterns) throws Exception {
         java.util.Map<String, Object> tables = new java.util.LinkedHashMap<>();
         tables.put("main", name);
         java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
         entry.put("tables", tables);
-        entry.put("query_patterns", java.util.Collections.emptyMap());
+        entry.put("query_patterns", queryPatterns);
         java.lang.reflect.Method m = GoldLapel.class.getDeclaredMethod("ddlCache");
         m.setAccessible(true);
         java.util.concurrent.ConcurrentHashMap<String, java.util.Map<String, Object>> cache =
@@ -184,12 +193,15 @@ class RxJavaGoldLapelUnitTest {
     }
 
     @Test
-    void hgetReturnsMaybeAndEmitsValueWhenPresent() throws Exception {
+    void hashesGetReturnsMaybeAndEmitsValueWhenPresent() throws Exception {
+        // Phase 5 schema: hashes.get returns Maybe<String> via the namespace API.
         Connection internal = mockConnForHget(true, "hello");
         GoldLapel sync = syncWithConnection(internal);
+        seedDdlCacheWithPatterns(sync, "hash", "h", java.util.Collections.singletonMap(
+            "hget", "SELECT value FROM _goldlapel.hash_h WHERE hash_key = $1 AND field = $2"));
         RxJavaGoldLapel gl = newInstance(sync);
 
-        Maybe<String> maybe = gl.hget("h", "key1", "f1");
+        Maybe<String> maybe = gl.hashes.get("h", "key1", "f1");
         TestObserver<String> obs = maybe.test();
         obs.await();
         obs.assertComplete();
@@ -198,13 +210,15 @@ class RxJavaGoldLapelUnitTest {
     }
 
     @Test
-    void hgetReturnsEmptyMaybeWhenAbsent() throws Exception {
-        // No row → hget returns null → empty Maybe (not an error).
+    void hashesGetReturnsEmptyMaybeWhenAbsent() throws Exception {
+        // No row → hashes.get returns null → empty Maybe (not an error).
         Connection internal = mockConnForHget(false, null);
         GoldLapel sync = syncWithConnection(internal);
+        seedDdlCacheWithPatterns(sync, "hash", "h", java.util.Collections.singletonMap(
+            "hget", "SELECT value FROM _goldlapel.hash_h WHERE hash_key = $1 AND field = $2"));
         RxJavaGoldLapel gl = newInstance(sync);
 
-        Maybe<String> maybe = gl.hget("h", "missing", "f1");
+        Maybe<String> maybe = gl.hashes.get("h", "missing", "f1");
         TestObserver<String> obs = maybe.test();
         obs.await();
         obs.assertComplete();

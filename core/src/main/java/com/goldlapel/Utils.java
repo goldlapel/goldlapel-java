@@ -67,304 +67,6 @@ public class Utils {
         }
     }
 
-    /**
-     * Add a job to a queue table. Like redis.lpush().
-     * Creates the queue table if it doesn't exist. Payload is stored as JSONB.
-     */
-    public static void enqueue(Connection conn, String queueTable, String payloadJson) throws SQLException {
-        validateIdentifier(queueTable);
-        try (java.sql.Statement st = conn.createStatement()) {
-            st.execute(
-                "CREATE TABLE IF NOT EXISTS " + queueTable + " (" +
-                "id BIGSERIAL PRIMARY KEY, " +
-                "payload JSONB NOT NULL, " +
-                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
-            );
-        }
-        try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO " + queueTable + " (payload) VALUES (?::jsonb)")) {
-            ps.setString(1, payloadJson);
-            ps.executeUpdate();
-        }
-    }
-
-    /**
-     * Pop the next job from a queue table. Like redis.brpop() (non-blocking).
-     * Uses FOR UPDATE SKIP LOCKED for safe concurrent access.
-     * Returns the payload JSON string, or null if the queue is empty.
-     */
-    public static String dequeue(Connection conn, String queueTable) throws SQLException {
-        validateIdentifier(queueTable);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "DELETE FROM " + queueTable +
-                " WHERE id = (" +
-                "SELECT id FROM " + queueTable +
-                " ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1" +
-                ") RETURNING payload")) {
-            ResultSet rs = ps.executeQuery();
-            if (rs.next()) {
-                return rs.getString(1);
-            }
-            return null;
-        }
-    }
-
-    /**
-     * Increment a counter. Like redis.incr().
-     * Creates the counter table if it doesn't exist. Returns the new value.
-     */
-    public static long incr(Connection conn, String table, String key, long amount) throws SQLException {
-        validateIdentifier(table);
-        try (java.sql.Statement st = conn.createStatement()) {
-            st.execute(
-                "CREATE TABLE IF NOT EXISTS " + table + " (" +
-                "key TEXT PRIMARY KEY, " +
-                "value BIGINT NOT NULL DEFAULT 0)"
-            );
-        }
-        try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO " + table + " (key, value) VALUES (?, ?) " +
-                "ON CONFLICT (key) DO UPDATE SET value = " + table + ".value + ? " +
-                "RETURNING value")) {
-            ps.setString(1, key);
-            ps.setLong(2, amount);
-            ps.setLong(3, amount);
-            ResultSet rs = ps.executeQuery();
-            rs.next();
-            return rs.getLong(1);
-        }
-    }
-
-    /**
-     * Add a member with a score to a sorted set. Like redis.zadd().
-     * Creates the sorted set table if it doesn't exist.
-     * If the member already exists, updates the score.
-     */
-    public static void zadd(Connection conn, String table, String member, double score) throws SQLException {
-        validateIdentifier(table);
-        try (java.sql.Statement st = conn.createStatement()) {
-            st.execute(
-                "CREATE TABLE IF NOT EXISTS " + table + " (" +
-                "member TEXT PRIMARY KEY, " +
-                "score DOUBLE PRECISION NOT NULL)"
-            );
-        }
-        try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO " + table + " (member, score) VALUES (?, ?) " +
-                "ON CONFLICT (member) DO UPDATE SET score = EXCLUDED.score")) {
-            ps.setString(1, member);
-            ps.setDouble(2, score);
-            ps.executeUpdate();
-        }
-    }
-
-    /**
-     * Get members by score rank. Like redis.zrange().
-     * Returns a list of (member, score) entries.
-     * desc=true returns highest scores first (leaderboard order).
-     */
-    public static List<Map.Entry<String, Double>> zrange(Connection conn, String table,
-            int start, int stop, boolean desc) throws SQLException {
-        validateIdentifier(table);
-        String order = desc ? "DESC" : "ASC";
-        int limit = stop - start;
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT member, score FROM " + table +
-                " ORDER BY score " + order +
-                " LIMIT ? OFFSET ?")) {
-            ps.setInt(1, limit);
-            ps.setInt(2, start);
-            ResultSet rs = ps.executeQuery();
-            List<Map.Entry<String, Double>> results = new ArrayList<>();
-            while (rs.next()) {
-                results.add(new AbstractMap.SimpleImmutableEntry<>(
-                    rs.getString(1), rs.getDouble(2)));
-            }
-            return results;
-        }
-    }
-
-    /**
-     * Set a field in a hash. Like redis.hset().
-     * Creates the hash table if it doesn't exist. Uses JSONB for storage.
-     */
-    public static void hset(Connection conn, String table, String key, String field, String valueJson) throws SQLException {
-        validateIdentifier(table);
-        try (java.sql.Statement st = conn.createStatement()) {
-            st.execute(
-                "CREATE TABLE IF NOT EXISTS " + table + " (" +
-                "key TEXT PRIMARY KEY, " +
-                "data JSONB NOT NULL DEFAULT '{}'::jsonb)"
-            );
-        }
-        try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO " + table + " (key, data) VALUES (?, jsonb_build_object(?, ?::jsonb)) " +
-                "ON CONFLICT (key) DO UPDATE SET data = " + table + ".data || jsonb_build_object(?, ?::jsonb)")) {
-            ps.setString(1, key);
-            ps.setString(2, field);
-            ps.setString(3, valueJson);
-            ps.setString(4, field);
-            ps.setString(5, valueJson);
-            ps.executeUpdate();
-        }
-    }
-
-    /**
-     * Get a field from a hash. Like redis.hget().
-     * Returns the value as a JSON string, or null if key or field doesn't exist.
-     */
-    public static String hget(Connection conn, String table, String key, String field) throws SQLException {
-        validateIdentifier(table);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT data->>? FROM " + table + " WHERE key = ?")) {
-            ps.setString(1, field);
-            ps.setString(2, key);
-            ResultSet rs = ps.executeQuery();
-            if (rs.next()) {
-                return rs.getString(1);
-            }
-            return null;
-        }
-    }
-
-    /**
-     * Get all fields from a hash. Like redis.hgetall().
-     * Returns the full JSONB object as a string, or null if key doesn't exist.
-     */
-    public static String hgetall(Connection conn, String table, String key) throws SQLException {
-        validateIdentifier(table);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT data FROM " + table + " WHERE key = ?")) {
-            ps.setString(1, key);
-            ResultSet rs = ps.executeQuery();
-            if (rs.next()) {
-                return rs.getString(1);
-            }
-            return null;
-        }
-    }
-
-    /**
-     * Remove a field from a hash. Like redis.hdel().
-     * Returns true if the field existed, false otherwise.
-     */
-    public static boolean hdel(Connection conn, String table, String key, String field) throws SQLException {
-        validateIdentifier(table);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT data ? ? AS existed FROM " + table + " WHERE key = ?")) {
-            ps.setString(1, field);
-            ps.setString(2, key);
-            ResultSet rs = ps.executeQuery();
-            if (!rs.next() || !rs.getBoolean("existed")) {
-                return false;
-            }
-        }
-        try (PreparedStatement ps = conn.prepareStatement(
-                "UPDATE " + table + " SET data = data - ? WHERE key = ?")) {
-            ps.setString(1, field);
-            ps.setString(2, key);
-            ps.executeUpdate();
-        }
-        return true;
-    }
-
-    /**
-     * Add a location to a geo table. Like redis.geoadd().
-     * Creates the table with PostGIS geometry column if it doesn't exist.
-     * Requires PostGIS extension.
-     */
-    public static void geoadd(Connection conn, String table, String nameColumn,
-            String geomColumn, String name, double lon, double lat) throws SQLException {
-        validateIdentifier(table);
-        validateIdentifier(nameColumn);
-        validateIdentifier(geomColumn);
-        try (java.sql.Statement st = conn.createStatement()) {
-            st.execute("CREATE EXTENSION IF NOT EXISTS postgis");
-        }
-        try (java.sql.Statement st = conn.createStatement()) {
-            st.execute(
-                "CREATE TABLE IF NOT EXISTS " + table + " (" +
-                "id BIGSERIAL PRIMARY KEY, " +
-                nameColumn + " TEXT NOT NULL, " +
-                geomColumn + " GEOMETRY(Point, 4326) NOT NULL)"
-            );
-        }
-        try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO " + table + " (" + nameColumn + ", " + geomColumn + ") " +
-                "VALUES (?, ST_SetSRID(ST_MakePoint(?, ?), 4326))")) {
-            ps.setString(1, name);
-            ps.setDouble(2, lon);
-            ps.setDouble(3, lat);
-            ps.executeUpdate();
-        }
-    }
-
-    /**
-     * Find rows within a radius of a point. Like redis.georadius().
-     * Requires PostGIS extension. Uses ST_DWithin with geography type
-     * for accurate distance on the Earth's surface.
-     * Returns a list of maps with all columns plus a "distance_m" field.
-     */
-    public static List<Map<String, Object>> georadius(Connection conn, String table,
-            String geomColumn, double lon, double lat, double radiusMeters, int limit) throws SQLException {
-        validateIdentifier(table);
-        validateIdentifier(geomColumn);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT *, ST_Distance(" +
-                geomColumn + "::geography, " +
-                "ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography" +
-                ") AS distance_m " +
-                "FROM " + table + " " +
-                "WHERE ST_DWithin(" +
-                geomColumn + "::geography, " +
-                "ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, " +
-                "?) " +
-                "ORDER BY distance_m " +
-                "LIMIT ?")) {
-            ps.setDouble(1, lon);
-            ps.setDouble(2, lat);
-            ps.setDouble(3, lon);
-            ps.setDouble(4, lat);
-            ps.setDouble(5, radiusMeters);
-            ps.setInt(6, limit);
-            ResultSet rs = ps.executeQuery();
-            ResultSetMetaData meta = rs.getMetaData();
-            int colCount = meta.getColumnCount();
-            List<Map<String, Object>> results = new ArrayList<>();
-            while (rs.next()) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                for (int i = 1; i <= colCount; i++) {
-                    row.put(meta.getColumnLabel(i), rs.getObject(i));
-                }
-                results.add(row);
-            }
-            return results;
-        }
-    }
-
-    /**
-     * Get distance between two members in meters. Like redis.geodist().
-     * Returns the distance in meters, or null if either member doesn't exist.
-     */
-    public static Double geodist(Connection conn, String table, String geomColumn,
-            String nameColumn, String nameA, String nameB) throws SQLException {
-        validateIdentifier(table);
-        validateIdentifier(geomColumn);
-        validateIdentifier(nameColumn);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT ST_Distance(a." + geomColumn + "::geography, b." + geomColumn + "::geography) " +
-                "FROM " + table + " a, " + table + " b " +
-                "WHERE a." + nameColumn + " = ? AND b." + nameColumn + " = ?")) {
-            ps.setString(1, nameA);
-            ps.setString(2, nameB);
-            ResultSet rs = ps.executeQuery();
-            if (rs.next()) {
-                return rs.getDouble(1);
-            }
-            return null;
-        }
-    }
-
     public static Thread subscribe(Connection conn, String channel,
             BiConsumer<String, String> callback) throws SQLException {
         return subscribe(conn, channel, callback, true);
@@ -399,75 +101,6 @@ public class Utils {
         t.setDaemon(true);
         t.start();
         return t;
-    }
-
-    public static long getCounter(Connection conn, String table, String key) throws SQLException {
-        validateIdentifier(table);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT value FROM " + table + " WHERE key = ?")) {
-            ps.setString(1, key);
-            ResultSet rs = ps.executeQuery();
-            if (rs.next()) {
-                return rs.getLong(1);
-            }
-            return 0;
-        }
-    }
-
-    public static double zincrby(Connection conn, String table, String member,
-            double amount) throws SQLException {
-        validateIdentifier(table);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO " + table + " (member, score) VALUES (?, ?) " +
-                "ON CONFLICT (member) DO UPDATE SET score = " + table + ".score + ? " +
-                "RETURNING score")) {
-            ps.setString(1, member);
-            ps.setDouble(2, amount);
-            ps.setDouble(3, amount);
-            ResultSet rs = ps.executeQuery();
-            rs.next();
-            return rs.getDouble(1);
-        }
-    }
-
-    public static Long zrank(Connection conn, String table, String member,
-            boolean desc) throws SQLException {
-        validateIdentifier(table);
-        String order = desc ? "DESC" : "ASC";
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT rank FROM (" +
-                "SELECT member, ROW_NUMBER() OVER (ORDER BY score " + order + ") - 1 AS rank " +
-                "FROM " + table +
-                ") sub WHERE member = ?")) {
-            ps.setString(1, member);
-            ResultSet rs = ps.executeQuery();
-            if (rs.next()) {
-                return rs.getLong(1);
-            }
-            return null;
-        }
-    }
-
-    public static Double zscore(Connection conn, String table, String member) throws SQLException {
-        validateIdentifier(table);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT score FROM " + table + " WHERE member = ?")) {
-            ps.setString(1, member);
-            ResultSet rs = ps.executeQuery();
-            if (rs.next()) {
-                return rs.getDouble(1);
-            }
-            return null;
-        }
-    }
-
-    public static boolean zrem(Connection conn, String table, String member) throws SQLException {
-        validateIdentifier(table);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "DELETE FROM " + table + " WHERE member = ?")) {
-            ps.setString(1, member);
-            return ps.executeUpdate() > 0;
-        }
     }
 
     public static long countDistinct(Connection conn, String table, String column) throws SQLException {
@@ -652,6 +285,701 @@ public class Utils {
             }
         }
         return results;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Phase 5 Redis-compat families: counter / zset / hash /
+    //  queue / geo. The proxy owns DDL — each helper takes a
+    //  Map<String, String> of canonical query patterns fetched
+    //  from the dashboard's /api/ddl/<family>/create endpoint.
+    //
+    //  Storage conventions:
+    //    counter — (key, value BIGINT, updated_at) per row.
+    //    zset    — (zset_key, member, score) — many sorted sets per table.
+    //    hash    — (hash_key, field, value JSONB) — row per field.
+    //    queue   — at-least-once with visibility timeout (claim/ack).
+    //    geo     — GEOGRAPHY-native, member TEXT PRIMARY KEY (idempotent).
+    // ═══════════════════════════════════════════════════════════
+
+    // ── Counter family ─────────────────────────────────────────
+
+    public static long counterIncr(Connection conn, String name, String key, long amount,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "incr", "counterIncr");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, key);
+            ps.setLong(2, amount);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    public static long counterDecr(Connection conn, String name, String key, long amount,
+            Map<String, String> patterns) throws SQLException {
+        // Decrement is incr with a negative amount. Provided as a separate
+        // method so callers don't need to remember the sign convention.
+        return counterIncr(conn, name, key, -amount, patterns);
+    }
+
+    public static long counterSet(Connection conn, String name, String key, long value,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "set", "counterSet");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, key);
+            ps.setLong(2, value);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    public static long counterGet(Connection conn, String name, String key,
+            Map<String, String> patterns) throws SQLException {
+        // Returns 0 for unknown keys (matches Redis convention — no NULL
+        // surprise on cold cache).
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "get", "counterGet");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, key);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getLong(1);
+                return 0L;
+            }
+        }
+    }
+
+    public static boolean counterDelete(Connection conn, String name, String key,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "delete", "counterDelete");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, key);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    public static long counterCountKeys(Connection conn, String name,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "count_keys", "counterCountKeys");
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) return rs.getLong(1);
+            return 0L;
+        }
+    }
+
+    // ── Zset family ─────────────────────────────────────────────
+    //
+    //  Phase 5 introduces a `zset_key` column so a single namespace
+    //  table holds many sorted sets. Every method threads `zsetKey`
+    //  as the first arg after the namespace `name`.
+
+    public static double zsetAdd(Connection conn, String name, String zsetKey, String member,
+            double score, Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "zadd", "zsetAdd");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, zsetKey);
+            ps.setString(2, member);
+            ps.setDouble(3, score);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getDouble(1);
+            }
+        }
+    }
+
+    public static double zsetIncrBy(Connection conn, String name, String zsetKey, String member,
+            double delta, Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "zincrby", "zsetIncrBy");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, zsetKey);
+            ps.setString(2, member);
+            ps.setDouble(3, delta);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getDouble(1);
+            }
+        }
+    }
+
+    public static Double zsetScore(Connection conn, String name, String zsetKey, String member,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "zscore", "zsetScore");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, zsetKey);
+            ps.setString(2, member);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getDouble(1);
+                return null;
+            }
+        }
+    }
+
+    public static boolean zsetRemove(Connection conn, String name, String zsetKey, String member,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "zrem", "zsetRemove");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, zsetKey);
+            ps.setString(2, member);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    public static List<Map.Entry<String, Double>> zsetRange(Connection conn, String name,
+            String zsetKey, int start, int stop, boolean desc,
+            Map<String, String> patterns) throws SQLException {
+        // Inclusive Redis-style start/stop; SQL converts to LIMIT/OFFSET via
+        // the proxy's pattern. Limit = (stop - start + 1), clamped at 0 when
+        // stop precedes start so the proxy's prepared LIMIT receives a
+        // non-negative integer.
+        validateIdentifier(name);
+        String key = desc ? "zrange_desc" : "zrange_asc";
+        String sql = requirePattern(patterns, key, "zsetRange");
+        int limit = Math.max(0, stop - start + 1);
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, zsetKey);
+            ps.setInt(2, limit);
+            ps.setInt(3, start);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<Map.Entry<String, Double>> results = new ArrayList<>();
+                while (rs.next()) {
+                    results.add(new AbstractMap.SimpleImmutableEntry<>(
+                        rs.getString(1), rs.getDouble(2)));
+                }
+                return results;
+            }
+        }
+    }
+
+    public static List<Map.Entry<String, Double>> zsetRangeByScore(Connection conn, String name,
+            String zsetKey, double minScore, double maxScore, int limit, int offset,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "zrangebyscore", "zsetRangeByScore");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, zsetKey);
+            ps.setDouble(2, minScore);
+            ps.setDouble(3, maxScore);
+            ps.setInt(4, limit);
+            ps.setInt(5, offset);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<Map.Entry<String, Double>> results = new ArrayList<>();
+                while (rs.next()) {
+                    results.add(new AbstractMap.SimpleImmutableEntry<>(
+                        rs.getString(1), rs.getDouble(2)));
+                }
+                return results;
+            }
+        }
+    }
+
+    public static Long zsetRank(Connection conn, String name, String zsetKey, String member,
+            boolean desc, Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String key = desc ? "zrank_desc" : "zrank_asc";
+        String sql = requirePattern(patterns, key, "zsetRank");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, zsetKey);
+            ps.setString(2, member);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getLong(1);
+                return null;
+            }
+        }
+    }
+
+    public static long zsetCard(Connection conn, String name, String zsetKey,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "zcard", "zsetCard");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, zsetKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getLong(1);
+                return 0L;
+            }
+        }
+    }
+
+    // ── Hash family ─────────────────────────────────────────────
+    //
+    //  Phase 5 storage: row-per-field — (hash_key, field, value JSONB).
+    //  The legacy JSONB-blob-per-key shape is gone. Every method threads
+    //  `hashKey` as the first arg after `name`. Values are JSON-encoded
+    //  strings — the wrapper does NOT parse into a JSON tree (consistent
+    //  with the rest of the Java API; callers pick their JSON lib).
+
+    public static String hashSet(Connection conn, String name, String hashKey, String field,
+            String valueJson, Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "hset", "hashSet");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, hashKey);
+            ps.setString(2, field);
+            ps.setString(3, valueJson);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getString(1);
+                return null;
+            }
+        }
+    }
+
+    public static String hashGet(Connection conn, String name, String hashKey, String field,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "hget", "hashGet");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, hashKey);
+            ps.setString(2, field);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getString(1);
+                return null;
+            }
+        }
+    }
+
+    public static Map<String, String> hashGetAll(Connection conn, String name, String hashKey,
+            Map<String, String> patterns) throws SQLException {
+        // Re-assembles every (field, value) under `hashKey` into a single
+        // Map<String, String> on the client. Values are raw JSON strings —
+        // the same shape returned by hashGet. Empty map if the key has no
+        // fields.
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "hgetall", "hashGetAll");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, hashKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                Map<String, String> out = new LinkedHashMap<>();
+                while (rs.next()) {
+                    out.put(rs.getString(1), rs.getString(2));
+                }
+                return out;
+            }
+        }
+    }
+
+    public static List<String> hashKeys(Connection conn, String name, String hashKey,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "hkeys", "hashKeys");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, hashKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<String> keys = new ArrayList<>();
+                while (rs.next()) keys.add(rs.getString(1));
+                return keys;
+            }
+        }
+    }
+
+    public static List<String> hashValues(Connection conn, String name, String hashKey,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "hvals", "hashValues");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, hashKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<String> vals = new ArrayList<>();
+                while (rs.next()) vals.add(rs.getString(1));
+                return vals;
+            }
+        }
+    }
+
+    public static boolean hashExists(Connection conn, String name, String hashKey, String field,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "hexists", "hashExists");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, hashKey);
+            ps.setString(2, field);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getBoolean(1);
+                return false;
+            }
+        }
+    }
+
+    public static boolean hashDelete(Connection conn, String name, String hashKey, String field,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "hdel", "hashDelete");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, hashKey);
+            ps.setString(2, field);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    public static long hashLen(Connection conn, String name, String hashKey,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "hlen", "hashLen");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, hashKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getLong(1);
+                return 0L;
+            }
+        }
+    }
+
+    // ── Queue family ────────────────────────────────────────────
+    //
+    //  Phase 5: at-least-once delivery with visibility timeout. The
+    //  legacy fire-and-forget `enqueue` / `dequeue` shape is gone.
+    //
+    //    Before:  String payload = gl.dequeue("jobs");
+    //    After :  ClaimedMessage msg = gl.queues.claim("jobs", 30000);
+    //             // ... handle the work ...
+    //             gl.queues.ack("jobs", msg.id());
+    //             // missing ack → redelivery after visibility window
+    //
+    //  No `dequeue` shim is provided — the explicit claim+ack pair is
+    //  the public contract.
+
+    /**
+     * A leased message returned by {@link #queueClaim(Connection, String, long, Map)}.
+     * Caller MUST {@code queueAck} the id, or {@code queueAbandon} to release
+     * it immediately. A consumer that crashes leaves the lease standing; the
+     * message becomes ready again after the visibility window and is
+     * redelivered to the next claim.
+     */
+    public static final class ClaimedMessage {
+        private final long id;
+        private final String payload;
+
+        public ClaimedMessage(long id, String payload) {
+            this.id = id;
+            this.payload = payload;
+        }
+
+        public long id() { return id; }
+        /** Raw JSON payload string. Caller parses with their own JSON library. */
+        public String payload() { return payload; }
+    }
+
+    public static long queueEnqueue(Connection conn, String name, String payloadJson,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "enqueue", "queueEnqueue");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, payloadJson);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    /**
+     * Lease the next ready message. Returns the {@link ClaimedMessage} or
+     * {@code null} when the queue is empty. Caller MUST {@code queueAck}
+     * the id (commit) or {@code queueAbandon} (re-release).
+     */
+    public static ClaimedMessage queueClaim(Connection conn, String name, long visibilityTimeoutMs,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "claim", "queueClaim");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, visibilityTimeoutMs);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                return new ClaimedMessage(rs.getLong(1), rs.getString(2));
+            }
+        }
+    }
+
+    public static boolean queueAck(Connection conn, String name, long messageId,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "ack", "queueAck");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, messageId);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    public static boolean queueAbandon(Connection conn, String name, long messageId,
+            Map<String, String> patterns) throws SQLException {
+        // Release the lease back to ready immediately. Equivalent to a NACK —
+        // the message stays in the queue and is redelivered to the next claim.
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "nack", "queueAbandon");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, messageId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    public static java.sql.Timestamp queueExtend(Connection conn, String name, long messageId,
+            long additionalMs, Map<String, String> patterns) throws SQLException {
+        // Returns the new visible_at, or null if the id wasn't a claimed msg.
+        // Bind order: $1=id, $2=additional_ms (matches the proxy's pattern).
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "extend", "queueExtend");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, messageId);
+            ps.setLong(2, additionalMs);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                return rs.getTimestamp(1);
+            }
+        }
+    }
+
+    public static Map<String, Object> queuePeek(Connection conn, String name,
+            Map<String, String> patterns) throws SQLException {
+        // Look at the next-ready message without claiming it. Returns a
+        // map with id / payload / visible_at / status / created_at, or
+        // null when nothing is ready.
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "peek", "queuePeek");
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            if (!rs.next()) return null;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", rs.getLong(1));
+            row.put("payload", rs.getString(2));
+            row.put("visible_at", rs.getTimestamp(3));
+            row.put("status", rs.getString(4));
+            row.put("created_at", rs.getTimestamp(5));
+            return row;
+        }
+    }
+
+    public static long queueCountReady(Connection conn, String name,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "count_ready", "queueCountReady");
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) return rs.getLong(1);
+            return 0L;
+        }
+    }
+
+    public static long queueCountClaimed(Connection conn, String name,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "count_claimed", "queueCountClaimed");
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) return rs.getLong(1);
+            return 0L;
+        }
+    }
+
+    // ── Geo family ──────────────────────────────────────────────
+    //
+    //  Phase 5: GEOGRAPHY-native (not GEOMETRY), `member TEXT PRIMARY
+    //  KEY`, GIST index. `geoAdd` is idempotent on the member name —
+    //  re-adding updates the location.
+    //
+    //  Distance units: m / km / mi / ft. Proxy returns meters always
+    //  (GEOGRAPHY default); the wrapper converts at the edge.
+
+    private static final Map<String, Double> GEO_UNITS;
+    static {
+        Map<String, Double> u = new java.util.HashMap<>();
+        u.put("m", 1.0);
+        u.put("km", 1000.0);
+        u.put("mi", 1609.344);
+        u.put("ft", 0.3048);
+        GEO_UNITS = Collections.unmodifiableMap(u);
+    }
+
+    static double toMeters(double value, String unit) {
+        Double f = GEO_UNITS.get(unit);
+        if (f == null) {
+            throw new IllegalArgumentException(
+                "Unknown distance unit: " + unit + " (choose m/km/mi/ft)");
+        }
+        return value * f;
+    }
+
+    static double convertDistanceMeters(double meters, String unit) {
+        Double f = GEO_UNITS.get(unit);
+        if (f == null) {
+            throw new IllegalArgumentException(
+                "Unknown distance unit: " + unit + " (choose m/km/mi/ft)");
+        }
+        return meters / f;
+    }
+
+    /** A 2-tuple of (lon, lat) returned by geo helpers. */
+    public static final class GeoPos {
+        private final double lon;
+        private final double lat;
+
+        public GeoPos(double lon, double lat) {
+            this.lon = lon;
+            this.lat = lat;
+        }
+
+        public double lon() { return lon; }
+        public double lat() { return lat; }
+
+        @Override public String toString() {
+            return "GeoPos(" + lon + ", " + lat + ")";
+        }
+    }
+
+    public static GeoPos geoAdd(Connection conn, String name, String member, double lon, double lat,
+            Map<String, String> patterns) throws SQLException {
+        // Set-or-update a member's lon/lat. Idempotent on member name (PK).
+        // Returns the just-stored (lon, lat).
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "geoadd", "geoAdd");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, member);
+            ps.setDouble(2, lon);
+            ps.setDouble(3, lat);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                return new GeoPos(rs.getDouble(1), rs.getDouble(2));
+            }
+        }
+    }
+
+    public static GeoPos geoPos(Connection conn, String name, String member,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "geopos", "geoPos");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, member);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                return new GeoPos(rs.getDouble(1), rs.getDouble(2));
+            }
+        }
+    }
+
+    public static Double geoDist(Connection conn, String name, String memberA, String memberB,
+            String unit, Map<String, String> patterns) throws SQLException {
+        // Distance between two members. Returns null if either member is
+        // absent. Result is converted from meters into the requested unit
+        // at the wrapper edge.
+        validateIdentifier(name);
+        // Validate unit upfront so a typo fails loud before the SQL roundtrip.
+        if (!GEO_UNITS.containsKey(unit)) {
+            throw new IllegalArgumentException(
+                "Unknown distance unit: " + unit + " (choose m/km/mi/ft)");
+        }
+        String sql = requirePattern(patterns, "geodist", "geoDist");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, memberA);
+            ps.setString(2, memberB);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                double meters = rs.getDouble(1);
+                if (rs.wasNull()) return null;
+                return convertDistanceMeters(meters, unit);
+            }
+        }
+    }
+
+    /**
+     * Members within {@code radius} of (lon, lat). Returns each row as a
+     * map with member / lon / lat / distance_m.
+     *
+     * <p>Proxy contract: {@code $1=lon, $2=lat, $3=radius_m, $4=limit}.
+     * The proxy CTE-anchors each {@code $N} so it appears exactly once in
+     * the rendered SQL — bind order is {@code (lon, lat, radius_m, limit)}.
+     */
+    public static List<Map<String, Object>> geoRadius(Connection conn, String name,
+            double lon, double lat, double radius, String unit, int limit,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "georadius_with_dist", "geoRadius");
+        double radiusM = toMeters(radius, unit);
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setDouble(1, lon);
+            ps.setDouble(2, lat);
+            ps.setDouble(3, radiusM);
+            ps.setInt(4, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                ResultSetMetaData meta = rs.getMetaData();
+                int colCount = meta.getColumnCount();
+                List<Map<String, Object>> results = new ArrayList<>();
+                while (rs.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    for (int i = 1; i <= colCount; i++) {
+                        row.put(meta.getColumnLabel(i), rs.getObject(i));
+                    }
+                    results.add(row);
+                }
+                return results;
+            }
+        }
+    }
+
+    /**
+     * Members within {@code radius} of {@code member}'s location.
+     *
+     * <p>Proxy contract: {@code $1} and {@code $2} are both the anchor
+     * member name (one for the join, one for the self-exclusion);
+     * {@code $3=radius_m, $4=limit}. Bind order is
+     * {@code (member, member, radius_m, limit)}.
+     */
+    public static List<Map<String, Object>> geoRadiusByMember(Connection conn, String name,
+            String member, double radius, String unit, int limit,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "geosearch_member", "geoRadiusByMember");
+        double radiusM = toMeters(radius, unit);
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, member);
+            ps.setString(2, member);
+            ps.setDouble(3, radiusM);
+            ps.setInt(4, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                ResultSetMetaData meta = rs.getMetaData();
+                int colCount = meta.getColumnCount();
+                List<Map<String, Object>> results = new ArrayList<>();
+                while (rs.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    for (int i = 1; i <= colCount; i++) {
+                        row.put(meta.getColumnLabel(i), rs.getObject(i));
+                    }
+                    results.add(row);
+                }
+                return results;
+            }
+        }
+    }
+
+    public static boolean geoRemove(Connection conn, String name, String member,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "geo_remove", "geoRemove");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, member);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    public static long geoCount(Connection conn, String name,
+            Map<String, String> patterns) throws SQLException {
+        validateIdentifier(name);
+        String sql = requirePattern(patterns, "geo_count", "geoCount");
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) return rs.getLong(1);
+            return 0L;
+        }
     }
 
     public static String script(Connection conn, String luaCode, String... args) throws SQLException {
