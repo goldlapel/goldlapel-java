@@ -85,7 +85,7 @@ public class GoldLapelOptions {
         return mode;
     }
 
-    /** Operating mode, passed as {@code --mode} (e.g. {@code "waiter"}, {@code "bellhop"}). */
+    /** Operating mode, passed as {@code --mode} (e.g. {@code "waiter"}, {@code "consideration"}). */
     public void setMode(String mode) {
         this.mode = mode;
     }
