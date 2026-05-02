@@ -1100,6 +1100,9 @@ public class GoldLapel implements AutoCloseable {
     private static final Pattern NO_PORT =
         Pattern.compile("^(postgres(?:ql)?://(?:.*@)?)([^:/?#]+)(.*)$");
 
+    private static final Pattern APP_NAME_PRESENT =
+        Pattern.compile("[?&]application_name=");
+
     static String findBinary() {
         // 1. Explicit override via env var
         String envPath = System.getenv("GOLDLAPEL_BINARY");
@@ -1125,6 +1128,41 @@ public class GoldLapel implements AutoCloseable {
         );
     }
 
+    /**
+     * The wrapper's installed version. Read from the JAR's
+     * {@code Implementation-Version} manifest entry; CI sets this from the git
+     * tag at publish time. Local dev / test builds return {@code "0.0.0"}.
+     * Used to build the {@code application_name} marker on PG connections so
+     * the proxy can classify wrapper-vs-raw traffic and gate L2 result cache.
+     */
+    static String wrapperVersion() {
+        Package pkg = GoldLapel.class.getPackage();
+        if (pkg != null) {
+            String v = pkg.getImplementationVersion();
+            if (v != null && !v.isEmpty()) return v;
+        }
+        return "0.0.0";
+    }
+
+    static String applicationNameMarker() {
+        return "goldlapel:java:" + wrapperVersion();
+    }
+
+    /**
+     * Append {@code application_name=goldlapel:java:<version>} to {@code url}
+     * unless one is already present (or {@code PGAPPNAME} is set in the env).
+     * The marker tells the proxy this is wrapper traffic so it can skip L2
+     * result cache (the wrapper has its own L1). Idempotent and override-
+     * respecting.
+     */
+    static String injectApplicationName(String url) {
+        if (APP_NAME_PRESENT.matcher(url).find()) return url;
+        String pgAppName = System.getenv("PGAPPNAME");
+        if (pgAppName != null && !pgAppName.isEmpty()) return url;
+        char sep = url.indexOf('?') >= 0 ? '&' : '?';
+        return url + sep + "application_name=" + applicationNameMarker();
+    }
+
     static String makeProxyUrl(String upstream, int port) {
         // Build a proxy URL: replace host with localhost and set the proxy port.
         // Uses regex instead of java.net.URI to avoid decoding percent-encoded
@@ -1133,16 +1171,17 @@ public class GoldLapel implements AutoCloseable {
         // pg URL with explicit port: scheme://[userinfo@]host:PORT[/path][?query]
         Matcher m = WITH_PORT.matcher(upstream);
         if (m.matches()) {
-            return m.group(1) + "localhost:" + port + m.group(4);
+            return injectApplicationName(m.group(1) + "localhost:" + port + m.group(4));
         }
 
         // pg URL without port: scheme://[userinfo@]host[/path][?query]
         m = NO_PORT.matcher(upstream);
         if (m.matches()) {
-            return m.group(1) + "localhost:" + port + m.group(3);
+            return injectApplicationName(m.group(1) + "localhost:" + port + m.group(3));
         }
 
-        // bare host:port (only if not a URL — guard against splitting on scheme colons)
+        // bare host:port (only if not a URL — guard against splitting on scheme colons).
+        // Bare-host form skips the marker — atypical caller path.
         if (!upstream.contains("://") && upstream.contains(":")) {
             return "localhost:" + port;
         }

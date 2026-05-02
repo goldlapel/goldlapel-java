@@ -113,10 +113,17 @@ class ExtractBinaryTest {
 
 class MakeProxyUrlTest {
 
+    // The wrapper appends `application_name=goldlapel:java:<version>` to every
+    // rewritten URL so the proxy can classify wrapper-vs-raw traffic and skip
+    // L2 result cache for wrappers (they have their own L1). PGAPPNAME is not
+    // set in the test JVM; if it ever were, callers would see different URLs.
+    private static final String APP_NAME_SUFFIX =
+        "application_name=" + GoldLapel.applicationNameMarker();
+
     @Test
     void postgresqlUrl() {
         assertEquals(
-            "postgresql://user:pass@localhost:7932/mydb",
+            "postgresql://user:pass@localhost:7932/mydb?" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://user:pass@dbhost:5432/mydb", 7932)
         );
     }
@@ -124,7 +131,7 @@ class MakeProxyUrlTest {
     @Test
     void postgresUrl() {
         assertEquals(
-            "postgres://user:pass@localhost:7932/mydb",
+            "postgres://user:pass@localhost:7932/mydb?" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgres://user:pass@remote.aws.com:5432/mydb", 7932)
         );
     }
@@ -132,7 +139,7 @@ class MakeProxyUrlTest {
     @Test
     void pgUrlWithoutPort() {
         assertEquals(
-            "postgresql://user:pass@localhost:7932/mydb",
+            "postgresql://user:pass@localhost:7932/mydb?" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://user:pass@host.aws.com/mydb", 7932)
         );
     }
@@ -140,13 +147,14 @@ class MakeProxyUrlTest {
     @Test
     void pgUrlWithoutPortOrPath() {
         assertEquals(
-            "postgresql://user:pass@localhost:7932",
+            "postgresql://user:pass@localhost:7932?" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://user:pass@host.aws.com", 7932)
         );
     }
 
     @Test
     void bareHostPort() {
+        // Bare-host form skips the marker — atypical caller path.
         assertEquals("localhost:7932", GoldLapel.makeProxyUrl("dbhost:5432", 7932));
     }
 
@@ -158,7 +166,7 @@ class MakeProxyUrlTest {
     @Test
     void preservesQueryParams() {
         assertEquals(
-            "postgresql://user:pass@localhost:7932/mydb?sslmode=require",
+            "postgresql://user:pass@localhost:7932/mydb?sslmode=require&" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://user:pass@remote:5432/mydb?sslmode=require", 7932)
         );
     }
@@ -166,7 +174,7 @@ class MakeProxyUrlTest {
     @Test
     void preservesPercentEncodedPassword() {
         assertEquals(
-            "postgresql://user:p%40ss@localhost:7932/mydb",
+            "postgresql://user:p%40ss@localhost:7932/mydb?" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://user:p%40ss@remote:5432/mydb", 7932)
         );
     }
@@ -174,7 +182,7 @@ class MakeProxyUrlTest {
     @Test
     void noUserinfo() {
         assertEquals(
-            "postgresql://localhost:7932/mydb",
+            "postgresql://localhost:7932/mydb?" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://dbhost:5432/mydb", 7932)
         );
     }
@@ -182,7 +190,7 @@ class MakeProxyUrlTest {
     @Test
     void noUserinfoNoPort() {
         assertEquals(
-            "postgresql://localhost:7932/mydb",
+            "postgresql://localhost:7932/mydb?" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://dbhost/mydb", 7932)
         );
     }
@@ -190,7 +198,7 @@ class MakeProxyUrlTest {
     @Test
     void localhostStaysLocalhost() {
         assertEquals(
-            "postgresql://user:pass@localhost:7932/mydb",
+            "postgresql://user:pass@localhost:7932/mydb?" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://user:pass@localhost:5432/mydb", 7932)
         );
     }
@@ -198,7 +206,7 @@ class MakeProxyUrlTest {
     @Test
     void atSignInPasswordWithPort() {
         assertEquals(
-            "postgresql://user:p@ss@localhost:7932/mydb",
+            "postgresql://user:p@ss@localhost:7932/mydb?" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://user:p@ss@host:5432/mydb", 7932)
         );
     }
@@ -206,7 +214,7 @@ class MakeProxyUrlTest {
     @Test
     void atSignInPasswordWithoutPort() {
         assertEquals(
-            "postgresql://user:p@ss@localhost:7932/mydb",
+            "postgresql://user:p@ss@localhost:7932/mydb?" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://user:p@ss@host/mydb", 7932)
         );
     }
@@ -214,9 +222,43 @@ class MakeProxyUrlTest {
     @Test
     void atSignInPasswordWithQueryParams() {
         assertEquals(
-            "postgresql://user:p@ss@localhost:7932/mydb?sslmode=require&param=val@ue",
+            "postgresql://user:p@ss@localhost:7932/mydb?sslmode=require&param=val@ue&" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://user:p@ss@host:5432/mydb?sslmode=require&param=val@ue", 7932)
         );
+    }
+}
+
+
+class ApplicationNameMarkerTest {
+    // L2-router architecture: wrappers identify themselves to the proxy via PG
+    // `application_name` so the proxy can gate L2 result cache (wrappers have
+    // their own L1; raw clients don't).
+
+    @Test
+    void markerHasGoldlapelJavaShape() {
+        assertTrue(GoldLapel.applicationNameMarker().matches("^goldlapel:java:.+$"));
+    }
+
+    @Test
+    void appendsMarkerWhenNoExistingQuery() {
+        String out = GoldLapel.makeProxyUrl("postgresql://localhost:5432/mydb", 7932);
+        assertTrue(out.contains("?application_name=goldlapel:java:"), "expected marker in: " + out);
+    }
+
+    @Test
+    void appendsMarkerAfterExistingQueryParams() {
+        String out = GoldLapel.makeProxyUrl("postgresql://localhost:5432/mydb?sslmode=require", 7932);
+        assertTrue(out.contains("sslmode=require"));
+        assertTrue(out.contains("&application_name=goldlapel:java:"));
+    }
+
+    @Test
+    void respectsUserSetApplicationName() {
+        // User explicitly set application_name in the upstream URL — wrapper does not clobber.
+        String out = GoldLapel.makeProxyUrl(
+            "postgresql://localhost:5432/mydb?application_name=my-app", 7932);
+        assertTrue(out.contains("application_name=my-app"));
+        assertTrue(!out.contains("goldlapel:java"));
     }
 }
 
