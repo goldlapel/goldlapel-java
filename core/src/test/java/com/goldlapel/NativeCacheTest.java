@@ -4,6 +4,8 @@ import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.Nested;
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -447,5 +449,308 @@ class NativeCacheTest {
             assertEquals(0, errors.get(),
                 "concurrent stats + cache ops must not throw");
         }
+    }
+
+    // --- L1 telemetry: counters + snapshot shape ---
+
+    @Nested class EvictionsCounterTest {
+        @Test void startsZero() {
+            NativeCache cache = makeCache();
+            assertEquals(0, cache.statsEvictions.get());
+        }
+
+        @Test void bumpsOnOverflow() throws Exception {
+            // Force capacity = 4 by setting env before construction. The cache
+            // reads GOLDLAPEL_NATIVE_CACHE_SIZE in the constructor, so we
+            // can't change it after — use reflection to override the field.
+            NativeCache cache = makeCacheWithCapacity(4);
+            for (int i = 0; i < 8; i++) {
+                cache.put("SELECT " + i, null,
+                    Collections.singletonList(new Object[]{i}), new String[]{"x"});
+            }
+            // 8 puts, capacity 4 -> 4 evictions.
+            assertEquals(4, cache.statsEvictions.get());
+        }
+
+        @Test void noBumpWithinCapacity() throws Exception {
+            NativeCache cache = makeCacheWithCapacity(8);
+            for (int i = 0; i < 4; i++) {
+                cache.put("SELECT " + i, null,
+                    Collections.singletonList(new Object[]{i}), new String[]{"x"});
+            }
+            assertEquals(0, cache.statsEvictions.get());
+        }
+    }
+
+    @Nested class SnapshotShapeTest {
+        @Test void carriesRequiredFields() {
+            NativeCache cache = makeCache();
+            cache.put("SELECT 1", null,
+                Collections.singletonList(new Object[]{1}), new String[]{"x"});
+            cache.get("SELECT 1", null);
+            cache.get("SELECT MISS", null);
+            Map<String, Object> snap = cache.buildSnapshot();
+            assertEquals(cache.getWrapperId(), snap.get("wrapper_id"));
+            assertEquals("java", snap.get("lang"));
+            assertNotNull(snap.get("version"));
+            assertEquals(1L, snap.get("hits"));
+            assertEquals(1L, snap.get("misses"));
+            assertEquals(0L, snap.get("evictions"));
+            assertEquals(0L, snap.get("invalidations"));
+            assertEquals(1L, snap.get("current_size_entries"));
+            assertNotNull(snap.get("capacity_entries"));
+        }
+
+        @Test void wrapperIdIsUuid() {
+            NativeCache cache = makeCache();
+            // Throws IllegalArgumentException if not a valid UUID.
+            UUID parsed = UUID.fromString(cache.getWrapperId());
+            // UUID4 has version bits = 0b0100 (high nibble of byte 6).
+            assertEquals(4, parsed.version());
+        }
+
+        @Test void wrapperIdStableAcrossCalls() {
+            NativeCache cache = makeCache();
+            String a = (String) cache.buildSnapshot().get("wrapper_id");
+            String b = (String) cache.buildSnapshot().get("wrapper_id");
+            assertEquals(a, b);
+        }
+    }
+
+    @Nested class JsonSerializerTest {
+        @Test void emitsCompactObject() {
+            // Uses LinkedHashMap so iteration order matches insertion — the
+            // serializer never reorders.
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("a", 1L);
+            m.put("b", "x");
+            m.put("c", true);
+            assertEquals("{\"a\":1,\"b\":\"x\",\"c\":true}", NativeCache.jsonObject(m));
+        }
+
+        @Test void escapesQuotesAndBackslashes() {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("k", "a\"b\\c");
+            assertEquals("{\"k\":\"a\\\"b\\\\c\"}", NativeCache.jsonObject(m));
+        }
+
+        @Test void escapesControlChars() {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("k", "x\ny\tz");
+            assertEquals("{\"k\":\"x\\ny\\tz\"}", NativeCache.jsonObject(m));
+        }
+
+        @Test void serializesNullsAndNumbers() {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("n", null);
+            m.put("i", 42L);
+            m.put("d", 1.5);
+            assertEquals("{\"n\":null,\"i\":42,\"d\":1.5}", NativeCache.jsonObject(m));
+        }
+    }
+
+    // --- L1 telemetry: state-change emission via send override (unit) ---
+
+    @Nested class StateChangeUnitTest {
+        @Test void evictionRateFiresCacheFull() throws Exception {
+            // Capacity 4 — every put past the 4th evicts. Window = 200 puts.
+            NativeCache cache = makeCacheWithCapacity(4);
+            List<String> emissions = Collections.synchronizedList(new ArrayList<>());
+            cache.setSendOverride(emissions::add);
+            // Need to fill the window before any state-change can fire.
+            for (int i = 0; i < NativeCache.EVICT_RATE_WINDOW + 10; i++) {
+                cache.put("SELECT " + i, null,
+                    Collections.singletonList(new Object[]{i}), new String[]{"x"});
+            }
+            boolean any = emissions.stream().anyMatch(l -> l.contains("cache_full"));
+            assertTrue(any, "expected at least one cache_full emission, got " + emissions);
+        }
+
+        @Test void noFireBelowWindow() throws Exception {
+            // Fewer puts than the window -> no state-change fires (warmup gate).
+            NativeCache cache = makeCacheWithCapacity(2);
+            List<String> emissions = Collections.synchronizedList(new ArrayList<>());
+            cache.setSendOverride(emissions::add);
+            for (int i = 0; i < NativeCache.EVICT_RATE_WINDOW - 1; i++) {
+                cache.put("SELECT " + i, null,
+                    Collections.singletonList(new Object[]{i}), new String[]{"x"});
+            }
+            boolean any = emissions.stream().anyMatch(l -> l.contains("cache_full"));
+            assertFalse(any, "no cache_full expected before window fills, got " + emissions);
+        }
+
+        @Test void requestSnapshotEmitsResponse() {
+            NativeCache cache = makeCache();
+            List<String> emissions = Collections.synchronizedList(new ArrayList<>());
+            cache.setSendOverride(emissions::add);
+            cache.processRequest("snapshot");
+            List<String> rLines = filter(emissions, "R:");
+            assertEquals(1, rLines.size(), emissions.toString());
+            assertTrue(rLines.get(0).contains("\"wrapper_id\":\"" + cache.getWrapperId() + "\""));
+        }
+
+        @Test void requestEmptyBodyTreatedAsSnapshot() {
+            NativeCache cache = makeCache();
+            List<String> emissions = Collections.synchronizedList(new ArrayList<>());
+            cache.setSendOverride(emissions::add);
+            cache.processRequest("");
+            assertEquals(1, filter(emissions, "R:").size());
+        }
+
+        @Test void requestUnknownBodyDropped() {
+            NativeCache cache = makeCache();
+            List<String> emissions = Collections.synchronizedList(new ArrayList<>());
+            cache.setSendOverride(emissions::add);
+            cache.processRequest("future_request_type");
+            assertEquals(0, filter(emissions, "R:").size());
+        }
+
+        @Test void unknownProxyPrefixSilentlyIgnored() {
+            // Backwards-compat: future proxy could send unknown prefixes; the
+            // wrapper must not crash.
+            NativeCache cache = makeCache();
+            cache.processSignal("Z:future-prefix");
+            cache.processSignal("$:bogus");
+            // No assertion needed — the test passes if no exception is raised.
+        }
+    }
+
+    // --- L1 telemetry: protocol shape via real socket (integration) ---
+
+    @Nested class StateChangeIntegrationTest {
+        @Test void wrapperConnectedEmittedOnSocketConnect() throws Exception {
+            NativeCache cache = makeCache();
+            try (ServerSocket server = new ServerSocket(0)) {
+                int port = server.getLocalPort();
+                resetConnectedFlag(cache);
+                cache.connectInvalidation(port);
+                Socket conn = server.accept();
+                List<String> lines = Collections.synchronizedList(new ArrayList<>());
+                Thread reader = startReader(conn, lines);
+                try {
+                    waitFor(() -> lines.stream().anyMatch(l -> l.startsWith("S:")), 2000);
+                    List<String> sLines = filter(lines, "S:");
+                    assertFalse(sLines.isEmpty(), "expected S: line, got " + lines);
+                    String body = sLines.get(0).substring(2);
+                    assertTrue(body.contains("\"state\":\"wrapper_connected\""), body);
+                    assertTrue(body.contains("\"lang\":\"java\""), body);
+                    assertTrue(body.contains("\"wrapper_id\":\"" + cache.getWrapperId() + "\""), body);
+                } finally {
+                    conn.close();
+                    reader.interrupt();
+                    cache.stopInvalidation();
+                }
+            }
+        }
+
+        @Test void snapshotRequestReturnsResponse() throws Exception {
+            NativeCache cache = makeCache();
+            cache.put("SELECT 1", null,
+                Collections.singletonList(new Object[]{1}), new String[]{"x"});
+            cache.get("SELECT 1", null);
+            try (ServerSocket server = new ServerSocket(0)) {
+                int port = server.getLocalPort();
+                resetConnectedFlag(cache);
+                cache.connectInvalidation(port);
+                Socket conn = server.accept();
+                List<String> lines = Collections.synchronizedList(new ArrayList<>());
+                Thread reader = startReader(conn, lines);
+                try {
+                    // Wait for wrapper_connected so we know the socket is wired.
+                    waitFor(() -> lines.stream().anyMatch(l -> l.startsWith("S:")), 2000);
+                    PrintWriter w = new PrintWriter(conn.getOutputStream(), true);
+                    w.println("?:snapshot");
+                    waitFor(() -> lines.stream().anyMatch(l -> l.startsWith("R:")), 2000);
+                    List<String> rLines = filter(lines, "R:");
+                    assertFalse(rLines.isEmpty(), "expected R: line, got " + lines);
+                    String body = rLines.get(0).substring(2);
+                    assertTrue(body.contains("\"wrapper_id\":\"" + cache.getWrapperId() + "\""), body);
+                    assertTrue(body.contains("\"hits\":1"), body);
+                    assertTrue(body.contains("\"current_size_entries\":1"), body);
+                } finally {
+                    conn.close();
+                    reader.interrupt();
+                    cache.stopInvalidation();
+                }
+            }
+        }
+
+        @Test void reportStatsDisabledSuppressesEmissions() throws Exception {
+            // Construct an instance under env-var override. The cache reads
+            // GOLDLAPEL_REPORT_STATS in the constructor, so we set the env var
+            // by reflection on ProcessEnvironment — JVMs don't expose a setenv
+            // on the public API, so we override the field directly instead.
+            NativeCache cache = makeCache();
+            cache.setReportStats(false);
+            assertFalse(cache.isReportStats());
+            try (ServerSocket server = new ServerSocket(0)) {
+                int port = server.getLocalPort();
+                resetConnectedFlag(cache);
+                cache.connectInvalidation(port);
+                Socket conn = server.accept();
+                List<String> lines = Collections.synchronizedList(new ArrayList<>());
+                Thread reader = startReader(conn, lines);
+                try {
+                    Thread.sleep(200);
+                    PrintWriter w = new PrintWriter(conn.getOutputStream(), true);
+                    w.println("?:snapshot");
+                    Thread.sleep(200);
+                    long noisy = lines.stream()
+                        .filter(l -> l.startsWith("S:") || l.startsWith("R:"))
+                        .count();
+                    assertEquals(0, noisy, "expected no S/R lines, got " + lines);
+                } finally {
+                    conn.close();
+                    reader.interrupt();
+                    cache.stopInvalidation();
+                }
+            }
+        }
+    }
+
+    // --- Test helpers ---
+
+    private static List<String> filter(List<String> lines, String prefix) {
+        List<String> out = new ArrayList<>();
+        synchronized (lines) {
+            for (String l : lines) if (l.startsWith(prefix)) out.add(l);
+        }
+        return out;
+    }
+
+    private static void waitFor(java.util.function.BooleanSupplier pred, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (pred.getAsBoolean()) return;
+            Thread.sleep(20);
+        }
+    }
+
+    private static Thread startReader(Socket conn, List<String> sink) {
+        Thread t = new Thread(() -> {
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(conn.getInputStream()))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    sink.add(line);
+                }
+            } catch (Exception ignored) {}
+        });
+        t.setDaemon(true);
+        t.start();
+        return t;
+    }
+
+    private static void resetConnectedFlag(NativeCache cache) throws Exception {
+        var f = NativeCache.class.getDeclaredField("invalidationConnected");
+        f.setAccessible(true);
+        f.setBoolean(cache, false);
+    }
+
+    private static NativeCache makeCacheWithCapacity(int capacity) throws Exception {
+        NativeCache cache = new NativeCache(capacity, true, true);
+        var connected = NativeCache.class.getDeclaredField("invalidationConnected");
+        connected.setAccessible(true);
+        connected.setBoolean(cache, true);
+        return cache;
     }
 }

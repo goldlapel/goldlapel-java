@@ -5,6 +5,7 @@ import java.net.Socket;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -23,36 +24,120 @@ public class NativeCache {
         "except", "all", "distinct", "lateral", "values"
     );
 
+    // --- L1 telemetry tuning ---
+    //
+    // Demand-driven model (matches goldlapel-python cache.py): the wrapper has
+    // NO background timer. Cache counters increment on cache ops (free);
+    // state-change events are emitted synchronously when a relevant counter
+    // crosses a threshold; snapshot replies are sent only when the proxy asks
+    // via ?:<request>.
+    //
+    // Eviction-rate sliding window. cache_full fires when >= EVICT_RATE_HIGH
+    // of the last EVICT_RATE_WINDOW puts caused an eviction; cache_recovered
+    // fires when the rate falls back below EVICT_RATE_LOW.
+    static final int EVICT_RATE_WINDOW = 200;
+    static final double EVICT_RATE_HIGH = 0.5;  // 50% of recent puts evicted -> cache_full
+    static final double EVICT_RATE_LOW = 0.1;   // <= 10% -> cache_recovered
+
     private final ConcurrentHashMap<String, CacheEntry> cache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> tableIndex = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> accessOrder = new ConcurrentHashMap<>();
     private final AtomicLong counter = new AtomicLong(0);
-    private final int maxEntries;
-    private final boolean enabled;
+    final int maxEntries;
+    final boolean enabled;
 
     private volatile boolean invalidationConnected = false;
     private volatile boolean invalidationStop = false;
     private Thread invalidationThread;
-    private Socket invalidationSocket;
+    // Volatile because it's written by the recv-loop thread and read by
+    // cache-op threads in `sendLine` (state-change emissions) and by the
+    // shutdown path in `stopInvalidation`. Without volatile a reader could
+    // see a stale null after the recv thread connected, so the very first
+    // `S:wrapper_connected` could be silently dropped on slower CPUs.
+    private volatile Socket invalidationSocket;
     private int invalidationPort;
     private int reconnectAttempt = 0;
 
     final AtomicLong statsHits = new AtomicLong(0);
     final AtomicLong statsMisses = new AtomicLong(0);
     final AtomicLong statsInvalidations = new AtomicLong(0);
+    // L1 telemetry: eviction counter — bumped in evictOne(). Atomic so the
+    // existing concurrent-access tests stay lock-free on the hot path.
+    final AtomicLong statsEvictions = new AtomicLong(0);
+
+    // L1 telemetry: stable wrapper identity for the lifetime of the process.
+    // Lets the proxy aggregate per-wrapper across reconnects.
+    private final String wrapperId = UUID.randomUUID().toString();
+    private static final String WRAPPER_LANG = "java";
+    private final String wrapperVersion;
+
+    // Set GOLDLAPEL_REPORT_STATS=false to disable all snapshot replies and
+    // state-change emissions (cache continues to function — only telemetry
+    // output is suppressed). Volatile (not final) so test code can flip it
+    // without reflection-on-final, which is brittle on Java 17+.
+    private volatile boolean reportStats;
+
+    // Sliding window for eviction-rate state-change detection. Bounded ring;
+    // updates are O(1) amortised. Guarded by `evictWindowLock` so the latched
+    // state flag flip is atomic with the rate computation.
+    private final byte[] recentEvictions = new byte[EVICT_RATE_WINDOW];
+    private int recentEvictionsLen = 0;       // number of valid entries (grows to WINDOW)
+    private int recentEvictionsIdx = 0;       // next write index once at capacity
+    private boolean stateCacheFull = false;   // latched — only flip on transition
+    private final Object evictWindowLock = new Object();
+
+    // Synchronizes writes from the recv thread (replies to ?:) and any
+    // cache-op thread (state-change emissions). The socket is a single
+    // full-duplex stream; concurrent writes would interleave bytes.
+    private final Object sendLock = new Object();
+
+    // Send strategy is pluggable for tests: production sends to the live
+    // socket, unit tests inject a Consumer<String> that captures emissions.
+    // Volatile so the recv thread sees writes from the test thread.
+    private volatile Consumer<String> sendOverride = null;
 
     private static NativeCache instance;
+    private static Thread shutdownHook;
 
     public NativeCache() {
+        this(envCapacity(), envEnabled(), envReportStats());
+    }
+
+    /** Test-only constructor with explicit overrides. Package-private. */
+    NativeCache(int capacity, boolean enabled, boolean reportStats) {
+        this.maxEntries = capacity;
+        this.enabled = enabled;
+        this.reportStats = reportStats;
+        // Read package version from JAR manifest. Falls back to "unknown" in
+        // dev / IDE runs where the class wasn't loaded from a packaged JAR.
+        String v;
+        try {
+            v = NativeCache.class.getPackage().getImplementationVersion();
+        } catch (Exception ignored) {
+            v = null;
+        }
+        this.wrapperVersion = v != null ? v : "unknown";
+    }
+
+    private static int envCapacity() {
         String sizeStr = System.getenv("GOLDLAPEL_NATIVE_CACHE_SIZE");
-        this.maxEntries = sizeStr != null ? Integer.parseInt(sizeStr) : 32768;
-        String enabledStr = System.getenv("GOLDLAPEL_NATIVE_CACHE");
-        this.enabled = enabledStr == null || !"false".equalsIgnoreCase(enabledStr);
+        return sizeStr != null ? Integer.parseInt(sizeStr) : 32768;
+    }
+
+    private static boolean envEnabled() {
+        String s = System.getenv("GOLDLAPEL_NATIVE_CACHE");
+        return s == null || !"false".equalsIgnoreCase(s);
+    }
+
+    private static boolean envReportStats() {
+        String s = System.getenv("GOLDLAPEL_REPORT_STATS");
+        return s == null || !"false".equalsIgnoreCase(s);
     }
 
     public static synchronized NativeCache getInstance() {
         if (instance == null) {
             instance = new NativeCache();
+            instance.registerShutdownHook();
         }
         return instance;
     }
@@ -61,6 +146,17 @@ public class NativeCache {
         if (instance != null) {
             instance.stopInvalidation();
             instance = null;
+        }
+        // Drop the shutdown hook so a new one (with a fresh instance ref) can
+        // register on the next getInstance(). Tests that reset between cases
+        // would otherwise pile up dead hooks.
+        if (shutdownHook != null) {
+            try {
+                Runtime.getRuntime().removeShutdownHook(shutdownHook);
+            } catch (IllegalStateException ignored) {
+                // JVM already shutting down — no-op.
+            }
+            shutdownHook = null;
         }
     }
 
@@ -89,14 +185,20 @@ public class NativeCache {
         String key = makeKey(sql, params);
         if (key == null) return;
         Set<String> tables = extractTables(sql);
+        boolean evicted = false;
         if (!cache.containsKey(key) && cache.size() >= maxEntries) {
             evictOne();
+            evicted = true;
         }
         cache.put(key, new CacheEntry(rows, columns, tables));
         accessOrder.put(key, counter.incrementAndGet());
         for (String table : tables) {
             tableIndex.computeIfAbsent(table, k -> ConcurrentHashMap.newKeySet()).add(key);
         }
+        recordEviction(evicted);
+        // Eviction-rate threshold check happens outside the window lock — emit
+        // may take `sendLock` and we don't want to nest locks.
+        maybeEmitEvictionRateStateChange();
     }
 
     public void invalidateTable(String table) {
@@ -169,6 +271,11 @@ public class NativeCache {
                 );
                 invalidationSocket.setSoTimeout(30000);
 
+                // L1 telemetry: emit `wrapper_connected` on the freshly-wired
+                // socket. Done before entering the recv loop so it's the very
+                // first line on the connection.
+                emitStateChange("wrapper_connected");
+
                 while (!invalidationStop) {
                     try {
                         String line = reader.readLine();
@@ -180,13 +287,17 @@ public class NativeCache {
                 }
             } catch (IOException ignored) {
             } finally {
+                // Drop the socket reference under sendLock so any concurrent
+                // emitter doesn't race a write against socket close.
+                synchronized (sendLock) {
+                    if (invalidationSocket != null) {
+                        try { invalidationSocket.close(); } catch (IOException ignored) {}
+                        invalidationSocket = null;
+                    }
+                }
                 if (invalidationConnected) {
                     invalidationConnected = false;
                     invalidateAll();
-                }
-                if (invalidationSocket != null) {
-                    try { invalidationSocket.close(); } catch (IOException ignored) {}
-                    invalidationSocket = null;
                 }
             }
 
@@ -198,6 +309,9 @@ public class NativeCache {
     }
 
     void processSignal(String line) {
+        // Backwards-compat: unknown prefixes are silently ignored. Older
+        // proxies sent only `I:`, `C:`, and `P:` (keepalive); newer proxies
+        // may add request types here.
         if (line.startsWith("I:")) {
             String table = line.substring(2).trim();
             if ("*".equals(table)) {
@@ -205,6 +319,177 @@ public class NativeCache {
             } else {
                 invalidateTable(table);
             }
+        } else if (line.startsWith("?:")) {
+            // Snapshot request from the proxy. Reply with R:<json>.
+            processRequest(line.substring(2));
+        }
+        // C: (config), P: (ping), and anything else — ignored.
+    }
+
+    // --- L1 telemetry: sliding window + state-change emission ---
+
+    private void recordEviction(boolean evicted) {
+        synchronized (evictWindowLock) {
+            byte v = (byte) (evicted ? 1 : 0);
+            if (recentEvictionsLen < EVICT_RATE_WINDOW) {
+                recentEvictions[recentEvictionsLen++] = v;
+            } else {
+                recentEvictions[recentEvictionsIdx] = v;
+                recentEvictionsIdx = (recentEvictionsIdx + 1) % EVICT_RATE_WINDOW;
+            }
+        }
+    }
+
+    /**
+     * Build the L1 snapshot the proxy aggregates per-tick. Counter reads use
+     * the existing AtomicLong getters — no critical section needed; the proxy
+     * computes deltas across ticks and tolerates per-field skew.
+     */
+    Map<String, Object> buildSnapshot() {
+        Map<String, Object> snap = new LinkedHashMap<>();
+        snap.put("wrapper_id", wrapperId);
+        snap.put("lang", WRAPPER_LANG);
+        snap.put("version", wrapperVersion);
+        snap.put("hits", statsHits.get());
+        snap.put("misses", statsMisses.get());
+        snap.put("evictions", statsEvictions.get());
+        snap.put("invalidations", statsInvalidations.get());
+        snap.put("current_size_entries", (long) cache.size());
+        snap.put("capacity_entries", (long) maxEntries);
+        return snap;
+    }
+
+    /**
+     * Serialize a line write under sendLock. Best-effort — socket errors are
+     * swallowed (the recv loop will detect the broken connection on its next
+     * iteration and reconnect). Test override path bypasses the socket
+     * entirely so tests can capture emissions without spinning a TCP server.
+     */
+    void sendLine(String line) {
+        if (!reportStats) return;
+        Consumer<String> override = sendOverride;
+        if (override != null) {
+            override.accept(line);
+            return;
+        }
+        String payload = line.endsWith("\n") ? line : line + "\n";
+        synchronized (sendLock) {
+            Socket sock = invalidationSocket;
+            if (sock == null) return;
+            try {
+                OutputStream out = sock.getOutputStream();
+                out.write(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                out.flush();
+            } catch (IOException ignored) {
+                // Connection dead — recv loop will rebuild on next iteration.
+                // Don't try to repair here; we'd race the reconnect logic.
+            }
+        }
+    }
+
+    /** Emit S:<json> with snapshot + state name. */
+    void emitStateChange(String state) {
+        if (!reportStats) return;
+        Map<String, Object> snap = buildSnapshot();
+        snap.put("state", state);
+        snap.put("ts_ms", System.currentTimeMillis());
+        sendLine("S:" + jsonObject(snap));
+    }
+
+    /** Emit R:<json> snapshot reply to a ?:<request>. */
+    void emitResponse() {
+        if (!reportStats) return;
+        Map<String, Object> snap = buildSnapshot();
+        snap.put("ts_ms", System.currentTimeMillis());
+        sendLine("R:" + jsonObject(snap));
+    }
+
+    /**
+     * Check the eviction-rate sliding window and emit a state change if the
+     * latched state should flip. Hysteresis-guarded: crossing HIGH emits
+     * cache_full; falling back below LOW emits cache_recovered; rates between
+     * LOW and HIGH leave the latched state unchanged (no flapping).
+     */
+    private void maybeEmitEvictionRateStateChange() {
+        String emit = null;
+        synchronized (evictWindowLock) {
+            // Need at least a full window before reporting state — a single
+            // eviction in 3 puts is noise.
+            if (recentEvictionsLen < EVICT_RATE_WINDOW) return;
+            int sum = 0;
+            for (int i = 0; i < recentEvictionsLen; i++) sum += recentEvictions[i];
+            double rate = (double) sum / recentEvictionsLen;
+            if (!stateCacheFull && rate >= EVICT_RATE_HIGH) {
+                stateCacheFull = true;
+                emit = "cache_full";
+            } else if (stateCacheFull && rate <= EVICT_RATE_LOW) {
+                stateCacheFull = false;
+                emit = "cache_recovered";
+            }
+        }
+        // Emit outside the window lock — emitStateChange takes sendLock and
+        // may block on a socket write; never nest locks across I/O.
+        if (emit != null) emitStateChange(emit);
+    }
+
+    /**
+     * Handle ?:<request> from the proxy. Today the only request is `snapshot`
+     * — the proxy asks for a current counter snapshot and we reply with
+     * R:<json>. Future request types can extend this without breaking older
+     * proxies (they'd ignore unknown R: lines, but only the proxy that sent
+     * ?:<x> will be expecting a reply, so the contract is local to the
+     * request type). Empty body is treated as snapshot for forward-compat.
+     */
+    void processRequest(String raw) {
+        String body = raw == null ? "" : raw.trim();
+        if (body.isEmpty() || "snapshot".equals(body)) {
+            emitResponse();
+        }
+    }
+
+    /**
+     * Emit a final `wrapper_disconnected` snapshot before shutdown. Called
+     * from the JVM shutdown hook — best effort; the socket may already be
+     * torn down.
+     */
+    public void emitWrapperDisconnected() {
+        emitStateChange("wrapper_disconnected");
+    }
+
+    /** Visible for testing — install a synchronous send capture. */
+    void setSendOverride(Consumer<String> override) {
+        this.sendOverride = override;
+    }
+
+    /** Visible for testing — read the stable wrapper identity. */
+    String getWrapperId() {
+        return wrapperId;
+    }
+
+    /** Visible for testing — read the configured opt-out flag. */
+    boolean isReportStats() {
+        return reportStats;
+    }
+
+    /** Visible for testing — flip the opt-out flag without env var or restart. */
+    void setReportStats(boolean value) {
+        this.reportStats = value;
+    }
+
+    private void registerShutdownHook() {
+        if (shutdownHook != null) return;
+        shutdownHook = new Thread(() -> {
+            try {
+                emitWrapperDisconnected();
+            } catch (Throwable ignored) {
+                // Best effort on shutdown — never block JVM exit on telemetry.
+            }
+        }, "goldlapel-shutdown");
+        try {
+            Runtime.getRuntime().addShutdownHook(shutdownHook);
+        } catch (IllegalStateException ignored) {
+            // JVM already shutting down — drop the registration.
+            shutdownHook = null;
         }
     }
 
@@ -337,6 +622,69 @@ public class NativeCache {
                 }
             }
         }
+        statsEvictions.incrementAndGet();
+    }
+
+    // --- L1 telemetry: minimal JSON serializer ---
+    //
+    // Hand-rolled to avoid pulling in Jackson/Gson; the snapshot map is flat
+    // and shape-stable so a 30-line serializer is cheaper than a dependency.
+    // Mirrors goldlapel-python's `json.dumps(payload, separators=(",", ":"))`
+    // — compact form, snake_case keys, no whitespace.
+
+    static String jsonObject(Map<String, Object> map) {
+        StringBuilder b = new StringBuilder(128);
+        b.append('{');
+        boolean first = true;
+        for (Map.Entry<String, Object> e : map.entrySet()) {
+            if (!first) b.append(',');
+            first = false;
+            jsonString(b, e.getKey());
+            b.append(':');
+            jsonValue(b, e.getValue());
+        }
+        b.append('}');
+        return b.toString();
+    }
+
+    private static void jsonValue(StringBuilder b, Object v) {
+        if (v == null) {
+            b.append("null");
+        } else if (v instanceof String) {
+            jsonString(b, (String) v);
+        } else if (v instanceof Boolean) {
+            b.append(((Boolean) v) ? "true" : "false");
+        } else if (v instanceof Number) {
+            // Long, Integer, Double — toString round-trips correctly for the
+            // counter / timestamp shapes we emit. NaN / Infinity not expected.
+            b.append(v.toString());
+        } else {
+            // Fallback — never exercised today but keeps the serializer total.
+            jsonString(b, v.toString());
+        }
+    }
+
+    private static void jsonString(StringBuilder b, String s) {
+        b.append('"');
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"':  b.append("\\\""); break;
+                case '\\': b.append("\\\\"); break;
+                case '\b': b.append("\\b"); break;
+                case '\f': b.append("\\f"); break;
+                case '\n': b.append("\\n"); break;
+                case '\r': b.append("\\r"); break;
+                case '\t': b.append("\\t"); break;
+                default:
+                    if (c < 0x20) {
+                        b.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        b.append(c);
+                    }
+            }
+        }
+        b.append('"');
     }
 
     // --- Inner class ---
