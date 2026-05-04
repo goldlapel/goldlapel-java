@@ -111,6 +111,7 @@ public class GoldLapel implements AutoCloseable {
     private final boolean silent;
     private final boolean mesh;
     private final String meshTag;
+    private final boolean enableL2ForWrappers;
     private Process process;
     private String proxyUrl;
     private Connection internalConn;
@@ -195,6 +196,7 @@ public class GoldLapel implements AutoCloseable {
         this.mesh = options.isMesh();
         String tag = options.getMeshTag();
         this.meshTag = (tag == null || tag.isEmpty()) ? null : tag;
+        this.enableL2ForWrappers = options.isEnableL2ForWrappers();
         this.process = null;
         this.proxyUrl = null;
 
@@ -255,49 +257,7 @@ public class GoldLapel implements AutoCloseable {
         }
 
         String binary = findBinary();
-        List<String> cmd = new ArrayList<>();
-        cmd.add(binary);
-        cmd.add("--upstream");
-        cmd.add(upstream);
-        cmd.add("--proxy-port");
-        cmd.add(String.valueOf(proxyPort));
-        // Top-level options (promoted out of the config map) emit their own
-        // CLI flags before the tuning-knob config map. Each is suppressed
-        // when the user hasn't set it, so the Rust binary applies its own
-        // defaults (and tuning stays aligned with the CLI/TOML/env surfaces).
-        if (dashboardPortExplicit) {
-            cmd.add("--dashboard-port");
-            cmd.add(String.valueOf(dashboardPort));
-        }
-        if (invalidationPortExplicit) {
-            cmd.add("--invalidation-port");
-            cmd.add(String.valueOf(invalidationPort));
-        }
-        String verboseFlag = translateLogLevel(logLevel);
-        if (verboseFlag != null) {
-            cmd.add(verboseFlag);
-        }
-        if (mode != null) {
-            cmd.add("--mode");
-            cmd.add(mode);
-        }
-        if (license != null) {
-            cmd.add("--license");
-            cmd.add(license);
-        }
-        if (configFile != null) {
-            cmd.add("--config");
-            cmd.add(configFile);
-        }
-        if (mesh) {
-            cmd.add("--mesh");
-        }
-        if (meshTag != null) {
-            cmd.add("--mesh-tag");
-            cmd.add(meshTag);
-        }
-        cmd.addAll(configToArgs(config));
-        cmd.addAll(extraArgs);
+        List<String> cmd = buildSpawnCmd(binary);
 
         try {
             ProcessBuilder pb = new ProcessBuilder(cmd);
@@ -365,6 +325,64 @@ public class GoldLapel implements AutoCloseable {
         proxyUrl = makeProxyUrl(upstream, proxyPort);
 
         printBanner(System.err);
+    }
+
+    /**
+     * Build the argv that {@link #startProxy()} hands to {@link ProcessBuilder}.
+     * Package-private so tests can verify CLI-flag emission for top-level
+     * options (mesh, enableL2ForWrappers, etc.) without spawning the Rust
+     * binary. Order: required flags first ({@code --upstream}, {@code --proxy-port}),
+     * then top-level options that emit only when the user set them, then the
+     * tuning-knob config map, then any caller-supplied {@code extraArgs}.
+     */
+    List<String> buildSpawnCmd(String binary) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add(binary);
+        cmd.add("--upstream");
+        cmd.add(upstream);
+        cmd.add("--proxy-port");
+        cmd.add(String.valueOf(proxyPort));
+        // Top-level options (promoted out of the config map) emit their own
+        // CLI flags before the tuning-knob config map. Each is suppressed
+        // when the user hasn't set it, so the Rust binary applies its own
+        // defaults (and tuning stays aligned with the CLI/TOML/env surfaces).
+        if (dashboardPortExplicit) {
+            cmd.add("--dashboard-port");
+            cmd.add(String.valueOf(dashboardPort));
+        }
+        if (invalidationPortExplicit) {
+            cmd.add("--invalidation-port");
+            cmd.add(String.valueOf(invalidationPort));
+        }
+        String verboseFlag = translateLogLevel(logLevel);
+        if (verboseFlag != null) {
+            cmd.add(verboseFlag);
+        }
+        if (mode != null) {
+            cmd.add("--mode");
+            cmd.add(mode);
+        }
+        if (license != null) {
+            cmd.add("--license");
+            cmd.add(license);
+        }
+        if (configFile != null) {
+            cmd.add("--config");
+            cmd.add(configFile);
+        }
+        if (mesh) {
+            cmd.add("--mesh");
+        }
+        if (meshTag != null) {
+            cmd.add("--mesh-tag");
+            cmd.add(meshTag);
+        }
+        if (enableL2ForWrappers) {
+            cmd.add("--enable-l2-for-wrappers");
+        }
+        cmd.addAll(configToArgs(config));
+        cmd.addAll(extraArgs);
+        return cmd;
     }
 
     /**
@@ -628,6 +646,12 @@ public class GoldLapel implements AutoCloseable {
 
     String meshTag() {
         return meshTag;
+    }
+
+    // Package-private accessor for tests to verify enableL2ForWrappers wiring
+    // without spawning the proxy.
+    boolean enableL2ForWrappers() {
+        return enableL2ForWrappers;
     }
 
     public String getDashboardUrl() {

@@ -39,6 +39,7 @@ public class GoldLapelOptions {
     private boolean silent;
     private boolean mesh;
     private String meshTag;
+    private boolean enableL2ForWrappers;
 
     public Integer getProxyPort() {
         return proxyPort;
@@ -198,5 +199,26 @@ public class GoldLapelOptions {
      */
     public void setMeshTag(String meshTag) {
         this.meshTag = meshTag;
+    }
+
+    /**
+     * Whether wrapper-spawned proxies participate in L2 (the proxy result
+     * cache). Default {@code false} — per-connection wrapper-skip is the
+     * default since the L2 wrapper-skip change shipped: wrapper apps
+     * usually have their own in-process cache, and a single wrapper rarely
+     * benefits from sharing L2 with itself.
+     *
+     * <p>Set {@code true} for fleet deployments (multi-pod, frequent
+     * restarts, mesh) where L2 still earns its keep as a shared cache
+     * across many short-lived wrapper processes.
+     *
+     * <p>Equivalent CLI flag: {@code --enable-l2-for-wrappers}.
+     */
+    public boolean isEnableL2ForWrappers() {
+        return enableL2ForWrappers;
+    }
+
+    public void setEnableL2ForWrappers(boolean enableL2ForWrappers) {
+        this.enableL2ForWrappers = enableL2ForWrappers;
     }
 }

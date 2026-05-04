@@ -895,4 +895,68 @@ class ConfigToArgsTest {
             () -> GoldLapel.configToArgs(Collections.singletonMap("meshTag", "prod"))
         );
     }
+
+    // ── enableL2ForWrappers startup option ──────────────────────────────────
+
+    @Test
+    void testEnableL2ForWrappersDefaultFalse() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        assertFalse(opts.isEnableL2ForWrappers());
+    }
+
+    @Test
+    void testEnableL2ForWrappersSetterGetter() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setEnableL2ForWrappers(true);
+        assertTrue(opts.isEnableL2ForWrappers());
+        opts.setEnableL2ForWrappers(false);
+        assertFalse(opts.isEnableL2ForWrappers());
+    }
+
+    @Test
+    void testEnableL2ForWrappersStoredOnInstance() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setEnableL2ForWrappers(true);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        assertTrue(gl.enableL2ForWrappers());
+    }
+
+    @Test
+    void testEnableL2ForWrappersDefaultStoredOnInstance() {
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
+        assertFalse(gl.enableL2ForWrappers());
+    }
+
+    @Test
+    void testEnableL2ForWrappersInConfigMapRejected() {
+        // Regression guard: enableL2ForWrappers is a top-level canonical-surface
+        // option, never valid inside the structured config map.
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(Collections.singletonMap("enableL2ForWrappers", true))
+        );
+    }
+
+    @Test
+    void testEnableL2ForWrappersEmitsCliFlag() {
+        // Verify the flag actually reaches the spawned argv. Use buildSpawnCmd()
+        // — the same argv-build logic startProxy() hands to ProcessBuilder —
+        // without spawning the Rust binary.
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setEnableL2ForWrappers(true);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
+        assertTrue(cmd.contains("--enable-l2-for-wrappers"),
+            "argv must contain --enable-l2-for-wrappers when option is set; got: " + cmd);
+    }
+
+    @Test
+    void testEnableL2ForWrappersAbsentByDefault() {
+        // Default: no --enable-l2-for-wrappers in argv (per-connection
+        // wrapper-skip is the default since the L2 wrapper-skip change shipped).
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
+        List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
+        assertFalse(cmd.contains("--enable-l2-for-wrappers"),
+            "argv must NOT contain --enable-l2-for-wrappers by default; got: " + cmd);
+    }
 }
