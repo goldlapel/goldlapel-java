@@ -588,6 +588,143 @@ class GoldLapelAutoConfigurationTest {
         assertThat(props.getInvalidationPort()).isEqualTo(0);
         assertThat(props.isEnabled()).isTrue();
         assertThat(props.getProxyPort()).isEqualTo(7932);
+        // Top-level options surfaced from GoldLapelOptions: defaults must
+        // match the core module's defaults (silent=false, mesh=false,
+        // meshTag=null, enableL2ForWrappers=false).
+        assertThat(props.isSilent()).isFalse();
+        assertThat(props.isMesh()).isFalse();
+        assertThat(props.getMeshTag()).isNull();
+        assertThat(props.isEnableL2ForWrappers()).isFalse();
+    }
+
+    // --- Top-level GoldLapelOptions surfaced via @ConfigurationProperties ---
+    //
+    // silent / mesh / mesh-tag / enable-l2-for-wrappers must flow from
+    // application.yml through GoldLapelProperties into the GoldLapelOptions
+    // handed to GoldLapel.start(...). Defaults must match the core module.
+
+    @Test
+    void silentDefaultIsFalseInOptions() {
+        // No goldlapel.silent property set: GoldLapelOptions.isSilent() is the
+        // core default (false).
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).isSilent()).isFalse();
+                        assertThat(captured.get(0).isMesh()).isFalse();
+                        assertThat(captured.get(0).getMeshTag()).isNull();
+                        assertThat(captured.get(0).isEnableL2ForWrappers()).isFalse();
+                    });
+        }
+    }
+
+    @Test
+    void silentTrueViaProperty() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.silent=true")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).isSilent()).isTrue();
+                    });
+        }
+    }
+
+    @Test
+    void meshTrueViaProperty() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.mesh=true")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).isMesh()).isTrue();
+                    });
+        }
+    }
+
+    @Test
+    void meshTagViaKebabCaseProperty() {
+        // Spring binds kebab-case `mesh-tag` to camelCase `meshTag`.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.mesh=true",
+                            "goldlapel.mesh-tag=us-west-prod-1")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).isMesh()).isTrue();
+                        assertThat(captured.get(0).getMeshTag()).isEqualTo("us-west-prod-1");
+                    });
+        }
+    }
+
+    @Test
+    void enableL2ForWrappersViaKebabCaseProperty() {
+        // Spring binds kebab-case `enable-l2-for-wrappers` to camelCase
+        // `enableL2ForWrappers` on GoldLapelProperties + GoldLapelOptions.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.enable-l2-for-wrappers=true")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).isEnableL2ForWrappers()).isTrue();
+                    });
+        }
+    }
+
+    @Test
+    void allFourTopLevelOptionsTogetherEndToEnd() {
+        // Integration test: all 4 properties bound from application-style
+        // properties + verified end-to-end through to GoldLapelOptions.
+        // Mirrors the sample application.yml in the rollout doc.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.silent=true",
+                            "goldlapel.mesh=true",
+                            "goldlapel.mesh-tag=us-west-prod-1",
+                            "goldlapel.enable-l2-for-wrappers=true")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        GoldLapelOptions opts = captured.get(0);
+                        assertThat(opts.isSilent()).isTrue();
+                        assertThat(opts.isMesh()).isTrue();
+                        assertThat(opts.getMeshTag()).isEqualTo("us-west-prod-1");
+                        assertThat(opts.isEnableL2ForWrappers()).isTrue();
+                        // Existing options still wired correctly alongside
+                        // the new ones (no regression).
+                        assertThat(opts.getClient()).isEqualTo("spring-boot");
+                    });
+        }
     }
 
     // --- DataSource type agnostic tests ---

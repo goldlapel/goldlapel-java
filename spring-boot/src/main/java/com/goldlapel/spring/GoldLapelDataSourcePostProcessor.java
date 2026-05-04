@@ -105,6 +105,12 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                 if (parsedExtraArgs.length > 0) {
                     opts.setExtraArgs(parsedExtraArgs);
                 }
+                opts.setSilent(properties.isSilent());
+                opts.setMesh(properties.isMesh());
+                if (properties.getMeshTag() != null) {
+                    opts.setMeshTag(properties.getMeshTag());
+                }
+                opts.setEnableL2ForWrappers(properties.isEnableL2ForWrappers());
                 opts.setClient("spring-boot");
             });
         } catch (RuntimeException e) {
