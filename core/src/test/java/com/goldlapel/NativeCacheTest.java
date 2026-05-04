@@ -708,6 +708,104 @@ class NativeCacheTest {
         }
     }
 
+    // --- disableL1 (wrapper-side L1 opt-out) ---
+
+    @Nested class DisableL1Test {
+        @Test void defaultCacheBehavesAsToday() {
+            // Sanity: makeCache() builds with the default 3-arg constructor,
+            // which routes through the 4-arg form with disabled=false.
+            NativeCache cache = makeCache();
+            cache.put("SELECT * FROM users", null,
+                Collections.singletonList(new Object[]{"1", "alice"}),
+                new String[]{"id", "name"});
+            var entry = cache.get("SELECT * FROM users", null);
+            assertNotNull(entry);
+            assertEquals(1L, cache.statsHits.get());
+            assertEquals(0L, cache.statsMisses.get());
+            assertEquals(1, cache.size());
+        }
+
+        @Test void disabledGetReturnsNull() throws Exception {
+            NativeCache cache = makeDisabledCache();
+            cache.put("SELECT 1", null,
+                Collections.singletonList(new Object[]{1}), new String[]{"x"});
+            // Even a key we just "put" must miss — put is a no-op.
+            assertNull(cache.get("SELECT 1", null));
+        }
+
+        @Test void disabledPutDoesNotStore() throws Exception {
+            NativeCache cache = makeDisabledCache();
+            cache.put("SELECT 1", null,
+                Collections.singletonList(new Object[]{1}), new String[]{"x"});
+            cache.put("SELECT 2", null,
+                Collections.singletonList(new Object[]{2}), new String[]{"x"});
+            assertEquals(0, cache.size());
+        }
+
+        @Test void disabledMissesTickHitsStayZero() throws Exception {
+            NativeCache cache = makeDisabledCache();
+            // Three gets; all misses since put is a no-op.
+            cache.get("SELECT 1", null);
+            cache.get("SELECT 2", null);
+            cache.get("SELECT 3", null);
+            assertEquals(0L, cache.statsHits.get());
+            assertEquals(3L, cache.statsMisses.get());
+            assertEquals(0L, cache.statsEvictions.get());
+        }
+
+        @Test void disabledNoEvictionsEvenAtCapacity() throws Exception {
+            // Capacity 2 — without disable, the 3rd put would evict. With
+            // disable, neither put stores, so eviction count stays 0.
+            NativeCache cache = makeDisabledCacheWithCapacity(2);
+            for (int i = 0; i < 5; i++) {
+                cache.put("SELECT " + i, null,
+                    Collections.singletonList(new Object[]{i}), new String[]{"x"});
+            }
+            assertEquals(0, cache.size());
+            assertEquals(0L, cache.statsEvictions.get());
+        }
+
+        @Test void snapshotIncludesL1DisabledWhenDisabled() throws Exception {
+            NativeCache cache = makeDisabledCache();
+            Map<String, Object> snap = cache.buildSnapshot();
+            assertEquals(Boolean.TRUE, snap.get("l1_disabled"));
+        }
+
+        @Test void snapshotOmitsL1DisabledWhenEnabled() {
+            // Default (disabled=false): the field is absent, not present-and-false.
+            // Keeps the common-path snapshot stable.
+            NativeCache cache = makeCache();
+            Map<String, Object> snap = cache.buildSnapshot();
+            assertFalse(snap.containsKey("l1_disabled"));
+        }
+
+        @Test void wrapperConnectedEmissionCarriesL1Disabled() throws Exception {
+            NativeCache cache = makeDisabledCache();
+            List<String> emissions = Collections.synchronizedList(new ArrayList<>());
+            cache.setSendOverride(emissions::add);
+            cache.emitStateChange("wrapper_connected");
+            List<String> sLines = filter(emissions, "S:");
+            assertEquals(1, sLines.size(), emissions.toString());
+            String body = sLines.get(0);
+            assertTrue(body.contains("\"state\":\"wrapper_connected\""), body);
+            assertTrue(body.contains("\"l1_disabled\":true"), body);
+        }
+
+        private NativeCache makeDisabledCache() throws Exception {
+            return makeDisabledCacheWithCapacity(32768);
+        }
+
+        private NativeCache makeDisabledCacheWithCapacity(int capacity) throws Exception {
+            NativeCache cache = new NativeCache(capacity, true, true, true);
+            // Bypass the connect-required gate so direct get/put under test
+            // exercise the disabled branch rather than the !connected branch.
+            var connected = NativeCache.class.getDeclaredField("invalidationConnected");
+            connected.setAccessible(true);
+            connected.setBoolean(cache, true);
+            return cache;
+        }
+    }
+
     // --- Test helpers ---
 
     private static List<String> filter(List<String> lines, String prefix) {

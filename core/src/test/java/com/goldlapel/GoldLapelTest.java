@@ -959,4 +959,21 @@ class ConfigToArgsTest {
         assertFalse(cmd.contains("--enable-l2-for-wrappers"),
             "argv must NOT contain --enable-l2-for-wrappers by default; got: " + cmd);
     }
+
+    // ── disableL1 startup option ────────────────────────────────────────────
+
+    @Test
+    void testDisableL1DefaultFalse() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        assertFalse(opts.isDisableL1());
+    }
+
+    @Test
+    void testDisableL1SetterGetter() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setDisableL1(true);
+        assertTrue(opts.isDisableL1());
+        opts.setDisableL1(false);
+        assertFalse(opts.isDisableL1());
+    }
 }

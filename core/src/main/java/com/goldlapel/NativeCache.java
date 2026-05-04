@@ -45,6 +45,13 @@ public class NativeCache {
     private final AtomicLong counter = new AtomicLong(0);
     final int maxEntries;
     final boolean enabled;
+    // Wrapper-side L1 opt-out. When true, the cache acts as a no-op
+    // pass-through: get() always returns null (and ticks misses for proxy
+    // visibility), put() never stores. Distinct from `enabled` (which is the
+    // env-var GOLDLAPEL_NATIVE_CACHE kill-switch) and from capacity=0 (which
+    // forces users to lose their tuned size to toggle the layer). Lets users
+    // keep their cacheSize and toggle the layer with a separate flag.
+    final boolean disabled;
 
     private volatile boolean invalidationConnected = false;
     private volatile boolean invalidationStop = false;
@@ -100,14 +107,24 @@ public class NativeCache {
     private static Thread shutdownHook;
 
     public NativeCache() {
-        this(envCapacity(), envEnabled(), envReportStats());
+        this(envCapacity(), envEnabled(), envReportStats(), envDisabled());
     }
 
-    /** Test-only constructor with explicit overrides. Package-private. */
+    /**
+     * Test-only constructor with explicit overrides. Package-private.
+     * Defaults {@code disabled} to false so existing call sites keep their
+     * current semantics.
+     */
     NativeCache(int capacity, boolean enabled, boolean reportStats) {
+        this(capacity, enabled, reportStats, false);
+    }
+
+    /** Test-only constructor including the disabled toggle. Package-private. */
+    NativeCache(int capacity, boolean enabled, boolean reportStats, boolean disabled) {
         this.maxEntries = capacity;
         this.enabled = enabled;
         this.reportStats = reportStats;
+        this.disabled = disabled;
         // Read package version from JAR manifest. Falls back to "unknown" in
         // dev / IDE runs where the class wasn't loaded from a packaged JAR.
         String v;
@@ -132,6 +149,11 @@ public class NativeCache {
     private static boolean envReportStats() {
         String s = System.getenv("GOLDLAPEL_REPORT_STATS");
         return s == null || !"false".equalsIgnoreCase(s);
+    }
+
+    private static boolean envDisabled() {
+        String s = System.getenv("GOLDLAPEL_DISABLE_L1");
+        return s != null && "true".equalsIgnoreCase(s);
     }
 
     public static synchronized NativeCache getInstance() {
@@ -168,6 +190,12 @@ public class NativeCache {
 
     public CacheEntry get(String sql, Object[] params) {
         if (!enabled || !invalidationConnected) return null;
+        // disableL1 — wrapper-side L1 opt-out. Tick misses so the proxy still
+        // sees per-query traffic in the snapshot; hits stay zero by definition.
+        if (disabled) {
+            statsMisses.incrementAndGet();
+            return null;
+        }
         String key = makeKey(sql, params);
         if (key == null) return null;
         CacheEntry entry = cache.get(key);
@@ -182,6 +210,8 @@ public class NativeCache {
 
     public void put(String sql, Object[] params, List<Object[]> rows, String[] columns) {
         if (!enabled || !invalidationConnected) return;
+        // disableL1 — silently drop. No store, no eviction, no state-change.
+        if (disabled) return;
         String key = makeKey(sql, params);
         if (key == null) return;
         Set<String> tables = extractTables(sql);
@@ -356,6 +386,13 @@ public class NativeCache {
         snap.put("invalidations", statsInvalidations.get());
         snap.put("current_size_entries", (long) cache.size());
         snap.put("capacity_entries", (long) maxEntries);
+        // L1 opt-out marker — only emitted when the wrapper is running with
+        // disableL1=true, so the proxy can distinguish "L1 disabled by config"
+        // from "L1 underperforming". Absent in the default case to keep the
+        // common-path snapshot stable.
+        if (disabled) {
+            snap.put("l1_disabled", true);
+        }
         return snap;
     }
 

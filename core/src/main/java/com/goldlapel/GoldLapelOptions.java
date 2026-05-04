@@ -40,6 +40,7 @@ public class GoldLapelOptions {
     private boolean mesh;
     private String meshTag;
     private boolean enableL2ForWrappers;
+    private boolean disableL1;
 
     public Integer getProxyPort() {
         return proxyPort;
@@ -220,5 +221,28 @@ public class GoldLapelOptions {
 
     public void setEnableL2ForWrappers(boolean enableL2ForWrappers) {
         this.enableL2ForWrappers = enableL2ForWrappers;
+    }
+
+    /**
+     * Whether to disable the wrapper's L1 cache entirely. Default {@code false}.
+     * When {@code true}, the in-process {@link NativeCache} acts as a no-op
+     * pass-through: {@code get()} always returns null, {@code put()} never
+     * stores. Misses still tick (so the proxy sees per-query traffic), hits
+     * stay zero, and no eviction happens.
+     *
+     * <p>This is distinct from setting the cache capacity to zero via the
+     * {@code cacheSize} tuning key. {@code cacheSize=0} forces customers to
+     * lose their tuned capacity to toggle the layer; {@code disableL1=true}
+     * lets them keep the size and toggle independently.
+     *
+     * <p>The invalidation channel still runs while disabled — the wrapper
+     * stays connected to the proxy for telemetry and snapshot replies.
+     */
+    public boolean isDisableL1() {
+        return disableL1;
+    }
+
+    public void setDisableL1(boolean disableL1) {
+        this.disableL1 = disableL1;
     }
 }
