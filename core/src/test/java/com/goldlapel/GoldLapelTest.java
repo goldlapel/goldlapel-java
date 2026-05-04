@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -975,5 +976,226 @@ class ConfigToArgsTest {
         assertTrue(opts.isDisableL1());
         opts.setDisableL1(false);
         assertFalse(opts.isDisableL1());
+    }
+
+    @Test
+    void testDisableL1StoredOnInstance() {
+        // Mirrors testEnableL2ForWrappersStoredOnInstance — verify the option
+        // flows from the bag onto the GoldLapel instance via the constructor.
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setDisableL1(true);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        assertTrue(gl.disableL1());
+    }
+
+    @Test
+    void testDisableL1DefaultStoredOnInstance() {
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
+        assertFalse(gl.disableL1());
+    }
+
+    @Test
+    void testDisableL1InConfigMapRejected() {
+        // Regression guard: disableL1 is a top-level canonical-surface option,
+        // never valid inside the structured config map.
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(Collections.singletonMap("disableL1", true))
+        );
+    }
+
+    @Test
+    void testDisableL1AbsentFromArgvByDefault() {
+        // disableL1 is a wrapper-side flag — it must NOT translate into a CLI
+        // arg passed to the Rust binary (the binary doesn't know about L1).
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
+        List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
+        assertFalse(cmd.contains("--disable-l1"),
+            "argv must NOT contain --disable-l1 (wrapper-only flag); got: " + cmd);
+    }
+
+    @Test
+    void testDisableL1AbsentFromArgvWhenSet() {
+        // Same regression guard as above with the option explicitly set —
+        // even when the user opts out of L1, the Rust binary spawn argv stays
+        // L1-knob-free (the flag flows to NativeCache, not to argv).
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setDisableL1(true);
+        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
+        List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
+        assertFalse(cmd.contains("--disable-l1"),
+            "argv must NOT contain --disable-l1 even when option is true; got: " + cmd);
+    }
+
+    // ── disableL1 cache wiring ──────────────────────────────────────────────
+    //
+    // Validate the start-time wiring fix: opts.setDisableL1(true) must flow
+    // onto NativeCache.getInstance() before invalidation connects, so the
+    // cache's get/put behaviour and the very first wrapper_connected snapshot
+    // both reflect the chosen flag. Tests invoke applyDisableL1ToCacheSingleton()
+    // directly (the method startProxy calls before spawning the Rust binary)
+    // so we don't have to start a real proxy in unit tests.
+
+    @Test
+    void testDisableL1WiringFlipsCacheSingleton() throws Exception {
+        // Reset the singleton in case a previous test left it in a non-default
+        // state — the singleton is process-wide.
+        NativeCache.reset();
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", null);
+            GoldLapelOptions opts = new GoldLapelOptions();
+            opts.setDisableL1(true);
+            GoldLapel gl = GoldLapelClassTest.newUnstarted(
+                "postgresql://localhost:5432/mydb", opts);
+            gl.applyDisableL1ToCacheSingleton();
+            assertTrue(NativeCache.getInstance().isDisabled());
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            NativeCache.reset();
+        }
+    }
+
+    @Test
+    void testDisableL1WiringDefaultLeavesCacheEnabled() throws Exception {
+        NativeCache.reset();
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", null);
+            // Default options (disableL1=false) — wiring must leave the
+            // singleton's flag at its constructed default (false here, since
+            // env is unset).
+            GoldLapel gl = GoldLapelClassTest.newUnstarted(
+                "postgresql://localhost:5432/mydb");
+            gl.applyDisableL1ToCacheSingleton();
+            assertFalse(NativeCache.getInstance().isDisabled());
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            NativeCache.reset();
+        }
+    }
+
+    @Test
+    void testDisableL1WiringMakesGetMiss() throws Exception {
+        // End-to-end behaviour: after wiring with disableL1=true, the
+        // singleton's get() returns null (miss) and bumps the miss counter
+        // even on a "cached" key — put() is a no-op too.
+        NativeCache.reset();
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", null);
+            GoldLapelOptions opts = new GoldLapelOptions();
+            opts.setDisableL1(true);
+            GoldLapel gl = GoldLapelClassTest.newUnstarted(
+                "postgresql://localhost:5432/mydb", opts);
+            gl.applyDisableL1ToCacheSingleton();
+
+            NativeCache cache = NativeCache.getInstance();
+            // Bypass the connect-required gate so the disabled branch is
+            // exercised (mirrors NativeCacheTest's pattern).
+            java.lang.reflect.Field connected = NativeCache.class.getDeclaredField("invalidationConnected");
+            connected.setAccessible(true);
+            connected.setBoolean(cache, true);
+
+            cache.put("SELECT 1", null,
+                Collections.singletonList(new Object[]{1}), new String[]{"x"});
+            assertNull(cache.get("SELECT 1", null));
+            assertEquals(0L, cache.statsHits.get());
+            assertTrue(cache.statsMisses.get() >= 1L,
+                "expected at least one miss tick; got " + cache.statsMisses.get());
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            NativeCache.reset();
+        }
+    }
+
+    @Test
+    void testDisableL1WiringEnabledCacheHitsNormally() throws Exception {
+        // End-to-end behaviour: with disableL1=false (default), the singleton
+        // round-trips put → get normally after wiring.
+        NativeCache.reset();
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", null);
+            GoldLapel gl = GoldLapelClassTest.newUnstarted(
+                "postgresql://localhost:5432/mydb");
+            gl.applyDisableL1ToCacheSingleton();
+
+            NativeCache cache = NativeCache.getInstance();
+            java.lang.reflect.Field connected = NativeCache.class.getDeclaredField("invalidationConnected");
+            connected.setAccessible(true);
+            connected.setBoolean(cache, true);
+
+            cache.put("SELECT 1", null,
+                Collections.singletonList(new Object[]{1}), new String[]{"x"});
+            assertNotNull(cache.get("SELECT 1", null));
+            assertEquals(1L, cache.statsHits.get());
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            NativeCache.reset();
+        }
+    }
+
+    @Test
+    void testDisableL1WiringFirstSnapshotCarriesL1Disabled() throws Exception {
+        // The dispatch's headline assertion: the very first wrapper_connected
+        // snapshot emitted after wiring must carry l1_disabled:true when the
+        // option was set. We capture the emission via setSendOverride instead
+        // of standing up a real socket — same shape as the NativeCacheTest
+        // wrapperConnectedEmissionCarriesL1Disabled test.
+        NativeCache.reset();
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", null);
+            GoldLapelOptions opts = new GoldLapelOptions();
+            opts.setDisableL1(true);
+            GoldLapel gl = GoldLapelClassTest.newUnstarted(
+                "postgresql://localhost:5432/mydb", opts);
+            gl.applyDisableL1ToCacheSingleton();
+
+            NativeCache cache = NativeCache.getInstance();
+            List<String> emissions = Collections.synchronizedList(new ArrayList<>());
+            cache.setSendOverride(emissions::add);
+            // Replay the synchronous emission the invalidation thread does
+            // immediately after the socket connects (see invalidationLoop()).
+            cache.emitStateChange("wrapper_connected");
+
+            String body = null;
+            synchronized (emissions) {
+                for (String l : emissions) {
+                    if (l.startsWith("S:")) { body = l; break; }
+                }
+            }
+            assertNotNull(body, "expected an S: emission, got " + emissions);
+            assertTrue(body.contains("\"state\":\"wrapper_connected\""), body);
+            assertTrue(body.contains("\"l1_disabled\":true"), body);
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            NativeCache.reset();
+        }
+    }
+
+    @Test
+    void testDisableL1WiringEnvVarBeatsOptionFalse() throws Exception {
+        // Precedence: env var > option. GOLDLAPEL_DISABLE_L1=true seeds the
+        // singleton at construction time; the wiring step must NOT silently
+        // re-enable L1 even when the option is false. (Env-wins safety valve:
+        // an operator can force L1 off without touching app code.)
+        NativeCache.reset();
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        try {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", "true");
+            // Force the singleton to (re)read env on next getInstance().
+            NativeCache.reset();
+            // Default opts → disableL1 false on the option side.
+            GoldLapel gl = GoldLapelClassTest.newUnstarted(
+                "postgresql://localhost:5432/mydb");
+            gl.applyDisableL1ToCacheSingleton();
+            assertTrue(NativeCache.getInstance().isDisabled(),
+                "env-set GOLDLAPEL_DISABLE_L1=true must survive the option=false wiring step");
+        } finally {
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            NativeCache.reset();
+        }
     }
 }

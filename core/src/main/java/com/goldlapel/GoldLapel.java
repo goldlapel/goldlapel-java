@@ -112,6 +112,7 @@ public class GoldLapel implements AutoCloseable {
     private final boolean mesh;
     private final String meshTag;
     private final boolean enableL2ForWrappers;
+    private final boolean disableL1;
     private Process process;
     private String proxyUrl;
     private Connection internalConn;
@@ -197,6 +198,7 @@ public class GoldLapel implements AutoCloseable {
         String tag = options.getMeshTag();
         this.meshTag = (tag == null || tag.isEmpty()) ? null : tag;
         this.enableL2ForWrappers = options.isEnableL2ForWrappers();
+        this.disableL1 = options.isDisableL1();
         this.process = null;
         this.proxyUrl = null;
 
@@ -255,6 +257,13 @@ public class GoldLapel implements AutoCloseable {
         if (process != null && process.isAlive()) {
             return;
         }
+
+        // Push the disableL1 option onto the NativeCache singleton BEFORE the
+        // proxy spawn (and well before any caller invokes connectInvalidation),
+        // so the very first wrapper_connected snapshot carries the correct
+        // l1_disabled field. Mirrors the .NET wrapper's pre-spawn singleton
+        // poke (see goldlapel-dotnet/src/GoldLapel/GoldLapel.cs SpawnAsync).
+        applyDisableL1ToCacheSingleton();
 
         String binary = findBinary();
         List<String> cmd = buildSpawnCmd(binary);
@@ -325,6 +334,37 @@ public class GoldLapel implements AutoCloseable {
         proxyUrl = makeProxyUrl(upstream, proxyPort);
 
         printBanner(System.err);
+    }
+
+    /**
+     * Push the {@code disableL1} option onto the {@link NativeCache} singleton.
+     * Called from {@link #startProxy()} before the subprocess is spawned, so
+     * the very first {@code wrapper_connected} snapshot the cache emits carries
+     * the correct {@code l1_disabled} field.
+     *
+     * <p>Precedence: env var &gt; option. {@code GOLDLAPEL_DISABLE_L1=true}
+     * seeds the singleton at construction time via {@code NativeCache.envDisabled()};
+     * this method only flips the flag when the env var didn't already force it
+     * on. That way an env-forced session can never be silently re-enabled by
+     * an option, matching the safety-valve role env vars play in the rest of
+     * the wrapper surface.
+     *
+     * <p>Best-effort: NativeCache singleton construction can throw on unusual
+     * classloader paths (Spring devtools restarts, OSGi); never fail proxy
+     * spawn for a telemetry knob. Package-private so unit tests can invoke
+     * the wiring directly without spawning the Rust binary.
+     */
+    void applyDisableL1ToCacheSingleton() {
+        try {
+            NativeCache cache = NativeCache.getInstance();
+            String envDisable = System.getenv("GOLDLAPEL_DISABLE_L1");
+            boolean envForced = envDisable != null && "true".equalsIgnoreCase(envDisable);
+            if (!envForced) {
+                cache.setDisabled(disableL1);
+            }
+        } catch (Throwable ignored) {
+            // No singleton, no telemetry knob — proxy spawn proceeds normally.
+        }
     }
 
     /**
@@ -652,6 +692,14 @@ public class GoldLapel implements AutoCloseable {
     // without spawning the proxy.
     boolean enableL2ForWrappers() {
         return enableL2ForWrappers;
+    }
+
+    // Package-private accessor for tests to verify disableL1 storage on the
+    // instance. The actual cache-side wiring is exercised by tests that
+    // inspect NativeCache.getInstance() after start(); this getter is for
+    // the lightweight "option flowed onto the bag" assertion.
+    boolean disableL1() {
+        return disableL1;
     }
 
     public String getDashboardUrl() {

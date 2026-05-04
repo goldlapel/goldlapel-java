@@ -51,7 +51,15 @@ public class NativeCache {
     // env-var GOLDLAPEL_NATIVE_CACHE kill-switch) and from capacity=0 (which
     // forces users to lose their tuned size to toggle the layer). Lets users
     // keep their cacheSize and toggle the layer with a separate flag.
-    final boolean disabled;
+    //
+    // volatile (not final) so GoldLapel.start() can flip it on the existing
+    // singleton at startup time (env-var or constructor sets the initial
+    // default; the option setter from start() overrides). Mirrors the
+    // .NET wrapper's `volatile bool _disableL1` pattern. Volatile because
+    // it's read on every get()/put() from any caller thread and written
+    // from the start() thread; without it a stale read could let a `put`
+    // sneak through after the user opted out.
+    volatile boolean disabled;
 
     private volatile boolean invalidationConnected = false;
     private volatile boolean invalidationStop = false;
@@ -185,6 +193,31 @@ public class NativeCache {
     public boolean isConnected() { return invalidationConnected; }
     public boolean isEnabled() { return enabled; }
     public int size() { return cache.size(); }
+
+    /**
+     * Whether wrapper-side L1 is currently opted out. Mirrors the
+     * {@code GoldLapelOptions.disableL1} flag — when {@code true},
+     * {@link #get} returns null (incrementing the miss counter) and
+     * {@link #put} silently drops. The invalidation thread keeps running so
+     * snapshot replies still reach the proxy.
+     */
+    public boolean isDisabled() { return disabled; }
+
+    /**
+     * Flip the L1 opt-out flag at runtime. Called by
+     * {@link GoldLapel#start(String, java.util.function.Consumer)} to push
+     * {@code GoldLapelOptions.disableL1} onto the singleton before the
+     * invalidation thread connects, so the very first {@code wrapper_connected}
+     * snapshot carries the correct {@code l1_disabled} field.
+     *
+     * <p>Precedence: the {@code GOLDLAPEL_DISABLE_L1} env var (read at
+     * singleton construction time) wins. {@link GoldLapel#start} only invokes
+     * this setter when the env var didn't already force the flag on, so an
+     * env-var-true session can never be silently re-enabled by an option.
+     */
+    public void setDisabled(boolean value) {
+        this.disabled = value;
+    }
 
     // --- Cache operations ---
 

@@ -791,6 +791,63 @@ class NativeCacheTest {
             assertTrue(body.contains("\"l1_disabled\":true"), body);
         }
 
+        // --- runtime mutability via setDisabled (flip after construction) ---
+
+        @Test void setDisabledTrueFlipsLiveCacheToNoOp() throws Exception {
+            // Start enabled, populate, then flip to disabled. After the flip,
+            // get() must miss even on a previously-cached key, and put() must
+            // become a silent no-op.
+            NativeCache cache = makeCache();
+            cache.put("SELECT 1", null,
+                Collections.singletonList(new Object[]{1}), new String[]{"x"});
+            assertNotNull(cache.get("SELECT 1", null));
+            assertEquals(1L, cache.statsHits.get());
+
+            cache.setDisabled(true);
+            assertTrue(cache.isDisabled());
+
+            // Previously-cached key now misses. statsMisses started at 0
+            // (the pre-disable get() was a hit, not a miss); the disabled
+            // branch ticks it to 1.
+            assertNull(cache.get("SELECT 1", null));
+            assertEquals(1L, cache.statsMisses.get());
+            // hits did not advance — disabled branch returns before hit++.
+            assertEquals(1L, cache.statsHits.get());
+
+            // put is a no-op under the new flag.
+            cache.put("SELECT 2", null,
+                Collections.singletonList(new Object[]{2}), new String[]{"x"});
+            assertNull(cache.get("SELECT 2", null));
+        }
+
+        @Test void setDisabledFalseRestoresNormalOperation() throws Exception {
+            // Start disabled, then flip to enabled. After the flip, get/put
+            // must round-trip normally (matches the env-var-not-set / option-
+            // false start path).
+            NativeCache cache = makeDisabledCache();
+            cache.setDisabled(false);
+            assertFalse(cache.isDisabled());
+
+            cache.put("SELECT 1", null,
+                Collections.singletonList(new Object[]{1}), new String[]{"x"});
+            var entry = cache.get("SELECT 1", null);
+            assertNotNull(entry);
+            assertEquals(1L, cache.statsHits.get());
+        }
+
+        @Test void snapshotReflectsLiveDisabledFlag() throws Exception {
+            // Snapshot reads `disabled` directly — flipping at runtime must
+            // change the next snapshot's `l1_disabled` field. Guards the
+            // volatile-not-final field shape (a copy-on-construct value
+            // would give stale snapshots).
+            NativeCache cache = makeCache();
+            assertFalse(cache.buildSnapshot().containsKey("l1_disabled"));
+            cache.setDisabled(true);
+            assertEquals(Boolean.TRUE, cache.buildSnapshot().get("l1_disabled"));
+            cache.setDisabled(false);
+            assertFalse(cache.buildSnapshot().containsKey("l1_disabled"));
+        }
+
         private NativeCache makeDisabledCache() throws Exception {
             return makeDisabledCacheWithCapacity(32768);
         }
