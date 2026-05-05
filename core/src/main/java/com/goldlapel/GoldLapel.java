@@ -70,10 +70,10 @@ public class GoldLapel implements AutoCloseable {
             "poolMode", "mgmtIdleTimeout", "fallback", "readAfterWriteSecs",
             "n1Threshold", "n1WindowMs", "n1CrossThreshold",
             "tlsCert", "tlsKey", "tlsClientCa",
-            "disableMatviews", "disableConsolidation", "disableBtreeIndexes",
+            "disableConsolidation", "disableBtreeIndexes",
             "disableTrigramIndexes", "disableExpressionIndexes",
             "disablePartialIndexes", "disableRewrite", "disableRewritePreparedCache",
-            "disableProxyCache", "disablePool",
+            "disablePool",
             "disableN1", "disableN1CrossConnection", "disableShadowMode",
             "enableCoalescing", "replica", "excludeTables"
         );
@@ -81,10 +81,10 @@ public class GoldLapel implements AutoCloseable {
 
         Set<String> bools = new HashSet<>();
         Collections.addAll(bools,
-            "disableMatviews", "disableConsolidation", "disableBtreeIndexes",
+            "disableConsolidation", "disableBtreeIndexes",
             "disableTrigramIndexes", "disableExpressionIndexes",
             "disablePartialIndexes", "disableRewrite", "disableRewritePreparedCache",
-            "disableProxyCache", "disablePool",
+            "disablePool",
             "disableN1", "disableN1CrossConnection", "disableShadowMode",
             "enableCoalescing"
         );
@@ -111,8 +111,11 @@ public class GoldLapel implements AutoCloseable {
     private final boolean silent;
     private final boolean mesh;
     private final String meshTag;
-    private final boolean enableProxyCacheForWrappers;
     private final boolean disableNativeCache;
+    private final boolean disableProxyCache;
+    private final boolean disableMatviews;
+    private final boolean disableSqloptimize;
+    private final boolean disableAutoIndexes;
     private Process process;
     private String proxyUrl;
     private Connection internalConn;
@@ -197,8 +200,11 @@ public class GoldLapel implements AutoCloseable {
         this.mesh = options.isMesh();
         String tag = options.getMeshTag();
         this.meshTag = (tag == null || tag.isEmpty()) ? null : tag;
-        this.enableProxyCacheForWrappers = options.isEnableProxyCacheForWrappers();
         this.disableNativeCache = options.isDisableNativeCache();
+        this.disableProxyCache = options.isDisableProxyCache();
+        this.disableMatviews = options.isDisableMatviews();
+        this.disableSqloptimize = options.isDisableSqloptimize();
+        this.disableAutoIndexes = options.isDisableAutoIndexes();
         this.process = null;
         this.proxyUrl = null;
 
@@ -370,8 +376,8 @@ public class GoldLapel implements AutoCloseable {
     /**
      * Build the argv that {@link #startProxy()} hands to {@link ProcessBuilder}.
      * Package-private so tests can verify CLI-flag emission for top-level
-     * options (mesh, enableProxyCacheForWrappers, etc.) without spawning the
-     * Rust binary. Order: required flags first ({@code --upstream}, {@code --proxy-port}),
+     * options (mesh, disableProxyCache, etc.) without spawning the Rust
+     * binary. Order: required flags first ({@code --upstream}, {@code --proxy-port}),
      * then top-level options that emit only when the user set them, then the
      * tuning-knob config map, then any caller-supplied {@code extraArgs}.
      */
@@ -417,8 +423,20 @@ public class GoldLapel implements AutoCloseable {
             cmd.add("--mesh-tag");
             cmd.add(meshTag);
         }
-        if (enableProxyCacheForWrappers) {
-            cmd.add("--enable-proxy-cache-for-wrappers");
+        // Promoted disable flags. Each maps 1:1 to a proxy CLI flag and emits
+        // only when the user set it (false leaves the proxy's own default in
+        // place — matches the canonical surface contract).
+        if (disableProxyCache) {
+            cmd.add("--disable-proxy-cache");
+        }
+        if (disableMatviews) {
+            cmd.add("--disable-matviews");
+        }
+        if (disableSqloptimize) {
+            cmd.add("--disable-sqloptimize");
+        }
+        if (disableAutoIndexes) {
+            cmd.add("--disable-auto-indexes");
         }
         cmd.addAll(configToArgs(config));
         cmd.addAll(extraArgs);
@@ -688,18 +706,30 @@ public class GoldLapel implements AutoCloseable {
         return meshTag;
     }
 
-    // Package-private accessor for tests to verify enableProxyCacheForWrappers
-    // wiring without spawning the proxy.
-    boolean enableProxyCacheForWrappers() {
-        return enableProxyCacheForWrappers;
-    }
-
     // Package-private accessor for tests to verify disableNativeCache storage on
     // the instance. The actual cache-side wiring is exercised by tests that
     // inspect NativeCache.getInstance() after start(); this getter is for
     // the lightweight "option flowed onto the bag" assertion.
     boolean disableNativeCache() {
         return disableNativeCache;
+    }
+
+    // Package-private accessors for tests to verify the four promoted disable
+    // flags flow from the options bag onto the GoldLapel instance.
+    boolean disableProxyCache() {
+        return disableProxyCache;
+    }
+
+    boolean disableMatviews() {
+        return disableMatviews;
+    }
+
+    boolean disableSqloptimize() {
+        return disableSqloptimize;
+    }
+
+    boolean disableAutoIndexes() {
+        return disableAutoIndexes;
     }
 
     public String getDashboardUrl() {

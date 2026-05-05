@@ -610,11 +610,10 @@ class GoldLapelAutoConfigurationTest {
         assertThat(props.getProxyPort()).isEqualTo(7932);
         // Top-level options surfaced from GoldLapelOptions: defaults must
         // match the core module's defaults (silent=false, mesh=false,
-        // meshTag=null, enableProxyCacheForWrappers=false).
+        // meshTag=null).
         assertThat(props.isSilent()).isFalse();
         assertThat(props.isMesh()).isFalse();
         assertThat(props.getMeshTag()).isNull();
-        assertThat(props.isEnableProxyCacheForWrappers()).isFalse();
         // Round 2 additions: dashboardPort, logLevel, mode, license,
         // configFile all default to null (= no override → core default
         // behavior). disableNativeCache defaults to false (cache active).
@@ -623,14 +622,20 @@ class GoldLapelAutoConfigurationTest {
         assertThat(props.getMode()).isNull();
         assertThat(props.getLicense()).isNull();
         assertThat(props.getConfigFile()).isNull();
+        // Wave 2.5 (Model B pivot): the four promoted disable flags default
+        // to false. enableProxyCacheForWrappers is gone — per-connection
+        // wrapper-skip is the only proxy-cache routing today.
+        assertThat(props.isDisableProxyCache()).isFalse();
+        assertThat(props.isDisableMatviews()).isFalse();
+        assertThat(props.isDisableSqloptimize()).isFalse();
+        assertThat(props.isDisableAutoIndexes()).isFalse();
     }
 
     // --- Top-level GoldLapelOptions surfaced via @ConfigurationProperties ---
     //
-    // silent / mesh / mesh-tag / enable-proxy-cache-for-wrappers must flow
-    // from application.yml through GoldLapelProperties into the
-    // GoldLapelOptions handed to GoldLapel.start(...). Defaults must match the
-    // core module.
+    // silent / mesh / mesh-tag must flow from application.yml through
+    // GoldLapelProperties into the GoldLapelOptions handed to
+    // GoldLapel.start(...). Defaults must match the core module.
 
     @Test
     void silentDefaultIsFalseInOptions() {
@@ -648,7 +653,6 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(captured.get(0).isSilent()).isFalse();
                         assertThat(captured.get(0).isMesh()).isFalse();
                         assertThat(captured.get(0).getMeshTag()).isNull();
-                        assertThat(captured.get(0).isEnableProxyCacheForWrappers()).isFalse();
                     });
         }
     }
@@ -707,11 +711,10 @@ class GoldLapelAutoConfigurationTest {
         }
     }
 
+    // --- Wave 2.5 promoted disable flags ---
+
     @Test
-    void enableProxyCacheForWrappersViaKebabCaseProperty() {
-        // Spring binds kebab-case `enable-proxy-cache-for-wrappers` to
-        // camelCase `enableProxyCacheForWrappers` on GoldLapelProperties +
-        // GoldLapelOptions.
+    void disableProxyCacheViaKebabCaseProperty() {
         List<GoldLapelOptions> captured = new ArrayList<>();
         try (MockedStatic<GoldLapel> ignored = stubStart(
                 u -> "postgresql://localhost:7932/testdb", captured)) {
@@ -719,19 +722,93 @@ class GoldLapelAutoConfigurationTest {
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
                             "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.enable-proxy-cache-for-wrappers=true")
+                            "goldlapel.disable-proxy-cache=true")
                     .run(context -> {
                         assertThat(captured).hasSize(1);
-                        assertThat(captured.get(0).isEnableProxyCacheForWrappers()).isTrue();
+                        assertThat(captured.get(0).isDisableProxyCache()).isTrue();
                     });
         }
     }
 
     @Test
-    void allFourTopLevelOptionsTogetherEndToEnd() {
-        // Integration test: all 4 properties bound from application-style
-        // properties + verified end-to-end through to GoldLapelOptions.
-        // Mirrors the sample application.yml in the rollout doc.
+    void disableMatviewsViaKebabCaseProperty() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.disable-matviews=true")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).isDisableMatviews()).isTrue();
+                    });
+        }
+    }
+
+    @Test
+    void disableSqloptimizeViaKebabCaseProperty() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.disable-sqloptimize=true")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).isDisableSqloptimize()).isTrue();
+                    });
+        }
+    }
+
+    @Test
+    void disableAutoIndexesViaKebabCaseProperty() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.disable-auto-indexes=true")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).isDisableAutoIndexes()).isTrue();
+                    });
+        }
+    }
+
+    @Test
+    void allFourPromotedDisableFlagsTogether() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.disable-proxy-cache=true",
+                            "goldlapel.disable-matviews=true",
+                            "goldlapel.disable-sqloptimize=true",
+                            "goldlapel.disable-auto-indexes=true")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        GoldLapelOptions opts = captured.get(0);
+                        assertThat(opts.isDisableProxyCache()).isTrue();
+                        assertThat(opts.isDisableMatviews()).isTrue();
+                        assertThat(opts.isDisableSqloptimize()).isTrue();
+                        assertThat(opts.isDisableAutoIndexes()).isTrue();
+                    });
+        }
+    }
+
+    @Test
+    void allRoundOneTopLevelOptionsTogetherEndToEnd() {
+        // Round 1 surface (silent/mesh/meshTag) — the legacy
+        // enableProxyCacheForWrappers knob is gone (Model B pivot).
         List<GoldLapelOptions> captured = new ArrayList<>();
         try (MockedStatic<GoldLapel> ignored = stubStart(
                 u -> "postgresql://localhost:7932/testdb", captured)) {
@@ -741,15 +818,13 @@ class GoldLapelAutoConfigurationTest {
                             "spring.datasource.driver-class-name=org.postgresql.Driver",
                             "goldlapel.silent=true",
                             "goldlapel.mesh=true",
-                            "goldlapel.mesh-tag=us-west-prod-1",
-                            "goldlapel.enable-proxy-cache-for-wrappers=true")
+                            "goldlapel.mesh-tag=us-west-prod-1")
                     .run(context -> {
                         assertThat(captured).hasSize(1);
                         GoldLapelOptions opts = captured.get(0);
                         assertThat(opts.isSilent()).isTrue();
                         assertThat(opts.isMesh()).isTrue();
                         assertThat(opts.getMeshTag()).isEqualTo("us-west-prod-1");
-                        assertThat(opts.isEnableProxyCacheForWrappers()).isTrue();
                         // Existing options still wired correctly alongside
                         // the new ones (no regression).
                         assertThat(opts.getClient()).isEqualTo("spring-boot");
@@ -879,9 +954,10 @@ class GoldLapelAutoConfigurationTest {
         // Integration test: every top-level property surfaced from
         // GoldLapelOptions through GoldLapelProperties bound from
         // application-style properties + verified end-to-end. Combines the
-        // round-1 surface (silent/mesh/meshTag/enableProxyCacheForWrappers)
-        // with the round-2 additions (dashboardPort/logLevel/mode/license/
-        // configFile/disableNativeCache).
+        // round-1 surface (silent/mesh/meshTag), round-2 additions
+        // (dashboardPort/logLevel/mode/license/configFile/disableNativeCache),
+        // and Wave-2.5 promoted disable flags (disableProxyCache /
+        // disableMatviews / disableSqloptimize / disableAutoIndexes).
         List<GoldLapelOptions> captured = new ArrayList<>();
         try (MockedStatic<GoldLapel> ignored = stubStart(
                 u -> "postgresql://localhost:7932/testdb", captured)) {
@@ -892,13 +968,16 @@ class GoldLapelAutoConfigurationTest {
                             "goldlapel.silent=true",
                             "goldlapel.mesh=true",
                             "goldlapel.mesh-tag=us-west-prod-1",
-                            "goldlapel.enable-proxy-cache-for-wrappers=true",
                             "goldlapel.dashboard-port=8080",
                             "goldlapel.log-level=debug",
                             "goldlapel.mode=consideration",
                             "goldlapel.license=/etc/goldlapel/license.json",
                             "goldlapel.config-file=/etc/goldlapel/goldlapel.toml",
-                            "goldlapel.disable-native-cache=true")
+                            "goldlapel.disable-native-cache=true",
+                            "goldlapel.disable-proxy-cache=true",
+                            "goldlapel.disable-matviews=true",
+                            "goldlapel.disable-sqloptimize=true",
+                            "goldlapel.disable-auto-indexes=true")
                     .run(context -> {
                         assertThat(captured).hasSize(1);
                         GoldLapelOptions opts = captured.get(0);
@@ -906,7 +985,6 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(opts.isSilent()).isTrue();
                         assertThat(opts.isMesh()).isTrue();
                         assertThat(opts.getMeshTag()).isEqualTo("us-west-prod-1");
-                        assertThat(opts.isEnableProxyCacheForWrappers()).isTrue();
                         // Round 2
                         assertThat(opts.getDashboardPort()).isEqualTo(8080);
                         assertThat(opts.getLogLevel()).isEqualTo("debug");
@@ -914,6 +992,11 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(opts.getLicense()).isEqualTo("/etc/goldlapel/license.json");
                         assertThat(opts.getConfigFile()).isEqualTo("/etc/goldlapel/goldlapel.toml");
                         assertThat(opts.isDisableNativeCache()).isTrue();
+                        // Wave 2.5: promoted disable flags
+                        assertThat(opts.isDisableProxyCache()).isTrue();
+                        assertThat(opts.isDisableMatviews()).isTrue();
+                        assertThat(opts.isDisableSqloptimize()).isTrue();
+                        assertThat(opts.isDisableAutoIndexes()).isTrue();
                         // Existing options still wired correctly alongside
                         // the new ones (no regression).
                         assertThat(opts.getClient()).isEqualTo("spring-boot");

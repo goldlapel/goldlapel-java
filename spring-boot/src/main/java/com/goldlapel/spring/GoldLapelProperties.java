@@ -21,7 +21,10 @@ public class GoldLapelProperties {
     private boolean silent = false;
     private boolean mesh = false;
     private String meshTag = null;
-    private boolean enableProxyCacheForWrappers = false;
+    private boolean disableProxyCache = false;
+    private boolean disableMatviews = false;
+    private boolean disableSqloptimize = false;
+    private boolean disableAutoIndexes = false;
     private Map<String, String> config = new LinkedHashMap<>();
 
     public boolean isEnabled() {
@@ -245,23 +248,73 @@ public class GoldLapelProperties {
         this.meshTag = meshTag;
     }
 
-    public boolean isEnableProxyCacheForWrappers() {
-        return enableProxyCacheForWrappers;
+    public boolean isDisableProxyCache() {
+        return disableProxyCache;
     }
 
     /**
-     * Whether wrapper-spawned proxies participate in the proxy cache.
-     * Default {@code false} — Spring Boot apps usually have their own
-     * in-process cache via {@link CachedDataSource}, and a single wrapper
-     * rarely benefits from sharing the proxy cache with itself.
+     * Whether to disable the proxy-side cache layer entirely. Default
+     * {@code false}. Maps 1:1 to the proxy CLI flag
+     * {@code --disable-proxy-cache}. Spring users reach for this when
+     * the proxy-side cache is causing operational pain (debugging stale
+     * data, isolating an invalidation bug) and they want to keep every
+     * other Gold Lapel feature on. Distinct from
+     * {@link #isDisableNativeCache()}, which toggles the wrapper-side
+     * (in-process) cache.
      *
-     * <p>Set {@code true} for fleet deployments (multi-pod, frequent
-     * restarts, mesh) where the proxy cache still earns its keep as a
-     * shared cache across many short-lived wrapper processes.
-     *
-     * <p>YAML: {@code goldlapel.enable-proxy-cache-for-wrappers: true}.
+     * <p>YAML: {@code goldlapel.disable-proxy-cache: true}.
      */
-    public void setEnableProxyCacheForWrappers(boolean enableProxyCacheForWrappers) {
-        this.enableProxyCacheForWrappers = enableProxyCacheForWrappers;
+    public void setDisableProxyCache(boolean disableProxyCache) {
+        this.disableProxyCache = disableProxyCache;
+    }
+
+    public boolean isDisableMatviews() {
+        return disableMatviews;
+    }
+
+    /**
+     * Whether to disable automatic materialized-view creation. Default
+     * {@code false}. Maps 1:1 to the proxy CLI flag {@code --disable-matviews}.
+     * Reach for this in environments where matviews would conflict with an
+     * existing migration / ownership model, or while debugging which Gold
+     * Lapel optimization is responsible for an observed behaviour change.
+     *
+     * <p>YAML: {@code goldlapel.disable-matviews: true}.
+     */
+    public void setDisableMatviews(boolean disableMatviews) {
+        this.disableMatviews = disableMatviews;
+    }
+
+    public boolean isDisableSqloptimize() {
+        return disableSqloptimize;
+    }
+
+    /**
+     * Whether to disable the SQL-rewrite optimization pipeline ("sqloptimize").
+     * Default {@code false}. Maps 1:1 to the proxy CLI flag
+     * {@code --disable-sqloptimize}. Disable to bypass per-kind SQL
+     * rewriting while keeping caching, matviews, and auto-indexes active.
+     *
+     * <p>YAML: {@code goldlapel.disable-sqloptimize: true}.
+     */
+    public void setDisableSqloptimize(boolean disableSqloptimize) {
+        this.disableSqloptimize = disableSqloptimize;
+    }
+
+    public boolean isDisableAutoIndexes() {
+        return disableAutoIndexes;
+    }
+
+    /**
+     * Whether to disable automatic index creation. Default {@code false}.
+     * Maps 1:1 to the proxy CLI flag {@code --disable-auto-indexes}. Reach
+     * for this when DDL is owned by an external migration tool that takes
+     * exception to the proxy adding indexes underneath it, or when isolating
+     * which optimization moved a query plan.
+     *
+     * <p>YAML: {@code goldlapel.disable-auto-indexes: true}.
+     */
+    public void setDisableAutoIndexes(boolean disableAutoIndexes) {
+        this.disableAutoIndexes = disableAutoIndexes;
     }
 }

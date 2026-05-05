@@ -110,7 +110,10 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                 if (properties.getMeshTag() != null) {
                     opts.setMeshTag(properties.getMeshTag());
                 }
-                opts.setEnableProxyCacheForWrappers(properties.isEnableProxyCacheForWrappers());
+                opts.setDisableProxyCache(properties.isDisableProxyCache());
+                opts.setDisableMatviews(properties.isDisableMatviews());
+                opts.setDisableSqloptimize(properties.isDisableSqloptimize());
+                opts.setDisableAutoIndexes(properties.isDisableAutoIndexes());
                 if (properties.getDashboardPort() != null) {
                     opts.setDashboardPort(properties.getDashboardPort());
                 }

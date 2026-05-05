@@ -659,7 +659,11 @@ class ConfigKeysTest {
         Set<String> keys = GoldLapel.configKeys();
         // Tuning knobs still live in the structured config map.
         assertTrue(keys.contains("poolSize"));
-        assertTrue(keys.contains("disableMatviews"));
+        // disableConsolidation is a representative tuning-only flag that
+        // wasn't promoted to a top-level option (its CLI flag exists, but
+        // the option surface intentionally keeps the long tail of disable_*
+        // tuning knobs inside the config bag).
+        assertTrue(keys.contains("disableConsolidation"));
         assertTrue(keys.contains("replica"));
     }
 
@@ -667,7 +671,9 @@ class ConfigKeysTest {
     void doesNotContainPromotedTopLevelKeys() {
         // Canonical surface: mode, logLevel, dashboardPort, invalidationPort,
         // client, config, license are top-level options on GoldLapelOptions,
-        // not structured-config keys.
+        // not structured-config keys. The four promoted disable flags
+        // (disableProxyCache / disableMatviews / disableSqloptimize /
+        // disableAutoIndexes) are likewise top-level, never config-map keys.
         Set<String> keys = GoldLapel.configKeys();
         assertFalse(keys.contains("mode"));
         assertFalse(keys.contains("logLevel"));
@@ -676,6 +682,10 @@ class ConfigKeysTest {
         assertFalse(keys.contains("client"));
         assertFalse(keys.contains("config"));
         assertFalse(keys.contains("license"));
+        assertFalse(keys.contains("disableProxyCache"));
+        assertFalse(keys.contains("disableMatviews"));
+        assertFalse(keys.contains("disableSqloptimize"));
+        assertFalse(keys.contains("disableAutoIndexes"));
     }
 
     @Test
@@ -898,69 +908,114 @@ class ConfigToArgsTest {
         );
     }
 
-    // ── enableProxyCacheForWrappers startup option ──────────────────────────
+    // ── Promoted disable flags (Wave 2.5: disableProxyCache /
+    //    disableMatviews / disableSqloptimize / disableAutoIndexes) ───────
+    //
+    // Each flag maps 1:1 to a proxy CLI flag and is a first-class top-level
+    // option on GoldLapelOptions (Model B pivot — the older
+    // enableProxyCacheForWrappers knob is gone; per-connection wrapper-skip
+    // is the only proxy-cache routing today). Atomic break — no aliases.
 
     @Test
-    void testEnableProxyCacheForWrappersDefaultFalse() {
+    void testPromotedDisableFlagsDefaultFalse() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        assertFalse(opts.isEnableProxyCacheForWrappers());
+        assertFalse(opts.isDisableProxyCache());
+        assertFalse(opts.isDisableMatviews());
+        assertFalse(opts.isDisableSqloptimize());
+        assertFalse(opts.isDisableAutoIndexes());
     }
 
     @Test
-    void testEnableProxyCacheForWrappersSetterGetter() {
+    void testPromotedDisableFlagsSetterGetter() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setEnableProxyCacheForWrappers(true);
-        assertTrue(opts.isEnableProxyCacheForWrappers());
-        opts.setEnableProxyCacheForWrappers(false);
-        assertFalse(opts.isEnableProxyCacheForWrappers());
+        opts.setDisableProxyCache(true);
+        opts.setDisableMatviews(true);
+        opts.setDisableSqloptimize(true);
+        opts.setDisableAutoIndexes(true);
+        assertTrue(opts.isDisableProxyCache());
+        assertTrue(opts.isDisableMatviews());
+        assertTrue(opts.isDisableSqloptimize());
+        assertTrue(opts.isDisableAutoIndexes());
     }
 
     @Test
-    void testEnableProxyCacheForWrappersStoredOnInstance() {
+    void testPromotedDisableFlagsStoredOnInstance() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setEnableProxyCacheForWrappers(true);
+        opts.setDisableProxyCache(true);
+        opts.setDisableMatviews(true);
+        opts.setDisableSqloptimize(true);
+        opts.setDisableAutoIndexes(true);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
-        assertTrue(gl.enableProxyCacheForWrappers());
+        assertTrue(gl.disableProxyCache());
+        assertTrue(gl.disableMatviews());
+        assertTrue(gl.disableSqloptimize());
+        assertTrue(gl.disableAutoIndexes());
     }
 
     @Test
-    void testEnableProxyCacheForWrappersDefaultStoredOnInstance() {
+    void testPromotedDisableFlagsDefaultStoredOnInstance() {
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
-        assertFalse(gl.enableProxyCacheForWrappers());
+        assertFalse(gl.disableProxyCache());
+        assertFalse(gl.disableMatviews());
+        assertFalse(gl.disableSqloptimize());
+        assertFalse(gl.disableAutoIndexes());
     }
 
     @Test
-    void testEnableProxyCacheForWrappersInConfigMapRejected() {
-        // Regression guard: enableProxyCacheForWrappers is a top-level
-        // canonical-surface option, never valid inside the structured config map.
-        assertThrows(
-            IllegalArgumentException.class,
-            () -> GoldLapel.configToArgs(Collections.singletonMap("enableProxyCacheForWrappers", true))
-        );
+    void testPromotedDisableFlagsInConfigMapRejected() {
+        // Regression guard: each flag is a top-level canonical-surface option
+        // — never valid inside the structured config map. disableProxyCache
+        // and disableMatviews used to live in the config map; the promotion
+        // explicitly removes them from VALID_CONFIG_KEYS.
+        assertThrows(IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(Collections.singletonMap("disableProxyCache", true)));
+        assertThrows(IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(Collections.singletonMap("disableMatviews", true)));
+        assertThrows(IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(Collections.singletonMap("disableSqloptimize", true)));
+        assertThrows(IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(Collections.singletonMap("disableAutoIndexes", true)));
     }
 
     @Test
-    void testEnableProxyCacheForWrappersEmitsCliFlag() {
-        // Verify the flag actually reaches the spawned argv. Use buildSpawnCmd()
-        // — the same argv-build logic startProxy() hands to ProcessBuilder —
-        // without spawning the Rust binary.
+    void testPromotedDisableFlagsEmitCliFlagsWhenSet() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setEnableProxyCacheForWrappers(true);
+        opts.setDisableProxyCache(true);
+        opts.setDisableMatviews(true);
+        opts.setDisableSqloptimize(true);
+        opts.setDisableAutoIndexes(true);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
-        assertTrue(cmd.contains("--enable-proxy-cache-for-wrappers"),
-            "argv must contain --enable-proxy-cache-for-wrappers when option is set; got: " + cmd);
+        assertTrue(cmd.contains("--disable-proxy-cache"), "got: " + cmd);
+        assertTrue(cmd.contains("--disable-matviews"), "got: " + cmd);
+        assertTrue(cmd.contains("--disable-sqloptimize"), "got: " + cmd);
+        assertTrue(cmd.contains("--disable-auto-indexes"), "got: " + cmd);
     }
 
     @Test
-    void testEnableProxyCacheForWrappersAbsentByDefault() {
-        // Default: no --enable-proxy-cache-for-wrappers in argv (per-connection
-        // wrapper-skip is the default since the proxy-cache wrapper-skip change
-        // shipped).
+    void testPromotedDisableFlagsAbsentByDefault() {
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
         List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
-        assertFalse(cmd.contains("--enable-proxy-cache-for-wrappers"),
-            "argv must NOT contain --enable-proxy-cache-for-wrappers by default; got: " + cmd);
+        assertFalse(cmd.contains("--disable-proxy-cache"), "got: " + cmd);
+        assertFalse(cmd.contains("--disable-matviews"), "got: " + cmd);
+        assertFalse(cmd.contains("--disable-sqloptimize"), "got: " + cmd);
+        assertFalse(cmd.contains("--disable-auto-indexes"), "got: " + cmd);
+    }
+
+    @Test
+    void testEnableProxyCacheForWrappersIsGone() {
+        // Regression guard for the Model B pivot: the legacy
+        // enableProxyCacheForWrappers field/setter/getter is removed
+        // entirely. If anyone reintroduces it, this test catches it via
+        // reflection on GoldLapelOptions.
+        for (java.lang.reflect.Field f : GoldLapelOptions.class.getDeclaredFields()) {
+            assertNotEquals("enableProxyCacheForWrappers", f.getName(),
+                "Model B pivot: enableProxyCacheForWrappers must not be reintroduced");
+        }
+        for (java.lang.reflect.Method m : GoldLapelOptions.class.getDeclaredMethods()) {
+            assertFalse(m.getName().contains("EnableProxyCacheForWrappers"),
+                "Model B pivot: " + m.getName() + " must not be reintroduced");
+        }
     }
 
     // ── disableNativeCache startup option ───────────────────────────────────

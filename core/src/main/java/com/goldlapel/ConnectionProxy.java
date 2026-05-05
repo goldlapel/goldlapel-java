@@ -19,7 +19,13 @@ public class ConnectionProxy {
     private static class ConnectionHandler implements InvocationHandler {
         private final Connection real;
         private final NativeCache cache;
-        private boolean inTransaction = false;
+        // Per-connection unsafe-GUC state. SET / RESET observed on every query
+        // mutates this; the hash is folded into the native-cache key so two
+        // connections that have set different unsafe GUCs never share a slot
+        // (custom-GUC-driven RLS would otherwise leak across users). Mirrors
+        // the proxy-side ConnectionGucState in src/guc_state.rs.
+        final GucState gucState = new GucState();
+        boolean inTransaction = false;
 
         ConnectionHandler(Connection real, NativeCache cache) {
             this.real = real;
@@ -124,23 +130,31 @@ public class ConnectionProxy {
                 return real.executeQuery(sql);
             }
 
+            // SET / RESET observation. Runs on every query so a SET that's
+            // batched into a multi-statement Q ("SET app.user_id='42'; SELECT
+            // ...") still updates the per-connection state hash before we
+            // build the cache key.
+            connHandler.gucState.observeSql(sql);
+
             // In transaction: bypass cache
             if (connHandler.inTransaction) {
                 return real.executeQuery(sql);
             }
 
             // Check native cache
-            NativeCache.CacheEntry entry = cache.get(sql, null);
+            long stateHash = connHandler.gucState.hash();
+            NativeCache.CacheEntry entry = cache.get(sql, null, stateHash);
             if (entry != null) {
                 return CachedResultSet.create(entry.rows, entry.columns);
             }
 
             // Cache miss
             ResultSet rs = real.executeQuery(sql);
-            return cacheAndReturn(sql, null, rs);
+            return cacheAndReturn(sql, null, rs, stateHash);
         }
 
         private int handleExecuteUpdate(String sql) throws SQLException {
+            connHandler.gucState.observeSql(sql);
             handleWriteInvalidation(sql);
             return real.executeUpdate(sql);
         }
@@ -151,11 +165,12 @@ public class ConnectionProxy {
             } else if (NativeCache.isTxEnd(sql)) {
                 connHandler.inTransaction = false;
             }
+            connHandler.gucState.observeSql(sql);
             handleWriteInvalidation(sql);
             return real.execute(sql);
         }
 
-        ResultSet cacheAndReturn(String sql, Object[] params, ResultSet rs) throws SQLException {
+        ResultSet cacheAndReturn(String sql, Object[] params, ResultSet rs, long stateHash) throws SQLException {
             try {
                 ResultSetMetaData meta = rs.getMetaData();
                 int colCount = meta.getColumnCount();
@@ -174,7 +189,7 @@ public class ConnectionProxy {
                 }
                 rs.close();
 
-                cache.put(sql, params, rows, columns);
+                cache.put(sql, params, rows, columns, stateHash);
                 return CachedResultSet.create(rows, columns);
             } catch (Exception e) {
                 return rs;
@@ -260,11 +275,19 @@ public class ConnectionProxy {
                 return real.executeQuery();
             }
 
+            // SET / RESET observation. PreparedStatement is unusual for SET
+            // (parameters typically aren't permitted in `SET name = $1`), but
+            // the bookkeeping is cheap and the symmetry with Statement keeps
+            // the cache key shape consistent regardless of which path the
+            // SET arrived on.
+            connHandler.gucState.observeSql(sql);
+
             if (connHandler.inTransaction) {
                 return real.executeQuery();
             }
 
-            NativeCache.CacheEntry entry = cache.get(sql, p);
+            long stateHash = connHandler.gucState.hash();
+            NativeCache.CacheEntry entry = cache.get(sql, p, stateHash);
             if (entry != null) {
                 return CachedResultSet.create(entry.rows, entry.columns);
             }
@@ -287,7 +310,7 @@ public class ConnectionProxy {
                     rows.add(row);
                 }
                 rs.close();
-                cache.put(sql, p, rows, columns);
+                cache.put(sql, p, rows, columns, stateHash);
                 return CachedResultSet.create(rows, columns);
             } catch (Exception e) {
                 return rs;
@@ -295,11 +318,13 @@ public class ConnectionProxy {
         }
 
         private int handlePreparedUpdate() throws SQLException {
+            connHandler.gucState.observeSql(sql);
             handleWriteInvalidation(sql);
             return real.executeUpdate();
         }
 
         private boolean handlePreparedExecute() throws SQLException {
+            connHandler.gucState.observeSql(sql);
             handleWriteInvalidation(sql);
             return real.execute();
         }

@@ -39,8 +39,11 @@ public class GoldLapelOptions {
     private boolean silent;
     private boolean mesh;
     private String meshTag;
-    private boolean enableProxyCacheForWrappers;
     private boolean disableNativeCache;
+    private boolean disableProxyCache;
+    private boolean disableMatviews;
+    private boolean disableSqloptimize;
+    private boolean disableAutoIndexes;
 
     public Integer getProxyPort() {
         return proxyPort;
@@ -203,27 +206,6 @@ public class GoldLapelOptions {
     }
 
     /**
-     * Whether wrapper-spawned proxies participate in the proxy cache.
-     * Default {@code false} — per-connection wrapper-skip is the default
-     * since the proxy-cache wrapper-skip change shipped: wrapper apps
-     * usually have their own in-process cache, and a single wrapper rarely
-     * benefits from sharing the proxy cache with itself.
-     *
-     * <p>Set {@code true} for fleet deployments (multi-pod, frequent
-     * restarts, mesh) where the proxy cache still earns its keep as a
-     * shared cache across many short-lived wrapper processes.
-     *
-     * <p>Equivalent CLI flag: {@code --enable-proxy-cache-for-wrappers}.
-     */
-    public boolean isEnableProxyCacheForWrappers() {
-        return enableProxyCacheForWrappers;
-    }
-
-    public void setEnableProxyCacheForWrappers(boolean enableProxyCacheForWrappers) {
-        this.enableProxyCacheForWrappers = enableProxyCacheForWrappers;
-    }
-
-    /**
      * Whether to disable the wrapper's native cache entirely. Default {@code false}.
      * When {@code true}, the in-process {@link NativeCache} acts as a no-op
      * pass-through: {@code get()} always returns null, {@code put()} never
@@ -244,5 +226,66 @@ public class GoldLapelOptions {
 
     public void setDisableNativeCache(boolean disableNativeCache) {
         this.disableNativeCache = disableNativeCache;
+    }
+
+    /**
+     * Whether to disable the proxy-side cache layer entirely. Default
+     * {@code false}. Maps 1:1 to the proxy CLI flag
+     * {@code --disable-proxy-cache}. Use this when the proxy-side cache is
+     * causing operational pain (debugging stale data, isolating an
+     * invalidation bug) and you want to keep every other Gold Lapel
+     * feature on. Distinct from {@link #isDisableNativeCache()}, which
+     * toggles the wrapper-side cache.
+     */
+    public boolean isDisableProxyCache() {
+        return disableProxyCache;
+    }
+
+    public void setDisableProxyCache(boolean disableProxyCache) {
+        this.disableProxyCache = disableProxyCache;
+    }
+
+    /**
+     * Whether to disable automatic materialized-view creation. Default
+     * {@code false}. Maps 1:1 to the proxy CLI flag {@code --disable-matviews}.
+     * Reach for this in environments where matviews would conflict with an
+     * existing migration / ownership model, or while debugging which Gold
+     * Lapel optimization is responsible for an observed behavior change.
+     */
+    public boolean isDisableMatviews() {
+        return disableMatviews;
+    }
+
+    public void setDisableMatviews(boolean disableMatviews) {
+        this.disableMatviews = disableMatviews;
+    }
+
+    /**
+     * Whether to disable the SQL-rewrite optimization pipeline ("sqloptimize").
+     * Default {@code false}. Maps 1:1 to the proxy CLI flag
+     * {@code --disable-sqloptimize}. Disable this to bypass per-kind SQL
+     * rewriting while keeping caching, matviews, and auto-indexes active.
+     */
+    public boolean isDisableSqloptimize() {
+        return disableSqloptimize;
+    }
+
+    public void setDisableSqloptimize(boolean disableSqloptimize) {
+        this.disableSqloptimize = disableSqloptimize;
+    }
+
+    /**
+     * Whether to disable automatic index creation. Default {@code false}.
+     * Maps 1:1 to the proxy CLI flag {@code --disable-auto-indexes}. Reach
+     * for this when DDL is owned by an external migration tool that takes
+     * exception to the proxy adding indexes underneath it, or when isolating
+     * which optimization moved a query plan.
+     */
+    public boolean isDisableAutoIndexes() {
+        return disableAutoIndexes;
+    }
+
+    public void setDisableAutoIndexes(boolean disableAutoIndexes) {
+        this.disableAutoIndexes = disableAutoIndexes;
     }
 }

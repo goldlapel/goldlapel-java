@@ -222,6 +222,19 @@ public class NativeCache {
     // --- Cache operations ---
 
     public CacheEntry get(String sql, Object[] params) {
+        return get(sql, params, 0L);
+    }
+
+    /**
+     * Native-cache lookup folding a per-connection unsafe-GUC state hash
+     * into the cache key. Two connections that have set different unsafe
+     * GUCs ({@code app.user_id}, {@code role}, {@code search_path}, etc.)
+     * never share a cache slot — see {@link GucState} for the security
+     * rationale. Pass {@code 0} for {@code gucStateHash} to use the
+     * baseline (no unsafe GUCs set) slot, which matches the existing
+     * 2-arg overload's behaviour.
+     */
+    public CacheEntry get(String sql, Object[] params, long gucStateHash) {
         if (!enabled || !invalidationConnected) return null;
         // disableNativeCache — wrapper-side native-cache opt-out. Tick misses so
         // the proxy still sees per-query traffic in the snapshot; hits stay
@@ -230,7 +243,7 @@ public class NativeCache {
             statsMisses.incrementAndGet();
             return null;
         }
-        String key = makeKey(sql, params);
+        String key = makeKey(sql, params, gucStateHash);
         if (key == null) return null;
         CacheEntry entry = cache.get(key);
         if (entry != null) {
@@ -243,10 +256,18 @@ public class NativeCache {
     }
 
     public void put(String sql, Object[] params, List<Object[]> rows, String[] columns) {
+        put(sql, params, rows, columns, 0L);
+    }
+
+    /**
+     * Native-cache store folding a per-connection unsafe-GUC state hash
+     * into the cache key — see {@link #get(String, Object[], long)}.
+     */
+    public void put(String sql, Object[] params, List<Object[]> rows, String[] columns, long gucStateHash) {
         if (!enabled || !invalidationConnected) return;
         // disableNativeCache — silently drop. No store, no eviction, no state-change.
         if (disabled) return;
-        String key = makeKey(sql, params);
+        String key = makeKey(sql, params, gucStateHash);
         if (key == null) return;
         Set<String> tables = extractTables(sql);
         boolean evicted = false;
@@ -567,10 +588,21 @@ public class NativeCache {
     // --- SQL parsing ---
 
     static String makeKey(String sql, Object[] params) {
-        if (params == null || params.length == 0) {
-            return sql + "\0null";
-        }
-        return sql + "\0" + Arrays.toString(params);
+        return makeKey(sql, params, 0L);
+    }
+
+    /**
+     * Build the native-cache key including a per-connection unsafe-GUC state
+     * hash. The hash is appended in lowercase hex so {@code 0} (the baseline
+     * empty-state hash) renders as {@code "0"}, keeping the no-GUC keyspace
+     * distinct from any non-zero state. Mirrors the proxy's cache-key shape
+     * (proxy uses {@code {:x}}).
+     */
+    static String makeKey(String sql, Object[] params, long gucStateHash) {
+        String paramsPart = (params == null || params.length == 0)
+            ? "null"
+            : Arrays.toString(params);
+        return sql + "\0" + paramsPart + "\0" + Long.toHexString(gucStateHash);
     }
 
     static String detectWrite(String sql) {
