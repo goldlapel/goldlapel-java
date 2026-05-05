@@ -766,10 +766,19 @@ public class NativeCache {
      *
      * <p>Per-segment classification (case-insensitive, leading-token only):
      * <ul>
-     *   <li>{@code BEGIN} / {@code START [TRANSACTION]} / {@code SAVEPOINT} → true</li>
-     *   <li>{@code COMMIT} / {@code ROLLBACK} / {@code RELEASE} / {@code END} → false</li>
-     *   <li>anything else → no change</li>
+     *   <li>{@code BEGIN} / {@code START [TRANSACTION]} → true</li>
+     *   <li>{@code COMMIT} / {@code ROLLBACK} / {@code END} → false</li>
+     *   <li>anything else (including {@code SAVEPOINT} / {@code RELEASE}) → no change</li>
      * </ul>
+     *
+     * <p>{@code SAVEPOINT} and {@code RELEASE SAVEPOINT} are intra-transaction
+     * markers in Postgres — neither opens nor closes the outer transaction —
+     * so they leave the wrapper-side flag alone. Treating {@code RELEASE} as
+     * tx-end is actively wrong: it would flip the wrapper out-of-tx while the
+     * server is still inside the outer transaction, producing stale cache
+     * reads. {@code SAVEPOINT} can only legally appear inside a tx (PG raises
+     * outside one), so flipping to true is harmless but redundant; we drop it
+     * for symmetry.
      *
      * <p>Segments are processed in source order, so the LAST tx-affecting
      * segment determines the resulting state — matching what the server sees
@@ -793,9 +802,10 @@ public class NativeCache {
 
     /**
      * Classify a single SQL segment for transaction-state effect. Returns
-     * {@code true} for tx-start verbs (BEGIN / START / SAVEPOINT),
-     * {@code false} for tx-end verbs (COMMIT / ROLLBACK / RELEASE / END),
-     * and {@code null} for anything that doesn't move the flag.
+     * {@code true} for tx-start verbs (BEGIN / START), {@code false} for
+     * tx-end verbs (COMMIT / ROLLBACK / END), and {@code null} for anything
+     * that doesn't move the outer-transaction flag — including SAVEPOINT and
+     * RELEASE SAVEPOINT, which are intra-transaction markers.
      */
     private static Boolean classifyTxSegment(String segment) {
         String s = segment.trim();
@@ -808,14 +818,13 @@ public class NativeCache {
         switch (first) {
             case "BEGIN":
             case "START":
-            case "SAVEPOINT":
                 return Boolean.TRUE;
             case "COMMIT":
             case "ROLLBACK":
-            case "RELEASE":
             case "END":
                 return Boolean.FALSE;
             default:
+                // SAVEPOINT / RELEASE / anything else: outer-tx flag unchanged.
                 return null;
         }
     }

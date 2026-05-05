@@ -315,13 +315,32 @@ class NativeCacheTest {
                 "BEGIN; UPDATE orders SET x = 1; ROLLBACK"));
         }
 
-        @Test void savepointEntersTx() {
-            // SAVEPOINT in autocommit implicitly opens a tx (PG semantics).
-            assertTrue(NativeCache.updateTxState(false, "SAVEPOINT sp1"));
+        @Test void savepointDoesNotChangeState() {
+            // SAVEPOINT is an intra-transaction marker — it can only legally
+            // appear inside an open tx (PG errors otherwise), so the wrapper
+            // flag is already true. Treat as no-change.
+            assertTrue(NativeCache.updateTxState(true, "SAVEPOINT sp1"));
+            // Defensive: even if a stray SAVEPOINT shows up out-of-tx (PG
+            // would error on the wire), don't fabricate a fake in-tx flag.
+            assertFalse(NativeCache.updateTxState(false, "SAVEPOINT sp1"));
         }
 
-        @Test void releaseExitsTx() {
-            assertFalse(NativeCache.updateTxState(true, "RELEASE sp1"));
+        @Test void releaseDoesNotChangeState() {
+            // RELEASE SAVEPOINT does NOT end the outer transaction. Flipping
+            // to false would put the wrapper out-of-tx while the server is
+            // still inside the tx — stale cache reads. Must be no-change.
+            assertTrue(NativeCache.updateTxState(true, "RELEASE sp1"));
+            assertFalse(NativeCache.updateTxState(false, "RELEASE sp1"));
+        }
+
+        @Test void savepointReleasePatternStaysInTx() {
+            // BEGIN; SAVEPOINT; SELECT; RELEASE; SELECT — wrapper must stay
+            // in-tx through the SAVEPOINT/RELEASE pair, then a trailing
+            // COMMIT cleanly exits.
+            assertTrue(NativeCache.updateTxState(false,
+                "BEGIN; SAVEPOINT s; SELECT 1; RELEASE s; SELECT 2"));
+            assertFalse(NativeCache.updateTxState(false,
+                "BEGIN; SAVEPOINT s; SELECT 1; RELEASE s; SELECT 2; COMMIT"));
         }
 
         @Test void endTreatedAsCommit() {
@@ -340,8 +359,8 @@ class NativeCacheTest {
         }
 
         @Test void lastTxVerbWins() {
-            // Two flips in one body — the trailing COMMIT must win even
-            // though a SAVEPOINT lives between them.
+            // BEGIN flips in, intra-tx markers (SAVEPOINT/RELEASE) leave the
+            // flag alone, and the trailing COMMIT cleanly exits.
             assertFalse(NativeCache.updateTxState(false,
                 "BEGIN; SAVEPOINT sp1; SELECT 1; RELEASE sp1; COMMIT"));
         }
