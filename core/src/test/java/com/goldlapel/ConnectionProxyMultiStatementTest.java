@@ -119,6 +119,35 @@ class ConnectionProxyMultiStatementTest {
         assertNull(cache.get("SELECT * FROM orders", null));
     }
 
+    @Test
+    void beginInsertCommitLeavesWrapperOutOfTx() throws Exception {
+        // Tx-flag bookkeeping regression (java tx-flag bookkeeping fix,
+        // 2026-05-04). Pre-fix: isTxStart matched first on
+        // "BEGIN; INSERT; COMMIT" and pinned the wrapper into in-tx mode
+        // forever — every subsequent read bypassed the cache. After the
+        // fix, updateTxState walks every segment, the trailing COMMIT
+        // wins, and the wrapper goes back to letting the cache serve reads.
+        NativeCache cache = makeConnectedCache();
+
+        FakeDriverState driver = new FakeDriverState();
+        Connection wrapped = ConnectionProxy.wrap(makeFakeConnection(driver), cache);
+
+        try (Statement s = wrapped.createStatement()) {
+            // Multi-statement BEGIN-COMMIT body — should net out to "not in tx".
+            s.executeQuery("BEGIN; SELECT 1; COMMIT");
+
+            // Prime the cache with a read that would only be cached if the
+            // wrapper believes it's NOT in a transaction.
+            s.executeQuery("SELECT * FROM users");
+        }
+
+        // If the wrapper still believed it was in-tx, the SELECT * FROM users
+        // path would have skipped the cache.put — assert the cache entry
+        // landed.
+        assertNotNull(cache.get("SELECT * FROM users", null),
+            "wrapper must net out of tx after BEGIN; ...; COMMIT in one body");
+    }
+
     // --- fake driver scaffolding (mirrors ConnectionProxyGucIntegrationTest) ---
 
     private static NativeCache makeConnectedCache() throws Exception {

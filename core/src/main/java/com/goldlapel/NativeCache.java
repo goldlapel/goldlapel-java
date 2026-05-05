@@ -605,6 +605,46 @@ public class NativeCache {
         return sql + "\0" + paramsPart + "\0" + Long.toHexString(gucStateHash);
     }
 
+    /**
+     * Replace the contents of {@code '...'} and {@code "..."} string literals
+     * with spaces, preserving overall length so positions line up with the
+     * original. PG's doubled-quote {@code ''} / {@code ""} escapes are
+     * handled the same way as in {@link GucState#splitStatements}. Used by
+     * {@link #detectWrite}'s SELECT branch so that bare words like
+     * {@code INTO} inside a literal (e.g.
+     * {@code SELECT 'INSERT INTO orders' FROM audit_log}) don't trip the
+     * SELECT-INTO DDL classifier.
+     */
+    static String stripStringLiterals(String sql) {
+        if (sql == null || sql.isEmpty()) return sql;
+        char[] out = sql.toCharArray();
+        int len = sql.length();
+        char quote = 0; // 0 = not in a quoted region
+        for (int i = 0; i < len; i++) {
+            char c = sql.charAt(i);
+            if (quote != 0) {
+                if (c == quote) {
+                    if (i + 1 < len && sql.charAt(i + 1) == quote) {
+                        // Doubled-quote escape: blank both, stay inside literal.
+                        out[i] = ' ';
+                        out[i + 1] = ' ';
+                        i++;
+                        continue;
+                    }
+                    // Closing quote: leave the delimiter, drop the literal body.
+                    quote = 0;
+                } else {
+                    out[i] = ' ';
+                }
+            } else {
+                if (c == '\'' || c == '"') {
+                    quote = c;
+                }
+            }
+        }
+        return new String(out);
+    }
+
     static String detectWrite(String sql) {
         String trimmed = sql.trim();
         String[] tokens = trimmed.split("\\s+");
@@ -633,11 +673,17 @@ public class NativeCache {
             case "MERGE":
                 if (tokens.length < 3 || !"INTO".equalsIgnoreCase(tokens[1])) return null;
                 return bareTable(tokens[2]);
-            case "SELECT":
+            case "SELECT": {
+                // Re-tokenize from a literal-stripped form so that bare words
+                // like `INTO` or `FROM` inside `'...'` / `"..."` don't trigger
+                // the SELECT-INTO DDL classifier (e.g.
+                // `SELECT 'INSERT INTO orders' FROM audit_log`,
+                // `SELECT * FROM "into_table"`).
+                String[] scanTokens = stripStringLiterals(trimmed).split("\\s+");
                 boolean sawInto = false;
                 String intoTarget = null;
-                for (int i = 1; i < tokens.length; i++) {
-                    String upper = tokens[i].toUpperCase();
+                for (int i = 1; i < scanTokens.length; i++) {
+                    String upper = scanTokens[i].toUpperCase();
                     if ("INTO".equals(upper) && !sawInto) {
                         sawInto = true;
                         continue;
@@ -646,7 +692,7 @@ public class NativeCache {
                         if ("TEMPORARY".equals(upper) || "TEMP".equals(upper) || "UNLOGGED".equals(upper)) {
                             continue;
                         }
-                        intoTarget = tokens[i];
+                        intoTarget = scanTokens[i];
                         continue;
                     }
                     if (sawInto && intoTarget != null && "FROM".equals(upper)) {
@@ -657,6 +703,7 @@ public class NativeCache {
                     }
                 }
                 return null;
+            }
             case "COPY":
                 if (tokens.length < 2) return null;
                 String raw = tokens[1];
@@ -703,6 +750,75 @@ public class NativeCache {
 
     static boolean isTxStart(String sql) { return TX_START.matcher(sql).find(); }
     static boolean isTxEnd(String sql) { return TX_END.matcher(sql).find(); }
+
+    /**
+     * Multi-statement-aware transaction-state update. Walks each segment of a
+     * (possibly multi-statement) SQL body and returns the wrapper-side
+     * {@code inTransaction} flag the caller should hold AFTER executing it.
+     *
+     * <p>The single-token {@link #isTxStart} / {@link #isTxEnd} only inspect
+     * the leading token of the whole body — so {@code BEGIN; INSERT...; COMMIT}
+     * flips the wrapper into "in tx" on the BEGIN and never sees the trailing
+     * COMMIT, leaving the wrapper believing a tx is still open while the
+     * server has already committed and is back on autocommit. That mismatch
+     * forces every subsequent read to bypass the cache forever (or until the
+     * next BEGIN/COMMIT/ROLLBACK happens to land first-token).
+     *
+     * <p>Per-segment classification (case-insensitive, leading-token only):
+     * <ul>
+     *   <li>{@code BEGIN} / {@code START [TRANSACTION]} / {@code SAVEPOINT} → true</li>
+     *   <li>{@code COMMIT} / {@code ROLLBACK} / {@code RELEASE} / {@code END} → false</li>
+     *   <li>anything else → no change</li>
+     * </ul>
+     *
+     * <p>Segments are processed in source order, so the LAST tx-affecting
+     * segment determines the resulting state — matching what the server sees
+     * on the wire. Returns {@code currentState} unchanged when no segment
+     * is tx-affecting.
+     */
+    static boolean updateTxState(boolean currentState, String sql) {
+        if (sql == null || sql.isEmpty()) return currentState;
+        // Fast path — single-statement SQL skips the splitter allocation.
+        if (sql.indexOf(';') < 0) {
+            Boolean delta = classifyTxSegment(sql);
+            return delta == null ? currentState : delta;
+        }
+        boolean state = currentState;
+        for (String seg : GucState.splitStatements(sql)) {
+            Boolean delta = classifyTxSegment(seg);
+            if (delta != null) state = delta;
+        }
+        return state;
+    }
+
+    /**
+     * Classify a single SQL segment for transaction-state effect. Returns
+     * {@code true} for tx-start verbs (BEGIN / START / SAVEPOINT),
+     * {@code false} for tx-end verbs (COMMIT / ROLLBACK / RELEASE / END),
+     * and {@code null} for anything that doesn't move the flag.
+     */
+    private static Boolean classifyTxSegment(String segment) {
+        String s = segment.trim();
+        if (s.isEmpty()) return null;
+        // Pull off the first whitespace-delimited token; matches the cheap
+        // first-token style used by isSessionStateCommand.
+        int end = 0;
+        while (end < s.length() && !Character.isWhitespace(s.charAt(end))) end++;
+        String first = s.substring(0, end).toUpperCase();
+        switch (first) {
+            case "BEGIN":
+            case "START":
+            case "SAVEPOINT":
+                return Boolean.TRUE;
+            case "COMMIT":
+            case "ROLLBACK":
+            case "RELEASE":
+            case "END":
+                return Boolean.FALSE;
+            default:
+                return null;
+        }
+    }
 
     /**
      * Multi-statement-aware write detection. A single Q wire-message body can

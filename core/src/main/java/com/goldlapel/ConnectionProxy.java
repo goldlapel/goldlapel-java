@@ -42,6 +42,19 @@ public class ConnectionProxy {
                     String sql = (String) args[0];
                     PreparedStatement ps = (PreparedStatement) method.invoke(real, args);
                     return wrapPreparedStatement(ps, sql);
+                case "prepareCall":
+                    // CallableStatement (e.g. `{call my_proc(?)}` or
+                    // `SET app.user_id = '42'` issued via prepareCall) was
+                    // bypassing GucState.observeSql — the wrapper-side L1
+                    // state hash never shifted on SET commands routed through
+                    // this path, allowing stale entries to be served against
+                    // an updated session state. Wrap it so each execute*
+                    // observes the SQL before delegating, matching the
+                    // PreparedStatement / Statement paths.
+                    // (java-jdbc-callable-batch-statehash-gap.md, 2026-05-04)
+                    String callSql = (String) args[0];
+                    CallableStatement cs = (CallableStatement) method.invoke(real, args);
+                    return wrapCallableStatement(cs, callSql);
                 case "setAutoCommit":
                     boolean autoCommit = (boolean) args[0];
                     inTransaction = !autoCommit;
@@ -70,6 +83,14 @@ public class ConnectionProxy {
                 ConnectionProxy.class.getClassLoader(),
                 new Class[]{PreparedStatement.class},
                 new PreparedStatementHandler(real, sql, cache, this)
+            );
+        }
+
+        private CallableStatement wrapCallableStatement(CallableStatement real, String sql) {
+            return (CallableStatement) Proxy.newProxyInstance(
+                ConnectionProxy.class.getClassLoader(),
+                new Class[]{CallableStatement.class},
+                new CallableStatementHandler(real, sql, cache, this)
             );
         }
     }
@@ -115,6 +136,21 @@ public class ConnectionProxy {
                         return handleExecute((String) args[0]);
                     }
                     return method.invoke(real, args);
+                case "addBatch":
+                    // Statement.addBatch(String) appends the SQL to a batch
+                    // that's flushed on executeBatch(). Pre-fix, neither
+                    // addBatch nor executeBatch observed SET commands —
+                    // batched session-state changes never shifted the
+                    // wrapper-side L1 state hash. We observe at addBatch
+                    // time so the side effect is recorded in source order
+                    // (executeBatch is atomic on the wire, but each
+                    // observed SET must take effect before subsequent
+                    // batched statements would see it).
+                    // (java-jdbc-callable-batch-statehash-gap.md, 2026-05-04)
+                    if (args != null && args.length > 0 && args[0] instanceof String) {
+                        connHandler.gucState.observeSql((String) args[0]);
+                    }
+                    return method.invoke(real, args);
                 default:
                     return method.invoke(real, args);
             }
@@ -124,14 +160,16 @@ public class ConnectionProxy {
             // Transaction tracking. Updates the flag but doesn't return — a
             // multi-statement body like "BEGIN; INSERT INTO orders ..." needs
             // the write-detection pass below to also fire so the stale
-            // `orders` cache is invalidated. Single-statement BEGIN / COMMIT
-            // queries fall through harmlessly: detectWritesMulti returns null
-            // for them.
-            if (NativeCache.isTxStart(sql)) {
-                connHandler.inTransaction = true;
-            } else if (NativeCache.isTxEnd(sql)) {
-                connHandler.inTransaction = false;
-            }
+            // `orders` cache is invalidated.
+            //
+            // Multi-statement-aware: the single-token isTxStart/isTxEnd only
+            // sees the FIRST token of the whole body. A
+            // "BEGIN; INSERT...; COMMIT" body would otherwise flip the
+            // wrapper into "in tx" on the BEGIN and never see the COMMIT,
+            // pinning the wrapper into cache-bypass mode forever. updateTxState
+            // walks every segment so the resulting flag matches what the
+            // server actually settled on after running the whole body.
+            connHandler.inTransaction = NativeCache.updateTxState(connHandler.inTransaction, sql);
 
             // Write detection — multi-statement-aware so writes buried after
             // a SET in a Q body still invalidate the right tables.
@@ -168,17 +206,20 @@ public class ConnectionProxy {
         }
 
         private int handleExecuteUpdate(String sql) throws SQLException {
+            // Same tx-state walk as handleExecuteQuery — executeUpdate is the
+            // path some drivers route DDL/DML through, and a multi-statement
+            // "BEGIN; UPDATE...; COMMIT" body must leave the wrapper-side
+            // tx flag matching the server's post-COMMIT state.
+            connHandler.inTransaction = NativeCache.updateTxState(connHandler.inTransaction, sql);
             connHandler.gucState.observeSql(sql);
             handleWriteInvalidation(sql);
             return real.executeUpdate(sql);
         }
 
         private boolean handleExecute(String sql) throws SQLException {
-            if (NativeCache.isTxStart(sql)) {
-                connHandler.inTransaction = true;
-            } else if (NativeCache.isTxEnd(sql)) {
-                connHandler.inTransaction = false;
-            }
+            // Multi-statement-aware tx-state walk; see handleExecuteQuery for
+            // the BEGIN-then-COMMIT-buried-in-the-same-body bug it fixes.
+            connHandler.inTransaction = NativeCache.updateTxState(connHandler.inTransaction, sql);
             connHandler.gucState.observeSql(sql);
             handleWriteInvalidation(sql);
             return real.execute(sql);
@@ -354,6 +395,79 @@ public class ConnectionProxy {
             connHandler.gucState.observeSql(sql);
             handleWriteInvalidation(sql);
             return real.execute();
+        }
+    }
+
+    /**
+     * CallableStatement proxy — observes the bound SQL on each {@code execute*}
+     * and runs write-invalidation, mirroring the PreparedStatement path.
+     * Stored-proc invocations ({@code {call my_proc(?)}}) classify as
+     * {@code CALL → DDL_SENTINEL} in {@link NativeCache#detectWrite}, so any
+     * call collapses to a full-cache invalidation — the proc body could
+     * mutate any table.
+     *
+     * <p>We never read CallableStatement results out of the cache (procs
+     * may have side effects and out-params; replaying cached rows would be
+     * wrong). The handler only needs to: (1) observe SQL for GUC-state
+     * tracking, (2) drive invalidation, then (3) delegate to the real
+     * CallableStatement and pass the result through unchanged.
+     *
+     * <p>Filed as part of
+     * {@code java-jdbc-callable-batch-statehash-gap.md} (2026-05-04).
+     */
+    private static class CallableStatementHandler implements InvocationHandler {
+        private final CallableStatement real;
+        private final String sql;
+        private final NativeCache cache;
+        private final ConnectionHandler connHandler;
+
+        CallableStatementHandler(CallableStatement real, String sql, NativeCache cache, ConnectionHandler connHandler) {
+            this.real = real;
+            this.sql = sql;
+            this.cache = cache;
+            this.connHandler = connHandler;
+        }
+
+        /** See {@link StatementHandler#handleWriteInvalidation(String)}. */
+        private void handleWriteInvalidation(String sql) {
+            NativeCache.WriteSummary w = NativeCache.detectWritesMulti(sql);
+            if (w == null) return;
+            if (w.ddl) {
+                cache.invalidateAll();
+            } else {
+                for (String table : w.tables) cache.invalidateTable(table);
+            }
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            String name = method.getName();
+            switch (name) {
+                case "executeQuery":
+                case "executeUpdate":
+                case "execute":
+                    // Observe + invalidate ONLY for the no-arg variants —
+                    // those use the bound SQL captured at prepareCall time.
+                    // The (String) overloads aren't part of the
+                    // CallableStatement contract (inherited but undefined),
+                    // so we just delegate without observation.
+                    if (args == null || args.length == 0) {
+                        connHandler.gucState.observeSql(sql);
+                        handleWriteInvalidation(sql);
+                    }
+                    return method.invoke(real, args);
+                case "addBatch":
+                    // Mirror StatementHandler.addBatch: observe the
+                    // String-arg form. The no-arg form uses the bound SQL
+                    // (already observed at execute time, so re-observing
+                    // at addBatch would double-count).
+                    if (args != null && args.length > 0 && args[0] instanceof String) {
+                        connHandler.gucState.observeSql((String) args[0]);
+                    }
+                    return method.invoke(real, args);
+                default:
+                    return method.invoke(real, args);
+            }
         }
     }
 }

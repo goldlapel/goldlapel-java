@@ -54,6 +54,84 @@ class NativeCacheTest {
         @Test void empty() { assertNull(NativeCache.detectWrite("")); }
         @Test void whitespace() { assertNull(NativeCache.detectWrite("   ")); }
         @Test void copyWithColumns() { assertEquals("orders", NativeCache.detectWrite("COPY orders(id, name) FROM '/tmp/data.csv'")); }
+
+        // --- SELECT-INTO false positives on string literals
+        // (wrapper-detect-write-string-literal-false-positive.md, 2026-05-04)
+        // detectWrite's SELECT branch tokenizes by whitespace; a bare `INTO`
+        // sitting inside a `'...'` literal or `"..."` identifier was
+        // misclassified as SELECT-INTO DDL. The literal-stripping pass on
+        // re-tokenization must keep these as plain reads.
+
+        @Test void selectIntoInsideSingleQuoteLiteralIsRead() {
+            // Real-world shape: `SELECT 'INSERT INTO orders' FROM audit_log`
+            // — `INTO` is inside the literal, not a DDL clause.
+            assertNull(NativeCache.detectWrite("SELECT 'INSERT INTO orders' FROM audit_log"));
+        }
+
+        @Test void selectIntoInsideDoubleQuotedIdentifierIsRead() {
+            // `"into_table"` is a quoted identifier, not a SELECT-INTO target.
+            assertNull(NativeCache.detectWrite("SELECT * FROM \"into_table\""));
+        }
+
+        @Test void selectLikePatternContainingIntoIsRead() {
+            // `WHERE message LIKE '%INTO%'` — `INTO` lives inside the
+            // pattern literal.
+            assertNull(NativeCache.detectWrite("SELECT message FROM logs WHERE message LIKE '%INTO%'"));
+        }
+
+        @Test void selectDoubledQuoteEscapeContainingIntoIsRead() {
+            // PG's doubled-single-quote escape: `'it''s INTO time'`. The
+            // doubled `''` stays inside the literal — `INTO` must not leak.
+            assertNull(NativeCache.detectWrite("SELECT 'it''s INTO time' FROM events"));
+        }
+
+        @Test void selectIntoOutsideLiteralStillDetected() {
+            // Regression guard: real `SELECT ... INTO new_table FROM ...`
+            // (the actual DDL form) must still classify as DDL.
+            assertEquals(NativeCache.DDL_SENTINEL,
+                NativeCache.detectWrite("SELECT a, b INTO new_table FROM source"));
+        }
+    }
+
+    // --- stripStringLiterals — literal-aware tokenizer primitive ---
+
+    @Nested class StripStringLiteralsTest {
+        @Test void singleQuoteLiteralReplaced() {
+            // "hello world" is 11 chars — body is blanked, delimiters kept.
+            assertEquals("SELECT '           ' FROM t",
+                NativeCache.stripStringLiterals("SELECT 'hello world' FROM t"));
+        }
+
+        @Test void doubleQuotedIdentifierReplaced() {
+            // "into_table" is 10 chars — body is blanked, delimiters kept.
+            assertEquals("SELECT * FROM \"          \"",
+                NativeCache.stripStringLiterals("SELECT * FROM \"into_table\""));
+        }
+
+        @Test void doubledSingleQuoteEscapeStaysInside() {
+            // `'it''s'` is one literal; result preserves length and only the
+            // outer quotes stay as quote chars.
+            String in = "'it''s INTO'";
+            String out = NativeCache.stripStringLiterals(in);
+            assertEquals(in.length(), out.length());
+            assertEquals('\'', out.charAt(0));
+            assertEquals('\'', out.charAt(out.length() - 1));
+            // Body fully blanked (including the doubled-quote pair).
+            for (int i = 1; i < out.length() - 1; i++) {
+                assertEquals(' ', out.charAt(i), "char " + i + " should be blanked");
+            }
+        }
+
+        @Test void preservesLength() {
+            String in = "SELECT 'a INTO b' FROM \"qq\" WHERE x='c'";
+            String out = NativeCache.stripStringLiterals(in);
+            assertEquals(in.length(), out.length());
+        }
+
+        @Test void nullAndEmpty() {
+            assertNull(NativeCache.stripStringLiterals(null));
+            assertEquals("", NativeCache.stripStringLiterals(""));
+        }
     }
 
     // --- detectWritesMulti — multi-statement Q-message bodies ---
@@ -198,6 +276,87 @@ class NativeCacheTest {
         @Test void end() { assertTrue(NativeCache.isTxEnd("END")); }
         @Test void savepointNotStart() { assertFalse(NativeCache.isTxStart("SAVEPOINT x")); }
         @Test void selectNotStart() { assertFalse(NativeCache.isTxStart("SELECT 1")); }
+    }
+
+    // --- updateTxState — multi-statement-aware tx-flag bookkeeping
+    // (java tx-flag bookkeeping fix, 2026-05-04)
+    // The single-token isTxStart/isTxEnd only see the first segment of a
+    // multi-statement Q body — "BEGIN; INSERT...; COMMIT" used to flip the
+    // wrapper into "in tx" and never come back, pinning every subsequent
+    // read into cache-bypass mode. updateTxState walks every segment so the
+    // resulting flag matches the server's post-execution state.
+
+    @Nested class UpdateTxStateTest {
+        @Test void singleBeginEntersTx() {
+            assertTrue(NativeCache.updateTxState(false, "BEGIN"));
+        }
+
+        @Test void singleCommitExitsTx() {
+            assertFalse(NativeCache.updateTxState(true, "COMMIT"));
+        }
+
+        @Test void beginInsertCommitEndsOutOfTx() {
+            // The headline regression: BEGIN-then-COMMIT in the same Q body
+            // must leave the wrapper out-of-tx so subsequent reads can hit
+            // the cache.
+            assertFalse(NativeCache.updateTxState(false,
+                "BEGIN; INSERT INTO orders VALUES (1); COMMIT"));
+        }
+
+        @Test void beginInsertWithoutCommitStaysInTx() {
+            // BEGIN without a trailing COMMIT/ROLLBACK leaves the wrapper
+            // in-tx so writes inside the open tx still bypass the cache.
+            assertTrue(NativeCache.updateTxState(false,
+                "BEGIN; INSERT INTO orders VALUES (1)"));
+        }
+
+        @Test void rollbackEndsOutOfTx() {
+            assertFalse(NativeCache.updateTxState(true,
+                "BEGIN; UPDATE orders SET x = 1; ROLLBACK"));
+        }
+
+        @Test void savepointEntersTx() {
+            // SAVEPOINT in autocommit implicitly opens a tx (PG semantics).
+            assertTrue(NativeCache.updateTxState(false, "SAVEPOINT sp1"));
+        }
+
+        @Test void releaseExitsTx() {
+            assertFalse(NativeCache.updateTxState(true, "RELEASE sp1"));
+        }
+
+        @Test void endTreatedAsCommit() {
+            // END is a synonym for COMMIT in PG.
+            assertFalse(NativeCache.updateTxState(true, "END"));
+        }
+
+        @Test void startTransactionEntersTx() {
+            assertTrue(NativeCache.updateTxState(false, "START TRANSACTION"));
+        }
+
+        @Test void plainSelectKeepsState() {
+            // No tx verb anywhere — flag carries through unchanged.
+            assertFalse(NativeCache.updateTxState(false, "SELECT 1"));
+            assertTrue(NativeCache.updateTxState(true, "SELECT 1"));
+        }
+
+        @Test void lastTxVerbWins() {
+            // Two flips in one body — the trailing COMMIT must win even
+            // though a SAVEPOINT lives between them.
+            assertFalse(NativeCache.updateTxState(false,
+                "BEGIN; SAVEPOINT sp1; SELECT 1; RELEASE sp1; COMMIT"));
+        }
+
+        @Test void caseInsensitive() {
+            assertFalse(NativeCache.updateTxState(true, "begin; commit"));
+            assertTrue(NativeCache.updateTxState(false, "Begin"));
+        }
+
+        @Test void emptyAndNullSafe() {
+            assertFalse(NativeCache.updateTxState(false, ""));
+            assertTrue(NativeCache.updateTxState(true, ""));
+            assertFalse(NativeCache.updateTxState(false, null));
+            assertTrue(NativeCache.updateTxState(true, null));
+        }
     }
 
     // --- Cache operations ---
