@@ -110,7 +110,7 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                 if (properties.getMeshTag() != null) {
                     opts.setMeshTag(properties.getMeshTag());
                 }
-                opts.setEnableL2ForWrappers(properties.isEnableL2ForWrappers());
+                opts.setEnableProxyCacheForWrappers(properties.isEnableProxyCacheForWrappers());
                 opts.setClient("spring-boot");
             });
         } catch (RuntimeException e) {
@@ -148,7 +148,7 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
         NativeCache cache = NativeCache.getInstance();
         cache.connectInvalidation(invPort);
 
-        log.info("Gold Lapel L1 native cache enabled for {} (invalidation port {})", beanName, invPort);
+        log.info("Gold Lapel native cache enabled for {} (invalidation port {})", beanName, invPort);
 
         return new CachedDataSource(ds, cache);
     }

@@ -116,8 +116,9 @@ class MakeProxyUrlTest {
 
     // The wrapper appends `application_name=goldlapel:java:<version>` to every
     // rewritten URL so the proxy can classify wrapper-vs-raw traffic and skip
-    // L2 result cache for wrappers (they have their own L1). PGAPPNAME is not
-    // set in the test JVM; if it ever were, callers would see different URLs.
+    // the proxy cache for wrappers (they have their own native cache). PGAPPNAME
+    // is not set in the test JVM; if it ever were, callers would see different
+    // URLs.
     private static final String APP_NAME_SUFFIX =
         "application_name=" + GoldLapel.applicationNameMarker();
 
@@ -231,9 +232,9 @@ class MakeProxyUrlTest {
 
 
 class ApplicationNameMarkerTest {
-    // L2-router architecture: wrappers identify themselves to the proxy via PG
-    // `application_name` so the proxy can gate L2 result cache (wrappers have
-    // their own L1; raw clients don't).
+    // Proxy-cache router architecture: wrappers identify themselves to the
+    // proxy via PG `application_name` so the proxy can gate the proxy cache
+    // (wrappers have their own native cache; raw clients don't).
 
     @Test
     void markerHasGoldlapelJavaShape() {
@@ -897,198 +898,203 @@ class ConfigToArgsTest {
         );
     }
 
-    // ── enableL2ForWrappers startup option ──────────────────────────────────
+    // ── enableProxyCacheForWrappers startup option ──────────────────────────
 
     @Test
-    void testEnableL2ForWrappersDefaultFalse() {
+    void testEnableProxyCacheForWrappersDefaultFalse() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        assertFalse(opts.isEnableL2ForWrappers());
+        assertFalse(opts.isEnableProxyCacheForWrappers());
     }
 
     @Test
-    void testEnableL2ForWrappersSetterGetter() {
+    void testEnableProxyCacheForWrappersSetterGetter() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setEnableL2ForWrappers(true);
-        assertTrue(opts.isEnableL2ForWrappers());
-        opts.setEnableL2ForWrappers(false);
-        assertFalse(opts.isEnableL2ForWrappers());
+        opts.setEnableProxyCacheForWrappers(true);
+        assertTrue(opts.isEnableProxyCacheForWrappers());
+        opts.setEnableProxyCacheForWrappers(false);
+        assertFalse(opts.isEnableProxyCacheForWrappers());
     }
 
     @Test
-    void testEnableL2ForWrappersStoredOnInstance() {
+    void testEnableProxyCacheForWrappersStoredOnInstance() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setEnableL2ForWrappers(true);
+        opts.setEnableProxyCacheForWrappers(true);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
-        assertTrue(gl.enableL2ForWrappers());
+        assertTrue(gl.enableProxyCacheForWrappers());
     }
 
     @Test
-    void testEnableL2ForWrappersDefaultStoredOnInstance() {
+    void testEnableProxyCacheForWrappersDefaultStoredOnInstance() {
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
-        assertFalse(gl.enableL2ForWrappers());
+        assertFalse(gl.enableProxyCacheForWrappers());
     }
 
     @Test
-    void testEnableL2ForWrappersInConfigMapRejected() {
-        // Regression guard: enableL2ForWrappers is a top-level canonical-surface
-        // option, never valid inside the structured config map.
+    void testEnableProxyCacheForWrappersInConfigMapRejected() {
+        // Regression guard: enableProxyCacheForWrappers is a top-level
+        // canonical-surface option, never valid inside the structured config map.
         assertThrows(
             IllegalArgumentException.class,
-            () -> GoldLapel.configToArgs(Collections.singletonMap("enableL2ForWrappers", true))
+            () -> GoldLapel.configToArgs(Collections.singletonMap("enableProxyCacheForWrappers", true))
         );
     }
 
     @Test
-    void testEnableL2ForWrappersEmitsCliFlag() {
+    void testEnableProxyCacheForWrappersEmitsCliFlag() {
         // Verify the flag actually reaches the spawned argv. Use buildSpawnCmd()
         // — the same argv-build logic startProxy() hands to ProcessBuilder —
         // without spawning the Rust binary.
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setEnableL2ForWrappers(true);
+        opts.setEnableProxyCacheForWrappers(true);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
-        assertTrue(cmd.contains("--enable-l2-for-wrappers"),
-            "argv must contain --enable-l2-for-wrappers when option is set; got: " + cmd);
+        assertTrue(cmd.contains("--enable-proxy-cache-for-wrappers"),
+            "argv must contain --enable-proxy-cache-for-wrappers when option is set; got: " + cmd);
     }
 
     @Test
-    void testEnableL2ForWrappersAbsentByDefault() {
-        // Default: no --enable-l2-for-wrappers in argv (per-connection
-        // wrapper-skip is the default since the L2 wrapper-skip change shipped).
+    void testEnableProxyCacheForWrappersAbsentByDefault() {
+        // Default: no --enable-proxy-cache-for-wrappers in argv (per-connection
+        // wrapper-skip is the default since the proxy-cache wrapper-skip change
+        // shipped).
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
         List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
-        assertFalse(cmd.contains("--enable-l2-for-wrappers"),
-            "argv must NOT contain --enable-l2-for-wrappers by default; got: " + cmd);
+        assertFalse(cmd.contains("--enable-proxy-cache-for-wrappers"),
+            "argv must NOT contain --enable-proxy-cache-for-wrappers by default; got: " + cmd);
     }
 
-    // ── disableL1 startup option ────────────────────────────────────────────
+    // ── disableNativeCache startup option ───────────────────────────────────
 
     @Test
-    void testDisableL1DefaultFalse() {
+    void testDisableNativeCacheDefaultFalse() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        assertFalse(opts.isDisableL1());
-    }
-
-    @Test
-    void testDisableL1SetterGetter() {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setDisableL1(true);
-        assertTrue(opts.isDisableL1());
-        opts.setDisableL1(false);
-        assertFalse(opts.isDisableL1());
+        assertFalse(opts.isDisableNativeCache());
     }
 
     @Test
-    void testDisableL1StoredOnInstance() {
-        // Mirrors testEnableL2ForWrappersStoredOnInstance — verify the option
-        // flows from the bag onto the GoldLapel instance via the constructor.
+    void testDisableNativeCacheSetterGetter() {
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setDisableL1(true);
+        opts.setDisableNativeCache(true);
+        assertTrue(opts.isDisableNativeCache());
+        opts.setDisableNativeCache(false);
+        assertFalse(opts.isDisableNativeCache());
+    }
+
+    @Test
+    void testDisableNativeCacheStoredOnInstance() {
+        // Mirrors testEnableProxyCacheForWrappersStoredOnInstance — verify the
+        // option flows from the bag onto the GoldLapel instance via the
+        // constructor.
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setDisableNativeCache(true);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
-        assertTrue(gl.disableL1());
+        assertTrue(gl.disableNativeCache());
     }
 
     @Test
-    void testDisableL1DefaultStoredOnInstance() {
+    void testDisableNativeCacheDefaultStoredOnInstance() {
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
-        assertFalse(gl.disableL1());
+        assertFalse(gl.disableNativeCache());
     }
 
     @Test
-    void testDisableL1InConfigMapRejected() {
-        // Regression guard: disableL1 is a top-level canonical-surface option,
-        // never valid inside the structured config map.
+    void testDisableNativeCacheInConfigMapRejected() {
+        // Regression guard: disableNativeCache is a top-level canonical-surface
+        // option, never valid inside the structured config map.
         assertThrows(
             IllegalArgumentException.class,
-            () -> GoldLapel.configToArgs(Collections.singletonMap("disableL1", true))
+            () -> GoldLapel.configToArgs(Collections.singletonMap("disableNativeCache", true))
         );
     }
 
     @Test
-    void testDisableL1AbsentFromArgvByDefault() {
-        // disableL1 is a wrapper-side flag — it must NOT translate into a CLI
-        // arg passed to the Rust binary (the binary doesn't know about L1).
+    void testDisableNativeCacheAbsentFromArgvByDefault() {
+        // disableNativeCache is a wrapper-side flag — it must NOT translate
+        // into a CLI arg passed to the Rust binary (the binary doesn't know
+        // about the wrapper's native cache).
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
         List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
-        assertFalse(cmd.contains("--disable-l1"),
-            "argv must NOT contain --disable-l1 (wrapper-only flag); got: " + cmd);
+        assertFalse(cmd.contains("--disable-native-cache"),
+            "argv must NOT contain --disable-native-cache (wrapper-only flag); got: " + cmd);
     }
 
     @Test
-    void testDisableL1AbsentFromArgvWhenSet() {
+    void testDisableNativeCacheAbsentFromArgvWhenSet() {
         // Same regression guard as above with the option explicitly set —
-        // even when the user opts out of L1, the Rust binary spawn argv stays
-        // L1-knob-free (the flag flows to NativeCache, not to argv).
+        // even when the user opts out of the native cache, the Rust binary
+        // spawn argv stays native-cache-knob-free (the flag flows to
+        // NativeCache, not to argv).
         GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setDisableL1(true);
+        opts.setDisableNativeCache(true);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
-        assertFalse(cmd.contains("--disable-l1"),
-            "argv must NOT contain --disable-l1 even when option is true; got: " + cmd);
+        assertFalse(cmd.contains("--disable-native-cache"),
+            "argv must NOT contain --disable-native-cache even when option is true; got: " + cmd);
     }
 
-    // ── disableL1 cache wiring ──────────────────────────────────────────────
+    // ── disableNativeCache cache wiring ─────────────────────────────────────
     //
-    // Validate the start-time wiring fix: opts.setDisableL1(true) must flow
-    // onto NativeCache.getInstance() before invalidation connects, so the
+    // Validate the start-time wiring fix: opts.setDisableNativeCache(true) must
+    // flow onto NativeCache.getInstance() before invalidation connects, so the
     // cache's get/put behaviour and the very first wrapper_connected snapshot
-    // both reflect the chosen flag. Tests invoke applyDisableL1ToCacheSingleton()
-    // directly (the method startProxy calls before spawning the Rust binary)
-    // so we don't have to start a real proxy in unit tests.
+    // both reflect the chosen flag. Tests invoke
+    // applyDisableNativeCacheToCacheSingleton() directly (the method startProxy
+    // calls before spawning the Rust binary) so we don't have to start a real
+    // proxy in unit tests.
 
     @Test
-    void testDisableL1WiringFlipsCacheSingleton() throws Exception {
+    void testDisableNativeCacheWiringFlipsCacheSingleton() throws Exception {
         // Reset the singleton in case a previous test left it in a non-default
         // state — the singleton is process-wide.
         NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
         try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", null);
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", null);
             GoldLapelOptions opts = new GoldLapelOptions();
-            opts.setDisableL1(true);
+            opts.setDisableNativeCache(true);
             GoldLapel gl = GoldLapelClassTest.newUnstarted(
                 "postgresql://localhost:5432/mydb", opts);
-            gl.applyDisableL1ToCacheSingleton();
+            gl.applyDisableNativeCacheToCacheSingleton();
             assertTrue(NativeCache.getInstance().isDisabled());
         } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
             NativeCache.reset();
         }
     }
 
     @Test
-    void testDisableL1WiringDefaultLeavesCacheEnabled() throws Exception {
+    void testDisableNativeCacheWiringDefaultLeavesCacheEnabled() throws Exception {
         NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
         try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", null);
-            // Default options (disableL1=false) — wiring must leave the
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", null);
+            // Default options (disableNativeCache=false) — wiring must leave the
             // singleton's flag at its constructed default (false here, since
             // env is unset).
             GoldLapel gl = GoldLapelClassTest.newUnstarted(
                 "postgresql://localhost:5432/mydb");
-            gl.applyDisableL1ToCacheSingleton();
+            gl.applyDisableNativeCacheToCacheSingleton();
             assertFalse(NativeCache.getInstance().isDisabled());
         } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
             NativeCache.reset();
         }
     }
 
     @Test
-    void testDisableL1WiringMakesGetMiss() throws Exception {
-        // End-to-end behaviour: after wiring with disableL1=true, the
+    void testDisableNativeCacheWiringMakesGetMiss() throws Exception {
+        // End-to-end behaviour: after wiring with disableNativeCache=true, the
         // singleton's get() returns null (miss) and bumps the miss counter
         // even on a "cached" key — put() is a no-op too.
         NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
         try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", null);
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", null);
             GoldLapelOptions opts = new GoldLapelOptions();
-            opts.setDisableL1(true);
+            opts.setDisableNativeCache(true);
             GoldLapel gl = GoldLapelClassTest.newUnstarted(
                 "postgresql://localhost:5432/mydb", opts);
-            gl.applyDisableL1ToCacheSingleton();
+            gl.applyDisableNativeCacheToCacheSingleton();
 
             NativeCache cache = NativeCache.getInstance();
             // Bypass the connect-required gate so the disabled branch is
@@ -1104,22 +1110,22 @@ class ConfigToArgsTest {
             assertTrue(cache.statsMisses.get() >= 1L,
                 "expected at least one miss tick; got " + cache.statsMisses.get());
         } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
             NativeCache.reset();
         }
     }
 
     @Test
-    void testDisableL1WiringEnabledCacheHitsNormally() throws Exception {
-        // End-to-end behaviour: with disableL1=false (default), the singleton
-        // round-trips put → get normally after wiring.
+    void testDisableNativeCacheWiringEnabledCacheHitsNormally() throws Exception {
+        // End-to-end behaviour: with disableNativeCache=false (default), the
+        // singleton round-trips put → get normally after wiring.
         NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
         try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", null);
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", null);
             GoldLapel gl = GoldLapelClassTest.newUnstarted(
                 "postgresql://localhost:5432/mydb");
-            gl.applyDisableL1ToCacheSingleton();
+            gl.applyDisableNativeCacheToCacheSingleton();
 
             NativeCache cache = NativeCache.getInstance();
             java.lang.reflect.Field connected = NativeCache.class.getDeclaredField("invalidationConnected");
@@ -1131,27 +1137,27 @@ class ConfigToArgsTest {
             assertNotNull(cache.get("SELECT 1", null));
             assertEquals(1L, cache.statsHits.get());
         } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
             NativeCache.reset();
         }
     }
 
     @Test
-    void testDisableL1WiringFirstSnapshotCarriesL1Disabled() throws Exception {
+    void testDisableNativeCacheWiringFirstSnapshotCarriesDisabled() throws Exception {
         // The dispatch's headline assertion: the very first wrapper_connected
-        // snapshot emitted after wiring must carry l1_disabled:true when the
+        // snapshot emitted after wiring must carry disabled:true when the
         // option was set. We capture the emission via setSendOverride instead
         // of standing up a real socket — same shape as the NativeCacheTest
-        // wrapperConnectedEmissionCarriesL1Disabled test.
+        // wrapperConnectedEmissionCarriesDisabled test.
         NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
         try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", null);
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", null);
             GoldLapelOptions opts = new GoldLapelOptions();
-            opts.setDisableL1(true);
+            opts.setDisableNativeCache(true);
             GoldLapel gl = GoldLapelClassTest.newUnstarted(
                 "postgresql://localhost:5432/mydb", opts);
-            gl.applyDisableL1ToCacheSingleton();
+            gl.applyDisableNativeCacheToCacheSingleton();
 
             NativeCache cache = NativeCache.getInstance();
             List<String> emissions = Collections.synchronizedList(new ArrayList<>());
@@ -1168,33 +1174,34 @@ class ConfigToArgsTest {
             }
             assertNotNull(body, "expected an S: emission, got " + emissions);
             assertTrue(body.contains("\"state\":\"wrapper_connected\""), body);
-            assertTrue(body.contains("\"l1_disabled\":true"), body);
+            assertTrue(body.contains("\"disabled\":true"), body);
         } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
             NativeCache.reset();
         }
     }
 
     @Test
-    void testDisableL1WiringEnvVarBeatsOptionFalse() throws Exception {
-        // Precedence: env var > option. GOLDLAPEL_DISABLE_L1=true seeds the
-        // singleton at construction time; the wiring step must NOT silently
-        // re-enable L1 even when the option is false. (Env-wins safety valve:
-        // an operator can force L1 off without touching app code.)
+    void testDisableNativeCacheWiringEnvVarBeatsOptionFalse() throws Exception {
+        // Precedence: env var > option. GOLDLAPEL_DISABLE_NATIVE_CACHE=true
+        // seeds the singleton at construction time; the wiring step must NOT
+        // silently re-enable the native cache even when the option is false.
+        // (Env-wins safety valve: an operator can force the native cache off
+        // without touching app code.)
         NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_L1");
+        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
         try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", "true");
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", "true");
             // Force the singleton to (re)read env on next getInstance().
             NativeCache.reset();
-            // Default opts → disableL1 false on the option side.
+            // Default opts → disableNativeCache false on the option side.
             GoldLapel gl = GoldLapelClassTest.newUnstarted(
                 "postgresql://localhost:5432/mydb");
-            gl.applyDisableL1ToCacheSingleton();
+            gl.applyDisableNativeCacheToCacheSingleton();
             assertTrue(NativeCache.getInstance().isDisabled(),
-                "env-set GOLDLAPEL_DISABLE_L1=true must survive the option=false wiring step");
+                "env-set GOLDLAPEL_DISABLE_NATIVE_CACHE=true must survive the option=false wiring step");
         } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_L1", origEnv);
+            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
             NativeCache.reset();
         }
     }

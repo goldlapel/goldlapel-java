@@ -129,7 +129,7 @@ public class ConnectionProxy {
                 return real.executeQuery(sql);
             }
 
-            // Check L1 cache
+            // Check native cache
             NativeCache.CacheEntry entry = cache.get(sql, null);
             if (entry != null) {
                 return CachedResultSet.create(entry.rows, entry.columns);

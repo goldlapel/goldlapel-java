@@ -65,15 +65,15 @@ public class GoldLapel implements AutoCloseable {
         Collections.addAll(keys,
             "minPatternCount", "refreshIntervalSecs", "patternTtlSecs",
             "maxTablesPerView", "maxColumnsPerView", "deepPaginationThreshold",
-            "reportIntervalSecs", "resultCacheSize", "batchCacheSize",
+            "reportIntervalSecs", "proxyCacheSize", "batchCacheSize",
             "batchCacheTtlSecs", "poolSize", "poolTimeoutSecs",
             "poolMode", "mgmtIdleTimeout", "fallback", "readAfterWriteSecs",
             "n1Threshold", "n1WindowMs", "n1CrossThreshold",
             "tlsCert", "tlsKey", "tlsClientCa",
             "disableMatviews", "disableConsolidation", "disableBtreeIndexes",
             "disableTrigramIndexes", "disableExpressionIndexes",
-            "disablePartialIndexes", "disableRewrite", "disablePreparedCache",
-            "disableResultCache", "disablePool",
+            "disablePartialIndexes", "disableRewrite", "disableRewritePreparedCache",
+            "disableProxyCache", "disablePool",
             "disableN1", "disableN1CrossConnection", "disableShadowMode",
             "enableCoalescing", "replica", "excludeTables"
         );
@@ -83,8 +83,8 @@ public class GoldLapel implements AutoCloseable {
         Collections.addAll(bools,
             "disableMatviews", "disableConsolidation", "disableBtreeIndexes",
             "disableTrigramIndexes", "disableExpressionIndexes",
-            "disablePartialIndexes", "disableRewrite", "disablePreparedCache",
-            "disableResultCache", "disablePool",
+            "disablePartialIndexes", "disableRewrite", "disableRewritePreparedCache",
+            "disableProxyCache", "disablePool",
             "disableN1", "disableN1CrossConnection", "disableShadowMode",
             "enableCoalescing"
         );
@@ -111,8 +111,8 @@ public class GoldLapel implements AutoCloseable {
     private final boolean silent;
     private final boolean mesh;
     private final String meshTag;
-    private final boolean enableL2ForWrappers;
-    private final boolean disableL1;
+    private final boolean enableProxyCacheForWrappers;
+    private final boolean disableNativeCache;
     private Process process;
     private String proxyUrl;
     private Connection internalConn;
@@ -197,8 +197,8 @@ public class GoldLapel implements AutoCloseable {
         this.mesh = options.isMesh();
         String tag = options.getMeshTag();
         this.meshTag = (tag == null || tag.isEmpty()) ? null : tag;
-        this.enableL2ForWrappers = options.isEnableL2ForWrappers();
-        this.disableL1 = options.isDisableL1();
+        this.enableProxyCacheForWrappers = options.isEnableProxyCacheForWrappers();
+        this.disableNativeCache = options.isDisableNativeCache();
         this.process = null;
         this.proxyUrl = null;
 
@@ -258,12 +258,12 @@ public class GoldLapel implements AutoCloseable {
             return;
         }
 
-        // Push the disableL1 option onto the NativeCache singleton BEFORE the
-        // proxy spawn (and well before any caller invokes connectInvalidation),
+        // Push the disableNativeCache option onto the NativeCache singleton BEFORE
+        // the proxy spawn (and well before any caller invokes connectInvalidation),
         // so the very first wrapper_connected snapshot carries the correct
-        // l1_disabled field. Mirrors the .NET wrapper's pre-spawn singleton
+        // disabled field. Mirrors the .NET wrapper's pre-spawn singleton
         // poke (see goldlapel-dotnet/src/GoldLapel/GoldLapel.cs SpawnAsync).
-        applyDisableL1ToCacheSingleton();
+        applyDisableNativeCacheToCacheSingleton();
 
         String binary = findBinary();
         List<String> cmd = buildSpawnCmd(binary);
@@ -337,12 +337,12 @@ public class GoldLapel implements AutoCloseable {
     }
 
     /**
-     * Push the {@code disableL1} option onto the {@link NativeCache} singleton.
-     * Called from {@link #startProxy()} before the subprocess is spawned, so
-     * the very first {@code wrapper_connected} snapshot the cache emits carries
-     * the correct {@code l1_disabled} field.
+     * Push the {@code disableNativeCache} option onto the {@link NativeCache}
+     * singleton. Called from {@link #startProxy()} before the subprocess is
+     * spawned, so the very first {@code wrapper_connected} snapshot the cache
+     * emits carries the correct {@code disabled} field.
      *
-     * <p>Precedence: env var &gt; option. {@code GOLDLAPEL_DISABLE_L1=true}
+     * <p>Precedence: env var &gt; option. {@code GOLDLAPEL_DISABLE_NATIVE_CACHE=true}
      * seeds the singleton at construction time via {@code NativeCache.envDisabled()};
      * this method only flips the flag when the env var didn't already force it
      * on. That way an env-forced session can never be silently re-enabled by
@@ -354,13 +354,13 @@ public class GoldLapel implements AutoCloseable {
      * spawn for a telemetry knob. Package-private so unit tests can invoke
      * the wiring directly without spawning the Rust binary.
      */
-    void applyDisableL1ToCacheSingleton() {
+    void applyDisableNativeCacheToCacheSingleton() {
         try {
             NativeCache cache = NativeCache.getInstance();
-            String envDisable = System.getenv("GOLDLAPEL_DISABLE_L1");
+            String envDisable = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
             boolean envForced = envDisable != null && "true".equalsIgnoreCase(envDisable);
             if (!envForced) {
-                cache.setDisabled(disableL1);
+                cache.setDisabled(disableNativeCache);
             }
         } catch (Throwable ignored) {
             // No singleton, no telemetry knob — proxy spawn proceeds normally.
@@ -370,8 +370,8 @@ public class GoldLapel implements AutoCloseable {
     /**
      * Build the argv that {@link #startProxy()} hands to {@link ProcessBuilder}.
      * Package-private so tests can verify CLI-flag emission for top-level
-     * options (mesh, enableL2ForWrappers, etc.) without spawning the Rust
-     * binary. Order: required flags first ({@code --upstream}, {@code --proxy-port}),
+     * options (mesh, enableProxyCacheForWrappers, etc.) without spawning the
+     * Rust binary. Order: required flags first ({@code --upstream}, {@code --proxy-port}),
      * then top-level options that emit only when the user set them, then the
      * tuning-knob config map, then any caller-supplied {@code extraArgs}.
      */
@@ -417,8 +417,8 @@ public class GoldLapel implements AutoCloseable {
             cmd.add("--mesh-tag");
             cmd.add(meshTag);
         }
-        if (enableL2ForWrappers) {
-            cmd.add("--enable-l2-for-wrappers");
+        if (enableProxyCacheForWrappers) {
+            cmd.add("--enable-proxy-cache-for-wrappers");
         }
         cmd.addAll(configToArgs(config));
         cmd.addAll(extraArgs);
@@ -688,18 +688,18 @@ public class GoldLapel implements AutoCloseable {
         return meshTag;
     }
 
-    // Package-private accessor for tests to verify enableL2ForWrappers wiring
-    // without spawning the proxy.
-    boolean enableL2ForWrappers() {
-        return enableL2ForWrappers;
+    // Package-private accessor for tests to verify enableProxyCacheForWrappers
+    // wiring without spawning the proxy.
+    boolean enableProxyCacheForWrappers() {
+        return enableProxyCacheForWrappers;
     }
 
-    // Package-private accessor for tests to verify disableL1 storage on the
-    // instance. The actual cache-side wiring is exercised by tests that
+    // Package-private accessor for tests to verify disableNativeCache storage on
+    // the instance. The actual cache-side wiring is exercised by tests that
     // inspect NativeCache.getInstance() after start(); this getter is for
     // the lightweight "option flowed onto the bag" assertion.
-    boolean disableL1() {
-        return disableL1;
+    boolean disableNativeCache() {
+        return disableNativeCache;
     }
 
     public String getDashboardUrl() {
@@ -1205,7 +1205,7 @@ public class GoldLapel implements AutoCloseable {
      * {@code Implementation-Version} manifest entry; CI sets this from the git
      * tag at publish time. Local dev / test builds return {@code "0.0.0"}.
      * Used to build the {@code application_name} marker on PG connections so
-     * the proxy can classify wrapper-vs-raw traffic and gate L2 result cache.
+     * the proxy can classify wrapper-vs-raw traffic and gate the proxy cache.
      */
     static String wrapperVersion() {
         Package pkg = GoldLapel.class.getPackage();
@@ -1223,9 +1223,9 @@ public class GoldLapel implements AutoCloseable {
     /**
      * Append {@code application_name=goldlapel:java:<version>} to {@code url}
      * unless one is already present (or {@code PGAPPNAME} is set in the env).
-     * The marker tells the proxy this is wrapper traffic so it can skip L2
-     * result cache (the wrapper has its own L1). Idempotent and override-
-     * respecting.
+     * The marker tells the proxy this is wrapper traffic so it can skip the
+     * proxy cache (the wrapper has its own native cache). Idempotent and
+     * override-respecting.
      */
     static String injectApplicationName(String url) {
         if (APP_NAME_PRESENT.matcher(url).find()) return url;

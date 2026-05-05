@@ -16,7 +16,7 @@ public class GoldLapelProperties {
     private boolean silent = false;
     private boolean mesh = false;
     private String meshTag = null;
-    private boolean enableL2ForWrappers = false;
+    private boolean enableProxyCacheForWrappers = false;
     private Map<String, String> config = new LinkedHashMap<>();
 
     public boolean isEnabled() {
@@ -135,23 +135,23 @@ public class GoldLapelProperties {
         this.meshTag = meshTag;
     }
 
-    public boolean isEnableL2ForWrappers() {
-        return enableL2ForWrappers;
+    public boolean isEnableProxyCacheForWrappers() {
+        return enableProxyCacheForWrappers;
     }
 
     /**
-     * Whether wrapper-spawned proxies participate in L2 (the proxy result
-     * cache). Default {@code false} — Spring Boot apps usually have their
-     * own in-process cache via {@link CachedDataSource}, and a single
-     * wrapper rarely benefits from sharing L2 with itself.
+     * Whether wrapper-spawned proxies participate in the proxy cache.
+     * Default {@code false} — Spring Boot apps usually have their own
+     * in-process cache via {@link CachedDataSource}, and a single wrapper
+     * rarely benefits from sharing the proxy cache with itself.
      *
      * <p>Set {@code true} for fleet deployments (multi-pod, frequent
-     * restarts, mesh) where L2 still earns its keep as a shared cache
-     * across many short-lived wrapper processes.
+     * restarts, mesh) where the proxy cache still earns its keep as a
+     * shared cache across many short-lived wrapper processes.
      *
-     * <p>YAML: {@code goldlapel.enable-l2-for-wrappers: true}.
+     * <p>YAML: {@code goldlapel.enable-proxy-cache-for-wrappers: true}.
      */
-    public void setEnableL2ForWrappers(boolean enableL2ForWrappers) {
-        this.enableL2ForWrappers = enableL2ForWrappers;
+    public void setEnableProxyCacheForWrappers(boolean enableProxyCacheForWrappers) {
+        this.enableProxyCacheForWrappers = enableProxyCacheForWrappers;
     }
 }

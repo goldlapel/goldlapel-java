@@ -24,7 +24,7 @@ public class NativeCache {
         "except", "all", "distinct", "lateral", "values"
     );
 
-    // --- L1 telemetry tuning ---
+    // --- native-cache telemetry tuning ---
     //
     // Demand-driven model (matches goldlapel-python cache.py): the wrapper has
     // NO background timer. Cache counters increment on cache ops (free);
@@ -45,7 +45,7 @@ public class NativeCache {
     private final AtomicLong counter = new AtomicLong(0);
     final int maxEntries;
     final boolean enabled;
-    // Wrapper-side L1 opt-out. When true, the cache acts as a no-op
+    // Wrapper-side native-cache opt-out. When true, the cache acts as a no-op
     // pass-through: get() always returns null (and ticks misses for proxy
     // visibility), put() never stores. Distinct from `enabled` (which is the
     // env-var GOLDLAPEL_NATIVE_CACHE kill-switch) and from capacity=0 (which
@@ -55,10 +55,10 @@ public class NativeCache {
     // volatile (not final) so GoldLapel.start() can flip it on the existing
     // singleton at startup time (env-var or constructor sets the initial
     // default; the option setter from start() overrides). Mirrors the
-    // .NET wrapper's `volatile bool _disableL1` pattern. Volatile because
-    // it's read on every get()/put() from any caller thread and written
-    // from the start() thread; without it a stale read could let a `put`
-    // sneak through after the user opted out.
+    // .NET wrapper's `volatile bool _disableNativeCache` pattern. Volatile
+    // because it's read on every get()/put() from any caller thread and
+    // written from the start() thread; without it a stale read could let a
+    // `put` sneak through after the user opted out.
     volatile boolean disabled;
 
     private volatile boolean invalidationConnected = false;
@@ -76,11 +76,11 @@ public class NativeCache {
     final AtomicLong statsHits = new AtomicLong(0);
     final AtomicLong statsMisses = new AtomicLong(0);
     final AtomicLong statsInvalidations = new AtomicLong(0);
-    // L1 telemetry: eviction counter — bumped in evictOne(). Atomic so the
+    // native-cache telemetry: eviction counter — bumped in evictOne(). Atomic so the
     // existing concurrent-access tests stay lock-free on the hot path.
     final AtomicLong statsEvictions = new AtomicLong(0);
 
-    // L1 telemetry: stable wrapper identity for the lifetime of the process.
+    // native-cache telemetry: stable wrapper identity for the lifetime of the process.
     // Lets the proxy aggregate per-wrapper across reconnects.
     private final String wrapperId = UUID.randomUUID().toString();
     private static final String WRAPPER_LANG = "java";
@@ -160,7 +160,7 @@ public class NativeCache {
     }
 
     private static boolean envDisabled() {
-        String s = System.getenv("GOLDLAPEL_DISABLE_L1");
+        String s = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
         return s != null && "true".equalsIgnoreCase(s);
     }
 
@@ -195,8 +195,8 @@ public class NativeCache {
     public int size() { return cache.size(); }
 
     /**
-     * Whether wrapper-side L1 is currently opted out. Mirrors the
-     * {@code GoldLapelOptions.disableL1} flag — when {@code true},
+     * Whether the wrapper-side native cache is currently opted out. Mirrors the
+     * {@code GoldLapelOptions.disableNativeCache} flag — when {@code true},
      * {@link #get} returns null (incrementing the miss counter) and
      * {@link #put} silently drops. The invalidation thread keeps running so
      * snapshot replies still reach the proxy.
@@ -204,13 +204,13 @@ public class NativeCache {
     public boolean isDisabled() { return disabled; }
 
     /**
-     * Flip the L1 opt-out flag at runtime. Called by
+     * Flip the native-cache opt-out flag at runtime. Called by
      * {@link GoldLapel#start(String, java.util.function.Consumer)} to push
-     * {@code GoldLapelOptions.disableL1} onto the singleton before the
+     * {@code GoldLapelOptions.disableNativeCache} onto the singleton before the
      * invalidation thread connects, so the very first {@code wrapper_connected}
-     * snapshot carries the correct {@code l1_disabled} field.
+     * snapshot carries the correct {@code disabled} field.
      *
-     * <p>Precedence: the {@code GOLDLAPEL_DISABLE_L1} env var (read at
+     * <p>Precedence: the {@code GOLDLAPEL_DISABLE_NATIVE_CACHE} env var (read at
      * singleton construction time) wins. {@link GoldLapel#start} only invokes
      * this setter when the env var didn't already force the flag on, so an
      * env-var-true session can never be silently re-enabled by an option.
@@ -223,8 +223,9 @@ public class NativeCache {
 
     public CacheEntry get(String sql, Object[] params) {
         if (!enabled || !invalidationConnected) return null;
-        // disableL1 — wrapper-side L1 opt-out. Tick misses so the proxy still
-        // sees per-query traffic in the snapshot; hits stay zero by definition.
+        // disableNativeCache — wrapper-side native-cache opt-out. Tick misses so
+        // the proxy still sees per-query traffic in the snapshot; hits stay
+        // zero by definition.
         if (disabled) {
             statsMisses.incrementAndGet();
             return null;
@@ -243,7 +244,7 @@ public class NativeCache {
 
     public void put(String sql, Object[] params, List<Object[]> rows, String[] columns) {
         if (!enabled || !invalidationConnected) return;
-        // disableL1 — silently drop. No store, no eviction, no state-change.
+        // disableNativeCache — silently drop. No store, no eviction, no state-change.
         if (disabled) return;
         String key = makeKey(sql, params);
         if (key == null) return;
@@ -334,7 +335,7 @@ public class NativeCache {
                 );
                 invalidationSocket.setSoTimeout(30000);
 
-                // L1 telemetry: emit `wrapper_connected` on the freshly-wired
+                // native-cache telemetry: emit `wrapper_connected` on the freshly-wired
                 // socket. Done before entering the recv loop so it's the very
                 // first line on the connection.
                 emitStateChange("wrapper_connected");
@@ -389,7 +390,7 @@ public class NativeCache {
         // C: (config), P: (ping), and anything else — ignored.
     }
 
-    // --- L1 telemetry: sliding window + state-change emission ---
+    // --- native-cache telemetry: sliding window + state-change emission ---
 
     private void recordEviction(boolean evicted) {
         synchronized (evictWindowLock) {
@@ -404,9 +405,9 @@ public class NativeCache {
     }
 
     /**
-     * Build the L1 snapshot the proxy aggregates per-tick. Counter reads use
-     * the existing AtomicLong getters — no critical section needed; the proxy
-     * computes deltas across ticks and tolerates per-field skew.
+     * Build the native-cache snapshot the proxy aggregates per-tick. Counter
+     * reads use the existing AtomicLong getters — no critical section needed;
+     * the proxy computes deltas across ticks and tolerates per-field skew.
      */
     Map<String, Object> buildSnapshot() {
         Map<String, Object> snap = new LinkedHashMap<>();
@@ -419,12 +420,12 @@ public class NativeCache {
         snap.put("invalidations", statsInvalidations.get());
         snap.put("current_size_entries", (long) cache.size());
         snap.put("capacity_entries", (long) maxEntries);
-        // L1 opt-out marker — only emitted when the wrapper is running with
-        // disableL1=true, so the proxy can distinguish "L1 disabled by config"
-        // from "L1 underperforming". Absent in the default case to keep the
-        // common-path snapshot stable.
+        // Native-cache opt-out marker — only emitted when the wrapper is running
+        // with disableNativeCache=true, so the proxy can distinguish "native
+        // cache disabled by config" from "native cache underperforming". Absent
+        // in the default case to keep the common-path snapshot stable.
         if (disabled) {
-            snap.put("l1_disabled", true);
+            snap.put("disabled", true);
         }
         return snap;
     }
@@ -695,7 +696,7 @@ public class NativeCache {
         statsEvictions.incrementAndGet();
     }
 
-    // --- L1 telemetry: minimal JSON serializer ---
+    // --- native-cache telemetry: minimal JSON serializer ---
     //
     // Hand-rolled to avoid pulling in Jackson/Gson; the snapshot map is flat
     // and shape-stable so a 30-line serializer is cheaper than a dependency.

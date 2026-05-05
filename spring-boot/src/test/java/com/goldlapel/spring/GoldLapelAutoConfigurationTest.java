@@ -448,7 +448,7 @@ class GoldLapelAutoConfigurationTest {
         assertThat(result).containsEntry("mode", "waiter");
     }
 
-    // --- L1 native cache tests ---
+    // --- native cache tests ---
 
     @Test
     void wrapsDataSourceWithCachedDataSource() {
@@ -590,18 +590,19 @@ class GoldLapelAutoConfigurationTest {
         assertThat(props.getProxyPort()).isEqualTo(7932);
         // Top-level options surfaced from GoldLapelOptions: defaults must
         // match the core module's defaults (silent=false, mesh=false,
-        // meshTag=null, enableL2ForWrappers=false).
+        // meshTag=null, enableProxyCacheForWrappers=false).
         assertThat(props.isSilent()).isFalse();
         assertThat(props.isMesh()).isFalse();
         assertThat(props.getMeshTag()).isNull();
-        assertThat(props.isEnableL2ForWrappers()).isFalse();
+        assertThat(props.isEnableProxyCacheForWrappers()).isFalse();
     }
 
     // --- Top-level GoldLapelOptions surfaced via @ConfigurationProperties ---
     //
-    // silent / mesh / mesh-tag / enable-l2-for-wrappers must flow from
-    // application.yml through GoldLapelProperties into the GoldLapelOptions
-    // handed to GoldLapel.start(...). Defaults must match the core module.
+    // silent / mesh / mesh-tag / enable-proxy-cache-for-wrappers must flow
+    // from application.yml through GoldLapelProperties into the
+    // GoldLapelOptions handed to GoldLapel.start(...). Defaults must match the
+    // core module.
 
     @Test
     void silentDefaultIsFalseInOptions() {
@@ -619,7 +620,7 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(captured.get(0).isSilent()).isFalse();
                         assertThat(captured.get(0).isMesh()).isFalse();
                         assertThat(captured.get(0).getMeshTag()).isNull();
-                        assertThat(captured.get(0).isEnableL2ForWrappers()).isFalse();
+                        assertThat(captured.get(0).isEnableProxyCacheForWrappers()).isFalse();
                     });
         }
     }
@@ -679,9 +680,10 @@ class GoldLapelAutoConfigurationTest {
     }
 
     @Test
-    void enableL2ForWrappersViaKebabCaseProperty() {
-        // Spring binds kebab-case `enable-l2-for-wrappers` to camelCase
-        // `enableL2ForWrappers` on GoldLapelProperties + GoldLapelOptions.
+    void enableProxyCacheForWrappersViaKebabCaseProperty() {
+        // Spring binds kebab-case `enable-proxy-cache-for-wrappers` to
+        // camelCase `enableProxyCacheForWrappers` on GoldLapelProperties +
+        // GoldLapelOptions.
         List<GoldLapelOptions> captured = new ArrayList<>();
         try (MockedStatic<GoldLapel> ignored = stubStart(
                 u -> "postgresql://localhost:7932/testdb", captured)) {
@@ -689,10 +691,10 @@ class GoldLapelAutoConfigurationTest {
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
                             "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.enable-l2-for-wrappers=true")
+                            "goldlapel.enable-proxy-cache-for-wrappers=true")
                     .run(context -> {
                         assertThat(captured).hasSize(1);
-                        assertThat(captured.get(0).isEnableL2ForWrappers()).isTrue();
+                        assertThat(captured.get(0).isEnableProxyCacheForWrappers()).isTrue();
                     });
         }
     }
@@ -712,14 +714,14 @@ class GoldLapelAutoConfigurationTest {
                             "goldlapel.silent=true",
                             "goldlapel.mesh=true",
                             "goldlapel.mesh-tag=us-west-prod-1",
-                            "goldlapel.enable-l2-for-wrappers=true")
+                            "goldlapel.enable-proxy-cache-for-wrappers=true")
                     .run(context -> {
                         assertThat(captured).hasSize(1);
                         GoldLapelOptions opts = captured.get(0);
                         assertThat(opts.isSilent()).isTrue();
                         assertThat(opts.isMesh()).isTrue();
                         assertThat(opts.getMeshTag()).isEqualTo("us-west-prod-1");
-                        assertThat(opts.isEnableL2ForWrappers()).isTrue();
+                        assertThat(opts.isEnableProxyCacheForWrappers()).isTrue();
                         // Existing options still wired correctly alongside
                         // the new ones (no regression).
                         assertThat(opts.getClient()).isEqualTo("spring-boot");

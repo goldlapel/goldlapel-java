@@ -39,8 +39,8 @@ public class GoldLapelOptions {
     private boolean silent;
     private boolean mesh;
     private String meshTag;
-    private boolean enableL2ForWrappers;
-    private boolean disableL1;
+    private boolean enableProxyCacheForWrappers;
+    private boolean disableNativeCache;
 
     public Integer getProxyPort() {
         return proxyPort;
@@ -203,28 +203,28 @@ public class GoldLapelOptions {
     }
 
     /**
-     * Whether wrapper-spawned proxies participate in L2 (the proxy result
-     * cache). Default {@code false} — per-connection wrapper-skip is the
-     * default since the L2 wrapper-skip change shipped: wrapper apps
+     * Whether wrapper-spawned proxies participate in the proxy cache.
+     * Default {@code false} — per-connection wrapper-skip is the default
+     * since the proxy-cache wrapper-skip change shipped: wrapper apps
      * usually have their own in-process cache, and a single wrapper rarely
-     * benefits from sharing L2 with itself.
+     * benefits from sharing the proxy cache with itself.
      *
      * <p>Set {@code true} for fleet deployments (multi-pod, frequent
-     * restarts, mesh) where L2 still earns its keep as a shared cache
-     * across many short-lived wrapper processes.
+     * restarts, mesh) where the proxy cache still earns its keep as a
+     * shared cache across many short-lived wrapper processes.
      *
-     * <p>Equivalent CLI flag: {@code --enable-l2-for-wrappers}.
+     * <p>Equivalent CLI flag: {@code --enable-proxy-cache-for-wrappers}.
      */
-    public boolean isEnableL2ForWrappers() {
-        return enableL2ForWrappers;
+    public boolean isEnableProxyCacheForWrappers() {
+        return enableProxyCacheForWrappers;
     }
 
-    public void setEnableL2ForWrappers(boolean enableL2ForWrappers) {
-        this.enableL2ForWrappers = enableL2ForWrappers;
+    public void setEnableProxyCacheForWrappers(boolean enableProxyCacheForWrappers) {
+        this.enableProxyCacheForWrappers = enableProxyCacheForWrappers;
     }
 
     /**
-     * Whether to disable the wrapper's L1 cache entirely. Default {@code false}.
+     * Whether to disable the wrapper's native cache entirely. Default {@code false}.
      * When {@code true}, the in-process {@link NativeCache} acts as a no-op
      * pass-through: {@code get()} always returns null, {@code put()} never
      * stores. Misses still tick (so the proxy sees per-query traffic), hits
@@ -232,17 +232,17 @@ public class GoldLapelOptions {
      *
      * <p>This is distinct from setting the cache capacity to zero via the
      * {@code cacheSize} tuning key. {@code cacheSize=0} forces customers to
-     * lose their tuned capacity to toggle the layer; {@code disableL1=true}
+     * lose their tuned capacity to toggle the layer; {@code disableNativeCache=true}
      * lets them keep the size and toggle independently.
      *
      * <p>The invalidation channel still runs while disabled — the wrapper
      * stays connected to the proxy for telemetry and snapshot replies.
      */
-    public boolean isDisableL1() {
-        return disableL1;
+    public boolean isDisableNativeCache() {
+        return disableNativeCache;
     }
 
-    public void setDisableL1(boolean disableL1) {
-        this.disableL1 = disableL1;
+    public void setDisableNativeCache(boolean disableNativeCache) {
+        this.disableNativeCache = disableNativeCache;
     }
 }

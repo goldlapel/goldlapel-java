@@ -451,7 +451,7 @@ class NativeCacheTest {
         }
     }
 
-    // --- L1 telemetry: counters + snapshot shape ---
+    // --- native-cache telemetry: counters + snapshot shape ---
 
     @Nested class EvictionsCounterTest {
         @Test void startsZero() {
@@ -549,7 +549,7 @@ class NativeCacheTest {
         }
     }
 
-    // --- L1 telemetry: state-change emission via send override (unit) ---
+    // --- native-cache telemetry: state-change emission via send override (unit) ---
 
     @Nested class StateChangeUnitTest {
         @Test void evictionRateFiresCacheFull() throws Exception {
@@ -615,7 +615,7 @@ class NativeCacheTest {
         }
     }
 
-    // --- L1 telemetry: protocol shape via real socket (integration) ---
+    // --- native-cache telemetry: protocol shape via real socket (integration) ---
 
     @Nested class StateChangeIntegrationTest {
         @Test void wrapperConnectedEmittedOnSocketConnect() throws Exception {
@@ -708,9 +708,9 @@ class NativeCacheTest {
         }
     }
 
-    // --- disableL1 (wrapper-side L1 opt-out) ---
+    // --- disableNativeCache (wrapper-side native-cache opt-out) ---
 
-    @Nested class DisableL1Test {
+    @Nested class DisableNativeCacheTest {
         @Test void defaultCacheBehavesAsToday() {
             // Sanity: makeCache() builds with the default 3-arg constructor,
             // which routes through the 4-arg form with disabled=false.
@@ -765,21 +765,21 @@ class NativeCacheTest {
             assertEquals(0L, cache.statsEvictions.get());
         }
 
-        @Test void snapshotIncludesL1DisabledWhenDisabled() throws Exception {
+        @Test void snapshotIncludesDisabledWhenDisabled() throws Exception {
             NativeCache cache = makeDisabledCache();
             Map<String, Object> snap = cache.buildSnapshot();
-            assertEquals(Boolean.TRUE, snap.get("l1_disabled"));
+            assertEquals(Boolean.TRUE, snap.get("disabled"));
         }
 
-        @Test void snapshotOmitsL1DisabledWhenEnabled() {
+        @Test void snapshotOmitsDisabledWhenEnabled() {
             // Default (disabled=false): the field is absent, not present-and-false.
             // Keeps the common-path snapshot stable.
             NativeCache cache = makeCache();
             Map<String, Object> snap = cache.buildSnapshot();
-            assertFalse(snap.containsKey("l1_disabled"));
+            assertFalse(snap.containsKey("disabled"));
         }
 
-        @Test void wrapperConnectedEmissionCarriesL1Disabled() throws Exception {
+        @Test void wrapperConnectedEmissionCarriesDisabled() throws Exception {
             NativeCache cache = makeDisabledCache();
             List<String> emissions = Collections.synchronizedList(new ArrayList<>());
             cache.setSendOverride(emissions::add);
@@ -788,7 +788,7 @@ class NativeCacheTest {
             assertEquals(1, sLines.size(), emissions.toString());
             String body = sLines.get(0);
             assertTrue(body.contains("\"state\":\"wrapper_connected\""), body);
-            assertTrue(body.contains("\"l1_disabled\":true"), body);
+            assertTrue(body.contains("\"disabled\":true"), body);
         }
 
         // --- runtime mutability via setDisabled (flip after construction) ---
@@ -837,15 +837,15 @@ class NativeCacheTest {
 
         @Test void snapshotReflectsLiveDisabledFlag() throws Exception {
             // Snapshot reads `disabled` directly — flipping at runtime must
-            // change the next snapshot's `l1_disabled` field. Guards the
+            // change the next snapshot's `disabled` field. Guards the
             // volatile-not-final field shape (a copy-on-construct value
             // would give stale snapshots).
             NativeCache cache = makeCache();
-            assertFalse(cache.buildSnapshot().containsKey("l1_disabled"));
+            assertFalse(cache.buildSnapshot().containsKey("disabled"));
             cache.setDisabled(true);
-            assertEquals(Boolean.TRUE, cache.buildSnapshot().get("l1_disabled"));
+            assertEquals(Boolean.TRUE, cache.buildSnapshot().get("disabled"));
             cache.setDisabled(false);
-            assertFalse(cache.buildSnapshot().containsKey("l1_disabled"));
+            assertFalse(cache.buildSnapshot().containsKey("disabled"));
         }
 
         private NativeCache makeDisabledCache() throws Exception {
