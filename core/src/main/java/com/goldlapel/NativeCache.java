@@ -704,6 +704,64 @@ public class NativeCache {
     static boolean isTxStart(String sql) { return TX_START.matcher(sql).find(); }
     static boolean isTxEnd(String sql) { return TX_END.matcher(sql).find(); }
 
+    /**
+     * Multi-statement-aware write detection. A single Q wire-message body can
+     * carry multiple semicolon-separated statements (e.g.
+     * {@code "SET app.tenant='x'; INSERT INTO orders VALUES (1)"}); the
+     * single-token {@link #detectWrite} only sees the first token (here
+     * {@code SET}) and returns null, leaking the trailing INSERT's
+     * invalidation. This helper splits on top-level {@code ;} (reusing
+     * {@link GucState#splitStatements} so we get the same string-literal-aware
+     * splitter used for SET/RESET observation), runs {@link #detectWrite} on
+     * each segment, and unions the resulting invalidations. Any segment
+     * returning {@link #DDL_SENTINEL} short-circuits to a full invalidation.
+     *
+     * <p>The return value is null when no write was detected in any segment
+     * (the caller should follow the read path); otherwise a
+     * {@link WriteSummary} describing what to invalidate.
+     */
+    static WriteSummary detectWritesMulti(String sql) {
+        if (sql == null) return null;
+        // Fast path — single-statement SQL avoids the splitter allocation.
+        if (sql.indexOf(';') < 0) {
+            String t = detectWrite(sql);
+            if (t == null) return null;
+            if (DDL_SENTINEL.equals(t)) return WriteSummary.ddl();
+            return WriteSummary.table(t);
+        }
+        String[] segments = GucState.splitStatements(sql);
+        // Splitter strips trailing-semicolon-only inputs to a single segment;
+        // even so, fall back through the loop below so the contract stays
+        // uniform.
+        Set<String> tables = null;
+        for (String seg : segments) {
+            String t = detectWrite(seg);
+            if (t == null) continue;
+            if (DDL_SENTINEL.equals(t)) return WriteSummary.ddl();
+            if (tables == null) tables = new HashSet<>();
+            tables.add(t);
+        }
+        if (tables == null) return null;
+        return WriteSummary.tables(tables);
+    }
+
+    /**
+     * Result of {@link #detectWritesMulti} — either a DDL-class write
+     * (invalidate everything) or a set of specific table names. Never empty
+     * when non-null; callers treat null as "not a write."
+     */
+    static final class WriteSummary {
+        final boolean ddl;
+        final Set<String> tables;
+        private WriteSummary(boolean ddl, Set<String> tables) {
+            this.ddl = ddl;
+            this.tables = tables;
+        }
+        static WriteSummary ddl() { return new WriteSummary(true, null); }
+        static WriteSummary table(String t) { return new WriteSummary(false, Collections.singleton(t)); }
+        static WriteSummary tables(Set<String> ts) { return new WriteSummary(false, ts); }
+    }
+
     private void evictOne() {
         String lruKey = null;
         long minCounter = Long.MAX_VALUE;

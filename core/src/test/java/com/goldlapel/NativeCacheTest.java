@@ -56,6 +56,81 @@ class NativeCacheTest {
         @Test void copyWithColumns() { assertEquals("orders", NativeCache.detectWrite("COPY orders(id, name) FROM '/tmp/data.csv'")); }
     }
 
+    // --- detectWritesMulti — multi-statement Q-message bodies ---
+
+    @Nested class DetectWritesMultiTest {
+        @Test void singleSelectReturnsNull() {
+            assertNull(NativeCache.detectWritesMulti("SELECT * FROM orders"));
+        }
+
+        @Test void singleInsertWraps() {
+            NativeCache.WriteSummary w = NativeCache.detectWritesMulti("INSERT INTO orders VALUES (1)");
+            assertNotNull(w);
+            assertFalse(w.ddl);
+            assertEquals(Set.of("orders"), w.tables);
+        }
+
+        @Test void singleDdlWraps() {
+            NativeCache.WriteSummary w = NativeCache.detectWritesMulti("DROP TABLE foo");
+            assertNotNull(w);
+            assertTrue(w.ddl);
+        }
+
+        @Test void setThenInsertDetectsInsert() {
+            // The headline bug: SET first, INSERT second — single-token detectWrite
+            // sees only SET and returns null, leaking the INSERT's invalidation.
+            NativeCache.WriteSummary w = NativeCache.detectWritesMulti(
+                "SET app.user_id = '42'; INSERT INTO orders VALUES (1)");
+            assertNotNull(w, "multi-statement INSERT after SET should be detected");
+            assertFalse(w.ddl);
+            assertEquals(Set.of("orders"), w.tables);
+        }
+
+        @Test void multipleWritesUnion() {
+            NativeCache.WriteSummary w = NativeCache.detectWritesMulti(
+                "INSERT INTO orders VALUES (1); UPDATE users SET name = 'x'");
+            assertNotNull(w);
+            assertFalse(w.ddl);
+            assertEquals(Set.of("orders", "users"), w.tables);
+        }
+
+        @Test void ddlShortCircuits() {
+            // DDL anywhere in the body collapses to a full-cache invalidation.
+            NativeCache.WriteSummary w = NativeCache.detectWritesMulti(
+                "INSERT INTO orders VALUES (1); DROP TABLE users");
+            assertNotNull(w);
+            assertTrue(w.ddl);
+        }
+
+        @Test void beginInsertCommitDetectsWrite() {
+            NativeCache.WriteSummary w = NativeCache.detectWritesMulti(
+                "BEGIN; INSERT INTO orders VALUES (1); COMMIT");
+            assertNotNull(w);
+            assertFalse(w.ddl);
+            assertEquals(Set.of("orders"), w.tables);
+        }
+
+        @Test void allReadsReturnsNull() {
+            assertNull(NativeCache.detectWritesMulti("SET app.x='1'; SELECT * FROM orders; RESET ALL"));
+        }
+
+        @Test void semicolonInsideStringLiteral() {
+            // The splitter is string-literal-aware — ';' inside '...' must not
+            // split. Single statement, single write.
+            NativeCache.WriteSummary w = NativeCache.detectWritesMulti(
+                "INSERT INTO orders VALUES ('a;b')");
+            assertNotNull(w);
+            assertFalse(w.ddl);
+            assertEquals(Set.of("orders"), w.tables);
+        }
+
+        @Test void emptyAndNullSafe() {
+            assertNull(NativeCache.detectWritesMulti(""));
+            assertNull(NativeCache.detectWritesMulti(null));
+            assertNull(NativeCache.detectWritesMulti(";;;"));
+        }
+    }
+
     // --- extractTables ---
 
     @Nested class ExtractTablesTest {

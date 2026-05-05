@@ -85,15 +85,22 @@ public class ConnectionProxy {
             this.connHandler = connHandler;
         }
 
-        private void handleWriteInvalidation(String sql) {
-            String writeTable = NativeCache.detectWrite(sql);
-            if (writeTable != null) {
-                if (writeTable.equals(NativeCache.DDL_SENTINEL)) {
-                    cache.invalidateAll();
-                } else {
-                    cache.invalidateTable(writeTable);
-                }
+        /**
+         * Multi-statement-aware write invalidation. Calls
+         * {@link NativeCache#detectWritesMulti} so a write buried after a SET
+         * in a multi-statement Q body still drives the right invalidation.
+         * Returns whether a write was detected (callers use this to skip the
+         * cache-read path).
+         */
+        private boolean handleWriteInvalidation(String sql) {
+            NativeCache.WriteSummary w = NativeCache.detectWritesMulti(sql);
+            if (w == null) return false;
+            if (w.ddl) {
+                cache.invalidateAll();
+            } else {
+                for (String table : w.tables) cache.invalidateTable(table);
             }
+            return true;
         }
 
         @Override
@@ -114,19 +121,26 @@ public class ConnectionProxy {
         }
 
         private ResultSet handleExecuteQuery(String sql) throws SQLException {
-            // Transaction tracking
+            // Transaction tracking. Updates the flag but doesn't return — a
+            // multi-statement body like "BEGIN; INSERT INTO orders ..." needs
+            // the write-detection pass below to also fire so the stale
+            // `orders` cache is invalidated. Single-statement BEGIN / COMMIT
+            // queries fall through harmlessly: detectWritesMulti returns null
+            // for them.
             if (NativeCache.isTxStart(sql)) {
                 connHandler.inTransaction = true;
-                return real.executeQuery(sql);
-            }
-            if (NativeCache.isTxEnd(sql)) {
+            } else if (NativeCache.isTxEnd(sql)) {
                 connHandler.inTransaction = false;
+            }
+
+            // Write detection — multi-statement-aware so writes buried after
+            // a SET in a Q body still invalidate the right tables.
+            if (handleWriteInvalidation(sql)) {
                 return real.executeQuery(sql);
             }
 
-            // Write detection
-            if (NativeCache.detectWrite(sql) != null) {
-                handleWriteInvalidation(sql);
+            // Pure-TX commands skip the cache path entirely (no rows to cache).
+            if (NativeCache.isTxStart(sql) || NativeCache.isTxEnd(sql)) {
                 return real.executeQuery(sql);
             }
 
@@ -211,15 +225,16 @@ public class ConnectionProxy {
             this.connHandler = connHandler;
         }
 
-        private void handleWriteInvalidation(String sql) {
-            String writeTable = NativeCache.detectWrite(sql);
-            if (writeTable != null) {
-                if (writeTable.equals(NativeCache.DDL_SENTINEL)) {
-                    cache.invalidateAll();
-                } else {
-                    cache.invalidateTable(writeTable);
-                }
+        /** See {@link StatementHandler#handleWriteInvalidation(String)}. */
+        private boolean handleWriteInvalidation(String sql) {
+            NativeCache.WriteSummary w = NativeCache.detectWritesMulti(sql);
+            if (w == null) return false;
+            if (w.ddl) {
+                cache.invalidateAll();
+            } else {
+                for (String table : w.tables) cache.invalidateTable(table);
             }
+            return true;
         }
 
         @Override
@@ -270,8 +285,7 @@ public class ConnectionProxy {
         private ResultSet handlePreparedQuery() throws SQLException {
             Object[] p = paramsArray();
 
-            if (NativeCache.detectWrite(sql) != null) {
-                handleWriteInvalidation(sql);
+            if (handleWriteInvalidation(sql)) {
                 return real.executeQuery();
             }
 
