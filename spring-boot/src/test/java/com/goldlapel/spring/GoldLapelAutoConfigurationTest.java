@@ -571,6 +571,40 @@ class GoldLapelAutoConfigurationTest {
             assertThat(result).isInstanceOf(CachedDataSource.class);
             CachedDataSource cached = (CachedDataSource) result;
             assertThat(cached.getCache()).isNotNull();
+
+            // Both sides of the invalidation port must agree — the wrapper
+            // connects to `invalidationPort` and the spawned proxy must
+            // listen on the same port. Pre-fix, only the wrapper-side
+            // connectInvalidation() saw the configured port; the proxy
+            // launched on its default proxy_port + 2 (mismatch).
+            // (java-spring-invalidation-port-forwarding-gap.md, 2026-05-04)
+            assertThat(captured).hasSize(1);
+            assertThat(captured.get(0).getInvalidationPort()).isEqualTo(9999);
+        }
+    }
+
+    @Test
+    void defaultInvalidationPortNotForwarded() {
+        // The "unset" sentinel for invalidationPort is 0 (matching how the
+        // property defaults in GoldLapelProperties). When the user hasn't
+        // touched it, we must NOT forward to GoldLapelOptions — the core
+        // module derives invalidationPort = proxyPort + 2 itself, and
+        // forcing 0 would override that with an invalid port.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            HikariDataSource ds = new HikariDataSource();
+            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            // invalidationPort untouched — stays at default 0.
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+
+            processor.postProcessAfterInitialization(ds, "dataSource");
+
+            assertThat(captured).hasSize(1);
+            assertThat(captured.get(0).getInvalidationPort()).isNull();
         }
     }
 

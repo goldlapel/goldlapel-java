@@ -117,6 +117,17 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                 if (properties.getDashboardPort() != null) {
                     opts.setDashboardPort(properties.getDashboardPort());
                 }
+                // Forward an explicitly-configured invalidation port to the
+                // spawned proxy so the wrapper-side connectInvalidation() port
+                // (read further down) and the proxy-side listener agree. Pre-
+                // fix, GoldLapelProperties.invalidationPort fed only the
+                // wrapper-side connect, leaving the proxy on its default
+                // proxy_port + 2 — mismatch → invalidation socket failure.
+                // 0 is the "unset" sentinel here (default), so only forward
+                // when the user actually set a value.
+                if (properties.getInvalidationPort() != 0) {
+                    opts.setInvalidationPort(properties.getInvalidationPort());
+                }
                 if (properties.getLogLevel() != null) {
                     opts.setLogLevel(properties.getLogLevel());
                 }
