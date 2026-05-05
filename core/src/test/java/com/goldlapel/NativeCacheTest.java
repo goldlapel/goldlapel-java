@@ -131,6 +131,45 @@ class NativeCacheTest {
         }
     }
 
+    // --- isSessionStateCommand — cache.put skip-list ---
+
+    @Nested class IsSessionStateCommandTest {
+        @Test void setCommand() { assertTrue(NativeCache.isSessionStateCommand("SET foo = 'bar'")); }
+        @Test void setLocal() { assertTrue(NativeCache.isSessionStateCommand("SET LOCAL foo = 'bar'")); }
+        @Test void setSession() { assertTrue(NativeCache.isSessionStateCommand("SET SESSION foo = 'bar'")); }
+        @Test void resetCommand() { assertTrue(NativeCache.isSessionStateCommand("RESET foo")); }
+        @Test void resetAll() { assertTrue(NativeCache.isSessionStateCommand("RESET ALL")); }
+        @Test void listenCommand() { assertTrue(NativeCache.isSessionStateCommand("LISTEN channel_x")); }
+        @Test void unlistenCommand() { assertTrue(NativeCache.isSessionStateCommand("UNLISTEN channel_x")); }
+        @Test void notifyCommand() { assertTrue(NativeCache.isSessionStateCommand("NOTIFY channel_x")); }
+        @Test void beginCommand() { assertTrue(NativeCache.isSessionStateCommand("BEGIN")); }
+        @Test void commitCommand() { assertTrue(NativeCache.isSessionStateCommand("COMMIT")); }
+        @Test void rollbackCommand() { assertTrue(NativeCache.isSessionStateCommand("ROLLBACK")); }
+        @Test void savepointCommand() { assertTrue(NativeCache.isSessionStateCommand("SAVEPOINT sp1")); }
+
+        @Test void selectIsNotSessionState() {
+            assertFalse(NativeCache.isSessionStateCommand("SELECT * FROM orders"));
+        }
+        @Test void insertIsNotSessionState() {
+            assertFalse(NativeCache.isSessionStateCommand("INSERT INTO orders VALUES (1)"));
+        }
+
+        @Test void caseInsensitive() {
+            assertTrue(NativeCache.isSessionStateCommand("set foo = 'bar'"));
+            assertTrue(NativeCache.isSessionStateCommand("Begin"));
+        }
+
+        @Test void leadingWhitespace() {
+            assertTrue(NativeCache.isSessionStateCommand("   SET foo = 'bar'"));
+        }
+
+        @Test void emptyAndNullSafe() {
+            assertFalse(NativeCache.isSessionStateCommand(""));
+            assertFalse(NativeCache.isSessionStateCommand("   "));
+            assertFalse(NativeCache.isSessionStateCommand(null));
+        }
+    }
+
     // --- extractTables ---
 
     @Nested class ExtractTablesTest {

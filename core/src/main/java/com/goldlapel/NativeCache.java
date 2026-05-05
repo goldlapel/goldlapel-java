@@ -762,6 +762,40 @@ public class NativeCache {
         static WriteSummary tables(Set<String> ts) { return new WriteSummary(false, ts); }
     }
 
+    /**
+     * Session-state commands that should never be cached: their responses are
+     * empty (or status-only) and caching them bloats the table-index machinery
+     * with entries that never serve real data. Covers SET / RESET (and the
+     * LOCAL / SESSION variants which still start with these tokens),
+     * notification verbs, and transaction-control keywords. First-token check
+     * is sufficient — these aren't reads with embedded session-state syntax,
+     * they ARE the session-state command.
+     */
+    static boolean isSessionStateCommand(String sql) {
+        if (sql == null) return false;
+        String trimmed = sql.trim();
+        if (trimmed.isEmpty()) return false;
+        // Pull off the first whitespace-delimited token; cheaper than a full
+        // split when SQL bodies can be multi-kilobyte.
+        int end = 0;
+        while (end < trimmed.length() && !Character.isWhitespace(trimmed.charAt(end))) end++;
+        String first = trimmed.substring(0, end).toUpperCase(java.util.Locale.ROOT);
+        switch (first) {
+            case "SET":
+            case "RESET":
+            case "LISTEN":
+            case "UNLISTEN":
+            case "NOTIFY":
+            case "BEGIN":
+            case "COMMIT":
+            case "ROLLBACK":
+            case "SAVEPOINT":
+                return true;
+            default:
+                return false;
+        }
+    }
+
     private void evictOne() {
         String lruKey = null;
         long minCounter = Long.MAX_VALUE;

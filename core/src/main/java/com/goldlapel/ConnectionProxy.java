@@ -203,7 +203,16 @@ public class ConnectionProxy {
                 }
                 rs.close();
 
-                cache.put(sql, params, rows, columns, stateHash);
+                // Skip caching session-state commands (SET / RESET / LISTEN /
+                // BEGIN / COMMIT / etc.). Their responses are empty or
+                // status-only; storing them bloats the cache with entries that
+                // never serve real data and adds eviction pressure if a
+                // session does many SETs. The PG JDBC driver permits these
+                // through executeQuery(), so the guard has to live here — the
+                // executeUpdate / execute paths already skip the cache layer.
+                if (!NativeCache.isSessionStateCommand(sql)) {
+                    cache.put(sql, params, rows, columns, stateHash);
+                }
                 return CachedResultSet.create(rows, columns);
             } catch (Exception e) {
                 return rs;
@@ -324,7 +333,11 @@ public class ConnectionProxy {
                     rows.add(row);
                 }
                 rs.close();
-                cache.put(sql, p, rows, columns, stateHash);
+                // See StatementHandler.cacheAndReturn — same skip-list applies
+                // to PreparedStatement.executeQuery() routes too.
+                if (!NativeCache.isSessionStateCommand(sql)) {
+                    cache.put(sql, p, rows, columns, stateHash);
+                }
                 return CachedResultSet.create(rows, columns);
             } catch (Exception e) {
                 return rs;
