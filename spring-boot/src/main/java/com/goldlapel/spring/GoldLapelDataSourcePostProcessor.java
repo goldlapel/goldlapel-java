@@ -111,6 +111,22 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                     opts.setMeshTag(properties.getMeshTag());
                 }
                 opts.setEnableProxyCacheForWrappers(properties.isEnableProxyCacheForWrappers());
+                if (properties.getDashboardPort() != null) {
+                    opts.setDashboardPort(properties.getDashboardPort());
+                }
+                if (properties.getLogLevel() != null) {
+                    opts.setLogLevel(properties.getLogLevel());
+                }
+                if (properties.getMode() != null) {
+                    opts.setMode(properties.getMode());
+                }
+                if (properties.getLicense() != null) {
+                    opts.setLicense(properties.getLicense());
+                }
+                if (properties.getConfigFile() != null) {
+                    opts.setConfigFile(properties.getConfigFile());
+                }
+                opts.setDisableNativeCache(properties.isDisableNativeCache());
                 opts.setClient("spring-boot");
             });
         } catch (RuntimeException e) {
@@ -137,7 +153,7 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
 
         log.info("Gold Lapel proxy started — {} now routes through localhost:{}", beanName, port);
 
-        if (!properties.isNativeCache()) {
+        if (properties.isDisableNativeCache()) {
             return ds;
         }
 

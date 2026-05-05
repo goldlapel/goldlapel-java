@@ -481,7 +481,7 @@ class GoldLapelAutoConfigurationTest {
             ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setNativeCache(false);
+            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             Object result = processor.postProcessAfterInitialization(ds, "dataSource");
@@ -500,12 +500,32 @@ class GoldLapelAutoConfigurationTest {
             dataSourceRunner.withPropertyValues(
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
                             "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.native-cache=false")
+                            "goldlapel.disable-native-cache=true")
                     .run(context -> {
                         DataSource ds = context.getBean(DataSource.class);
                         assertThat(ds).isInstanceOf(HikariDataSource.class);
                         assertThat(ds).isNotInstanceOf(CachedDataSource.class);
                         assertThat(((HikariDataSource) ds).getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/testdb");
+                    });
+        }
+    }
+
+    @Test
+    void disableNativeCacheFlowsThroughToOptions() {
+        // When goldlapel.disable-native-cache=true the property must also be
+        // forwarded into GoldLapelOptions so the wrapper passes the flag to
+        // the binary (the binary uses it to suppress the invalidation feed).
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.disable-native-cache=true")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).isDisableNativeCache()).isTrue();
                     });
         }
     }
@@ -584,7 +604,7 @@ class GoldLapelAutoConfigurationTest {
     @Test
     void propertiesDefaults() {
         GoldLapelProperties props = new GoldLapelProperties();
-        assertThat(props.isNativeCache()).isTrue();
+        assertThat(props.isDisableNativeCache()).isFalse();
         assertThat(props.getInvalidationPort()).isEqualTo(0);
         assertThat(props.isEnabled()).isTrue();
         assertThat(props.getProxyPort()).isEqualTo(7932);
@@ -595,6 +615,14 @@ class GoldLapelAutoConfigurationTest {
         assertThat(props.isMesh()).isFalse();
         assertThat(props.getMeshTag()).isNull();
         assertThat(props.isEnableProxyCacheForWrappers()).isFalse();
+        // Round 2 additions: dashboardPort, logLevel, mode, license,
+        // configFile all default to null (= no override → core default
+        // behavior). disableNativeCache defaults to false (cache active).
+        assertThat(props.getDashboardPort()).isNull();
+        assertThat(props.getLogLevel()).isNull();
+        assertThat(props.getMode()).isNull();
+        assertThat(props.getLicense()).isNull();
+        assertThat(props.getConfigFile()).isNull();
     }
 
     // --- Top-level GoldLapelOptions surfaced via @ConfigurationProperties ---
@@ -729,6 +757,170 @@ class GoldLapelAutoConfigurationTest {
         }
     }
 
+    // --- Round 2: dashboardPort / logLevel / mode / license / configFile ---
+    //
+    // Each property is null-by-default on GoldLapelProperties so an unset
+    // application.yml leaves the matching GoldLapelOptions field at its
+    // core-module default. When set, the property must flow through the
+    // post-processor's null-checked mapping into GoldLapelOptions.
+
+    @Test
+    void dashboardPortDefaultIsNullInOptions() {
+        // No goldlapel.dashboard-port set → options.getDashboardPort() stays
+        // null (the wrapper then auto-derives proxyPort + 1).
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).getDashboardPort()).isNull();
+                        assertThat(captured.get(0).getLogLevel()).isNull();
+                        assertThat(captured.get(0).getMode()).isNull();
+                        assertThat(captured.get(0).getLicense()).isNull();
+                        assertThat(captured.get(0).getConfigFile()).isNull();
+                        assertThat(captured.get(0).isDisableNativeCache()).isFalse();
+                    });
+        }
+    }
+
+    @Test
+    void dashboardPortViaKebabCaseProperty() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.dashboard-port=8080")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).getDashboardPort()).isEqualTo(8080);
+                    });
+        }
+    }
+
+    @Test
+    void logLevelViaKebabCaseProperty() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.log-level=debug")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).getLogLevel()).isEqualTo("debug");
+                    });
+        }
+    }
+
+    @Test
+    void modeViaProperty() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.mode=consideration")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).getMode()).isEqualTo("consideration");
+                    });
+        }
+    }
+
+    @Test
+    void licenseViaProperty() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.license=/etc/goldlapel/license.json")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).getLicense())
+                                .isEqualTo("/etc/goldlapel/license.json");
+                    });
+        }
+    }
+
+    @Test
+    void configFileViaKebabCaseProperty() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.config-file=/etc/goldlapel/goldlapel.toml")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).getConfigFile())
+                                .isEqualTo("/etc/goldlapel/goldlapel.toml");
+                    });
+        }
+    }
+
+    @Test
+    void allTopLevelOptionsTogetherEndToEnd() {
+        // Integration test: every top-level property surfaced from
+        // GoldLapelOptions through GoldLapelProperties bound from
+        // application-style properties + verified end-to-end. Combines the
+        // round-1 surface (silent/mesh/meshTag/enableProxyCacheForWrappers)
+        // with the round-2 additions (dashboardPort/logLevel/mode/license/
+        // configFile/disableNativeCache).
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.silent=true",
+                            "goldlapel.mesh=true",
+                            "goldlapel.mesh-tag=us-west-prod-1",
+                            "goldlapel.enable-proxy-cache-for-wrappers=true",
+                            "goldlapel.dashboard-port=8080",
+                            "goldlapel.log-level=debug",
+                            "goldlapel.mode=consideration",
+                            "goldlapel.license=/etc/goldlapel/license.json",
+                            "goldlapel.config-file=/etc/goldlapel/goldlapel.toml",
+                            "goldlapel.disable-native-cache=true")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        GoldLapelOptions opts = captured.get(0);
+                        // Round 1
+                        assertThat(opts.isSilent()).isTrue();
+                        assertThat(opts.isMesh()).isTrue();
+                        assertThat(opts.getMeshTag()).isEqualTo("us-west-prod-1");
+                        assertThat(opts.isEnableProxyCacheForWrappers()).isTrue();
+                        // Round 2
+                        assertThat(opts.getDashboardPort()).isEqualTo(8080);
+                        assertThat(opts.getLogLevel()).isEqualTo("debug");
+                        assertThat(opts.getMode()).isEqualTo("consideration");
+                        assertThat(opts.getLicense()).isEqualTo("/etc/goldlapel/license.json");
+                        assertThat(opts.getConfigFile()).isEqualTo("/etc/goldlapel/goldlapel.toml");
+                        assertThat(opts.isDisableNativeCache()).isTrue();
+                        // Existing options still wired correctly alongside
+                        // the new ones (no regression).
+                        assertThat(opts.getClient()).isEqualTo("spring-boot");
+                    });
+        }
+    }
+
     // --- DataSource type agnostic tests ---
 
     @Test
@@ -761,7 +953,7 @@ class GoldLapelAutoConfigurationTest {
             DataSourceWithGetUrl ds = new DataSourceWithGetUrl("jdbc:postgresql://host:5432/db");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setNativeCache(false);
+            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             Object result = processor.postProcessAfterInitialization(ds, "dataSource");
@@ -788,7 +980,7 @@ class GoldLapelAutoConfigurationTest {
             ds.setJdbcUrl("jdbc:postgresql://alice:s3cret@upstream-host:5432/db");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setNativeCache(false);
+            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds, "dataSource");
@@ -820,7 +1012,7 @@ class GoldLapelAutoConfigurationTest {
             ds.setPassword("s3cret");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setNativeCache(false);
+            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds, "dataSource");
@@ -847,7 +1039,7 @@ class GoldLapelAutoConfigurationTest {
             ds.setPassword("p@ss:w/rd");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setNativeCache(false);
+            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds, "dataSource");
@@ -874,7 +1066,7 @@ class GoldLapelAutoConfigurationTest {
             ds.setPassword("otherpw");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setNativeCache(false);
+            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds, "dataSource");
@@ -1026,7 +1218,7 @@ class GoldLapelAutoConfigurationTest {
             ds2.setJdbcUrl("jdbc:postgresql://host2:5432/db2");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setNativeCache(false);
+            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds1, "ds1");
@@ -1088,7 +1280,7 @@ class GoldLapelAutoConfigurationTest {
             ds2.setJdbcUrl("jdbc:postgresql://host2:5432/db2");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setNativeCache(false);
+            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds1, "ds1");
