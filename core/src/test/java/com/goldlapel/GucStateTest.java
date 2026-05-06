@@ -430,6 +430,98 @@ class GucStateTest {
         }
     }
 
+    // ---- isFunctionCall (java-rls-hardening, 2026-05-05) ----
+
+    @Nested class IsFunctionCallTest {
+        @Test void selectIdentParenIsFunctionCall() {
+            assertTrue(GucState.isFunctionCall("SELECT my_func()"));
+            assertTrue(GucState.isFunctionCall("SELECT my_func(1, 2, 3)"));
+            assertTrue(GucState.isFunctionCall("SELECT schema.my_func(1)"));
+        }
+
+        @Test void callIsFunctionCall() {
+            assertTrue(GucState.isFunctionCall("CALL my_proc()"));
+            assertTrue(GucState.isFunctionCall("CALL my_proc(1, 2)"));
+            assertTrue(GucState.isFunctionCall("call my_proc()"));
+        }
+
+        @Test void plainSelectIsNotFunctionCall() {
+            assertFalse(GucState.isFunctionCall("SELECT 1"));
+            assertFalse(GucState.isFunctionCall("SELECT * FROM t"));
+            assertFalse(GucState.isFunctionCall("SELECT a, b FROM t WHERE c = 1"));
+        }
+
+        @Test void setConfigStillTriggersVerify() {
+            // We DO classify set_config as a function call so the post-call
+            // verify catches the non-literal-arg form (e.g.
+            // SELECT set_config(name_var, '42', false)) that the inline
+            // parser can't unpack. Cost on the common literal-arg path is
+            // one extra pg_settings round-trip — acceptable given set_config
+            // call frequency.
+            assertTrue(GucState.isFunctionCall("SELECT set_config('a.b', 'c', false)"));
+            assertTrue(GucState.isFunctionCall(
+                "SELECT pg_catalog.set_config('a.b', 'c', false)"));
+        }
+
+        @Test void readOnlyCatalogFunctionsExcluded() {
+            // current_setting / version / now / current_user / session_user are
+            // hot in real apps; verifying after each would be wasteful and
+            // they don't mutate state.
+            assertFalse(GucState.isFunctionCall("SELECT current_setting('app.x')"));
+            assertFalse(GucState.isFunctionCall("SELECT version()"));
+            assertFalse(GucState.isFunctionCall("SELECT now()"));
+            assertFalse(GucState.isFunctionCall("SELECT current_user"));
+        }
+
+        @Test void otherStatementsAreNotFunctionCalls() {
+            assertFalse(GucState.isFunctionCall("INSERT INTO t VALUES (1)"));
+            assertFalse(GucState.isFunctionCall("BEGIN"));
+            assertFalse(GucState.isFunctionCall("COMMIT"));
+            assertFalse(GucState.isFunctionCall("SET app.user_id = '42'"));
+            assertFalse(GucState.isFunctionCall(""));
+            assertFalse(GucState.isFunctionCall(null));
+        }
+
+        @Test void caseInsensitiveSelect() {
+            assertTrue(GucState.isFunctionCall("select my_fn()"));
+            assertTrue(GucState.isFunctionCall("SeLeCt my_fn()"));
+        }
+
+        @Test void toleratesTrailingSemicolon() {
+            assertTrue(GucState.isFunctionCall("SELECT my_fn();"));
+            assertTrue(GucState.isFunctionCall("CALL my_proc();"));
+        }
+    }
+
+    // ---- dirty flag + verify (java-rls-hardening, 2026-05-05) ----
+
+    @Nested class DirtyFlagTest {
+        @Test void freshStateNotDirty() {
+            assertFalse(new GucState().isDirty());
+        }
+
+        @Test void markDirtySticks() {
+            GucState s = new GucState();
+            s.markDirty();
+            assertTrue(s.isDirty());
+        }
+
+        @Test void clearDirtyResets() {
+            GucState s = new GucState();
+            s.markDirty();
+            s.clearDirty();
+            assertFalse(s.isDirty());
+        }
+
+        @Test void verifyOnNullConnectionIsNoop() {
+            // Defensive — verify must never throw.
+            GucState s = new GucState();
+            s.markDirty();
+            s.verify(null);
+            // dirty stays set (no reconciliation happened).
+            assertTrue(s.isDirty());
+        }
+    }
 
     // ---- ConnectionGucState core invariants ----
 

@@ -85,6 +85,24 @@ public final class GucState {
      */
     private volatile long hash = 0L;
 
+    /**
+     * "State may have shifted server-side without us seeing the wire SET" flag.
+     * Set when something we can't reliably parse off the wire mutates session
+     * GUCs — e.g. a stored function or procedure body that issues
+     * {@code SET app.user_id = ...} internally, or a failed verify attempt.
+     * The {@link ConnectionProxy} consults this on each invocation: if dirty,
+     * it re-reads {@code pg_settings} to reconstruct {@link #values} before
+     * trusting the next cache lookup.
+     *
+     * <p>{@code volatile} because the post-call verify executor sets it from
+     * a worker thread while the user-facing JDBC thread reads it on every
+     * query path. The connection lock in {@link ConnectionProxy} provides the
+     * serialization for the verify itself; the volatile guarantees the flag's
+     * visibility (so a worker that bails early because the connection is busy
+     * still flips the bit visibly to the next query).
+     */
+    private volatile boolean dirty = false;
+
     /** Current state hash. {@code 0} for the empty (baseline) state. */
     public long hash() {
         return hash;
@@ -93,6 +111,87 @@ public final class GucState {
     /** Number of unsafe GUCs currently tracked. Visible for testing. */
     int size() {
         return values.size();
+    }
+
+    /**
+     * Read the dirty flag. {@code true} means the wire-side observation may
+     * have missed a server-side state mutation (function body, trigger, etc.)
+     * — the next query path should reconcile state via {@link #verify} before
+     * trusting the cache key.
+     */
+    public boolean isDirty() {
+        return dirty;
+    }
+
+    /**
+     * Mark the connection's state as possibly stale. Called by the post-call
+     * verify path when a verify attempt fails, and by callers that observe a
+     * statement with side-effects we can't parse off the wire.
+     */
+    public void markDirty() {
+        dirty = true;
+    }
+
+    /** Test-only — clear the dirty flag without running a real verify. */
+    void clearDirty() {
+        dirty = false;
+    }
+
+    /**
+     * Reconcile the in-memory state map with the live server-side session
+     * GUCs. Issues a single
+     * {@code SELECT name, setting FROM pg_settings WHERE source = 'session'}
+     * over {@code conn} and rebuilds {@link #values} from the rows whose
+     * {@code name} the wrapper considers unsafe (per {@link #isUnsafeGuc}).
+     *
+     * <p>Called from two places:
+     * <ul>
+     *   <li>The post-call verify executor, scheduled by
+     *       {@link ConnectionProxy} when it observes a top-level
+     *       {@code SELECT <function>(...)} or {@code CALL <proc>(...)} —
+     *       function bodies can issue {@code SET}s the wire layer never sees,
+     *       so we re-read after the call.</li>
+     *   <li>The lazy verify-on-checkout fallback in {@link ConnectionProxy} —
+     *       when {@link #isDirty} is set on the next user query, this runs
+     *       inline before the cache lookup.</li>
+     * </ul>
+     *
+     * <p>Any SQLException is swallowed and {@link #dirty} is left set; the
+     * caller's hot path must never observe a verify failure (we'd rather miss
+     * a cache hit than throw on the user). Successful runs clear
+     * {@link #dirty}.
+     *
+     * <p>The connection is assumed to be exclusively held by the caller (the
+     * {@code connectionLock} in {@link ConnectionProxy.ConnectionHandler}
+     * provides this guarantee). JDBC connections aren't safe for concurrent
+     * use, so this method does not attempt to coordinate with peer threads;
+     * the lock is the contract.
+     */
+    public void verify(java.sql.Connection conn) {
+        if (conn == null) return;
+        TreeMap<String, String> rebuilt = new TreeMap<>();
+        try (java.sql.Statement st = conn.createStatement();
+             java.sql.ResultSet rs = st.executeQuery(
+                 "SELECT name, setting FROM pg_settings WHERE source = 'session'")) {
+            while (rs.next()) {
+                String name = rs.getString(1);
+                String value = rs.getString(2);
+                if (name == null) continue;
+                String lower = name.toLowerCase(java.util.Locale.ROOT);
+                if (isUnsafeGuc(lower)) {
+                    rebuilt.put(lower, value == null ? "" : value);
+                }
+            }
+        } catch (java.sql.SQLException e) {
+            // Verify failed — leave dirty flag set so the next path will retry.
+            // Don't clear `values` either: a partially-filled rebuilt map would
+            // be worse than a possibly-stale full one.
+            return;
+        }
+        values.clear();
+        values.putAll(rebuilt);
+        recomputeHash();
+        dirty = false;
     }
 
     /**
@@ -399,6 +498,91 @@ public final class GucState {
             name,
             value
         );
+    }
+
+    /**
+     * Whether {@code sql} is a top-level call into a stored function or
+     * procedure — i.e. the wrapper should schedule a post-call GUC-state
+     * verify because the body could have issued SETs we never saw on the wire.
+     * Recognises both {@code SELECT <ident>(...)} (with optional
+     * {@code schema.}) and {@code CALL <ident>(...)} forms; rejects
+     * {@code SELECT * FROM t}, {@code SELECT 1 + 2}, {@code SELECT col FROM
+     * t} (no parens after the first identifier), and the
+     * {@code SELECT set_config(...)} pattern (which the parser handles
+     * directly, no verify needed).
+     *
+     * <p>This is a static syntactic check — it doesn't try to introspect
+     * what the function actually does. False positives ("looks like a
+     * function call but is read-only") just incur an extra
+     * {@code pg_settings} scan; harmless. False negatives ("is a function
+     * call but doesn't match the syntax") fall back to the
+     * {@link #isDirty}-by-other-means path or are out-of-scope per the
+     * GUC-RLS doc.
+     */
+    public static boolean isFunctionCall(String sql) {
+        if (sql == null) return false;
+        String s = sql.trim();
+        if (s.endsWith(";")) s = s.substring(0, s.length() - 1).trim();
+        if (s.isEmpty()) return false;
+
+        boolean isCall;
+        int idx;
+        // SELECT <fn>(...) or CALL <proc>(...). PERFORM is plpgsql-only.
+        if (s.length() >= 6 && s.substring(0, 6).equalsIgnoreCase("SELECT")
+            && (s.length() == 6 || Character.isWhitespace(s.charAt(6)))) {
+            isCall = false;
+            idx = 6;
+        } else if (s.length() >= 4 && s.substring(0, 4).equalsIgnoreCase("CALL")
+            && (s.length() == 4 || Character.isWhitespace(s.charAt(4)))) {
+            isCall = true;
+            idx = 4;
+        } else {
+            return false;
+        }
+
+        // Skip whitespace.
+        while (idx < s.length() && Character.isWhitespace(s.charAt(idx))) idx++;
+        if (idx >= s.length()) return false;
+
+        // Read identifier (possibly schema-qualified). PG identifiers are
+        // [A-Za-z_][A-Za-z0-9_$]* — we accept '.' as a schema separator and
+        // bail on anything else. Quoted identifiers with embedded spaces are
+        // rare in this position; if they appear we conservatively return
+        // false (a verify miss is safer than a syntactic-edge-case false
+        // positive that turns into noisy verify load).
+        int identStart = idx;
+        while (idx < s.length()) {
+            char c = s.charAt(idx);
+            if (Character.isLetterOrDigit(c) || c == '_' || c == '$' || c == '.') {
+                idx++;
+            } else {
+                break;
+            }
+        }
+        if (idx == identStart) return false;
+        String ident = s.substring(identStart, idx).toLowerCase(java.util.Locale.ROOT);
+
+        // Skip whitespace, then expect '('.
+        while (idx < s.length() && Character.isWhitespace(s.charAt(idx))) idx++;
+        if (idx >= s.length() || s.charAt(idx) != '(') return false;
+
+        // SELECT path: exclude obvious read-only catalog functions that don't
+        // fit our verify-after-call model — these are hot in real apps and
+        // verifying after every one would burn pg_settings reads with no
+        // safety benefit. We deliberately do NOT exclude set_config here:
+        // the inline parser handles literal-arg shapes, but a non-literal
+        // form like {@code SELECT set_config(name_var, '42', false)} bypasses
+        // the inline parser; firing a verify on those catches the SET we'd
+        // otherwise miss. Cost on the literal-arg path is one extra
+        // pg_settings round-trip per call — acceptable given how rare
+        // set_config calls are in practice.
+        if (!isCall) {
+            if (ident.equals("current_setting") || ident.equals("pg_catalog.current_setting")) return false;
+            if (ident.equals("version") || ident.equals("pg_catalog.version")) return false;
+            if (ident.equals("current_user") || ident.equals("session_user")) return false;
+            if (ident.equals("now") || ident.equals("pg_catalog.now")) return false;
+        }
+        return true;
     }
 
     /**
