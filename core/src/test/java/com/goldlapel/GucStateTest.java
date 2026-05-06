@@ -43,12 +43,29 @@ class GucStateTest {
         }
 
         @Test void safeGucsAreSafe() {
-            assertFalse(GucState.isUnsafeGuc("timezone"));
             assertFalse(GucState.isUnsafeGuc("application_name"));
             assertFalse(GucState.isUnsafeGuc("statement_timeout"));
             assertFalse(GucState.isUnsafeGuc("work_mem"));
             assertFalse(GucState.isUnsafeGuc("client_encoding"));
-            assertFalse(GucState.isUnsafeGuc("DateStyle"));
+            assertFalse(GucState.isUnsafeGuc("seq_page_cost"));
+        }
+
+        @Test void localeAndFormattingGucsAreUnsafe() {
+            // Locale / formatting GUCs change the textual representation of
+            // cached rows — same data, different bytes on the wire — so two
+            // connections that disagree on these must not share a cache slot.
+            // (java-rls-hardening, 2026-05-05)
+            assertTrue(GucState.isUnsafeGuc("DateStyle"));
+            assertTrue(GucState.isUnsafeGuc("datestyle"));
+            assertTrue(GucState.isUnsafeGuc("IntervalStyle"));
+            assertTrue(GucState.isUnsafeGuc("TimeZone"));
+            assertTrue(GucState.isUnsafeGuc("timezone"));
+            assertTrue(GucState.isUnsafeGuc("bytea_output"));
+            assertTrue(GucState.isUnsafeGuc("lc_messages"));
+            assertTrue(GucState.isUnsafeGuc("lc_monetary"));
+            assertTrue(GucState.isUnsafeGuc("lc_numeric"));
+            assertTrue(GucState.isUnsafeGuc("lc_time"));
+            assertTrue(GucState.isUnsafeGuc("LC_TIME"));
         }
 
         @Test void nullIsSafe() {
@@ -200,11 +217,219 @@ class GucStateTest {
 
         @Test void rejectsSetTimeZoneTwoWordForm() {
             // SET TIME ZONE 'UTC' is the legacy two-word form; we don't model
-            // it because timezone is harmless. Returning null is correct: the
-            // wrapper treats it as "not-a-trackable-SET", i.e. cache-safe.
+            // it (the parser tokens are SET / TIME / ZONE / 'UTC', and `TIME`
+            // isn't a recognised GUC name). Returning null is acceptable
+            // because timezone changes are also caught by SET TimeZone =
+            // 'UTC' (the canonical form), which DOES move the hash now that
+            // TimeZone is in the unsafe-GUC list. A caller using the legacy
+            // syntax temporarily slips past wire-side observation; the
+            // post-call verify path or the next checkout's pg_settings read
+            // will reconcile it.
             assertNull(GucState.parseSetCommand("SET TIME ZONE 'UTC'"));
         }
     }
+
+    // ---- DISCARD parsing (java-rls-hardening, 2026-05-05) ----
+
+    @Nested class DiscardTest {
+        @Test void discardAllParsesToDiscardAllKind() {
+            GucState.SetCommand c = GucState.parseSetCommand("DISCARD ALL");
+            assertNotNull(c);
+            assertEquals(GucState.SetCommand.Kind.DISCARD_ALL, c.kind);
+            assertNull(c.name);
+            assertNull(c.value);
+        }
+
+        @Test void discardAllCaseInsensitive() {
+            GucState.SetCommand c = GucState.parseSetCommand("discard all");
+            assertEquals(GucState.SetCommand.Kind.DISCARD_ALL, c.kind);
+            GucState.SetCommand d = GucState.parseSetCommand("DiScArD aLl");
+            assertEquals(GucState.SetCommand.Kind.DISCARD_ALL, d.kind);
+        }
+
+        @Test void discardAllToleratesTrailingSemicolon() {
+            GucState.SetCommand c = GucState.parseSetCommand("DISCARD ALL;");
+            assertEquals(GucState.SetCommand.Kind.DISCARD_ALL, c.kind);
+        }
+
+        @Test void discardPlansIsNoop() {
+            // Wrapper has no prepared-statement cache of its own — JDBC
+            // PreparedStatement objects belong to the driver. Returning null
+            // is the correct "not-a-trackable-mutation" outcome.
+            assertNull(GucState.parseSetCommand("DISCARD PLANS"));
+        }
+
+        @Test void discardSequencesIsNoop() {
+            assertNull(GucState.parseSetCommand("DISCARD SEQUENCES"));
+        }
+
+        @Test void discardTempIsNoop() {
+            assertNull(GucState.parseSetCommand("DISCARD TEMP"));
+        }
+
+        @Test void discardTemporaryIsNoop() {
+            assertNull(GucState.parseSetCommand("DISCARD TEMPORARY"));
+        }
+
+        @Test void discardUnknownTargetIsNoop() {
+            // Conservative — PG would raise a syntax error; nothing for us
+            // to mutate. Returning null avoids a verify-stuck loop on bad
+            // input the user typed.
+            assertNull(GucState.parseSetCommand("DISCARD GARBAGE"));
+        }
+
+        @Test void discardAllClearsState() {
+            GucState s = new GucState();
+            s.observeSql("SET app.user_id = '42'");
+            s.observeSql("SET search_path TO 'tenant_a'");
+            assertNotEquals(0L, s.hash());
+            s.observeSql("DISCARD ALL");
+            assertEquals(0L, s.hash(), "DISCARD ALL must drop all unsafe state");
+        }
+
+        @Test void discardAllInMultiStatement() {
+            // The HikariCP connectionInitSql wiring fires DISCARD ALL on each
+            // freshly-pooled physical connection — verify the wire-side
+            // observation handles it identically when batched.
+            GucState s = new GucState();
+            s.observeSql("SET app.user_id = '42'");
+            s.observeSql("DISCARD ALL; SET app.tenant = 'acme'");
+            // Should equal: just SET app.tenant after a clean slate.
+            GucState reference = new GucState();
+            reference.observeSql("SET app.tenant = 'acme'");
+            assertEquals(reference.hash(), s.hash());
+        }
+
+        @Test void discardPlansLeavesStateUntouched() {
+            GucState s = new GucState();
+            s.observeSql("SET app.user_id = '42'");
+            long h = s.hash();
+            s.observeSql("DISCARD PLANS");
+            assertEquals(h, s.hash(),
+                "DISCARD PLANS targets prepared-statement cache only, not GUC state");
+        }
+    }
+
+    // ---- set_config() function form (java-rls-hardening, 2026-05-05) ----
+
+    @Nested class SetConfigTest {
+        @Test void parsesBareSetConfig() {
+            GucState.SetCommand c = GucState.parseSetConfigCall(
+                "SELECT set_config('app.user_id', '42', false)");
+            assertNotNull(c);
+            assertEquals(GucState.SetCommand.Kind.SET, c.kind);
+            assertEquals("app.user_id", c.name);
+            assertEquals("42", c.value);
+        }
+
+        @Test void parsesPgCatalogQualified() {
+            // PostgREST emits the schema-qualified form — this is the
+            // canonical Supabase JWT-claim shape we have to recognise.
+            GucState.SetCommand c = GucState.parseSetConfigCall(
+                "SELECT pg_catalog.set_config('app.user_id', '42', false)");
+            assertNotNull(c);
+            assertEquals(GucState.SetCommand.Kind.SET, c.kind);
+            assertEquals("app.user_id", c.name);
+            assertEquals("42", c.value);
+        }
+
+        @Test void isLocalTrueProducesSetLocalKind() {
+            GucState.SetCommand c = GucState.parseSetConfigCall(
+                "SELECT set_config('app.user_id', '42', true)");
+            assertNotNull(c);
+            assertEquals(GucState.SetCommand.Kind.SET_LOCAL, c.kind);
+        }
+
+        @Test void isLocalAcceptsIntForm() {
+            assertEquals(GucState.SetCommand.Kind.SET_LOCAL,
+                GucState.parseSetConfigCall("SELECT set_config('a.b', 'c', 1)").kind);
+            assertEquals(GucState.SetCommand.Kind.SET,
+                GucState.parseSetConfigCall("SELECT set_config('a.b', 'c', 0)").kind);
+        }
+
+        @Test void caseInsensitiveSelectAndFunctionName() {
+            GucState.SetCommand c = GucState.parseSetConfigCall(
+                "select Set_Config('app.user_id', '42', FALSE)");
+            assertNotNull(c);
+            assertEquals("app.user_id", c.name);
+            assertEquals("42", c.value);
+            assertEquals(GucState.SetCommand.Kind.SET, c.kind);
+        }
+
+        @Test void doubleQuotedNameAccepted() {
+            GucState.SetCommand c = GucState.parseSetConfigCall(
+                "SELECT set_config(\"app.user_id\", \"42\", false)");
+            assertNotNull(c);
+            assertEquals("app.user_id", c.name);
+            assertEquals("42", c.value);
+        }
+
+        @Test void doubledQuoteEscapeInValueSurvives() {
+            // PG's '' escape inside a literal value. The argument splitter
+            // is doubled-quote aware (it treats `''` as a single escaped quote
+            // and does NOT split on the embedded ',' so the call still parses
+            // as one argument), but stripValueQuotes only peels the outer
+            // delimiters — the inner `''` survives in the value. Symmetric
+            // with parseSetCommand's handling. Test pins the contract so a
+            // future "decode escapes too" change is a deliberate choice.
+            GucState.SetCommand c = GucState.parseSetConfigCall(
+                "SELECT set_config('app.note', 'it''s ok', false)");
+            assertNotNull(c);
+            assertEquals("it''s ok", c.value);
+        }
+
+        @Test void rejectsNonLiteralName() {
+            // We can't evaluate `current_user_id_fn()` from this side; bail.
+            assertNull(GucState.parseSetConfigCall(
+                "SELECT set_config(name_var, '42', false)"));
+        }
+
+        @Test void rejectsNonLiteralValue() {
+            assertNull(GucState.parseSetConfigCall(
+                "SELECT set_config('app.user_id', some_fn(), false)"));
+        }
+
+        @Test void rejectsWrongArity() {
+            assertNull(GucState.parseSetConfigCall("SELECT set_config('a', 'b')"));
+            assertNull(GucState.parseSetConfigCall("SELECT set_config('a', 'b', false, 'extra')"));
+        }
+
+        @Test void rejectsNonSetConfig() {
+            assertNull(GucState.parseSetConfigCall("SELECT current_setting('app.x')"));
+            assertNull(GucState.parseSetConfigCall("SELECT 1"));
+            assertNull(GucState.parseSetConfigCall("UPDATE t SET x = 1"));
+        }
+
+        @Test void rejectsExtraSqlAfterCall() {
+            assertNull(GucState.parseSetConfigCall(
+                "SELECT set_config('a.b', 'c', false) FROM dual"));
+        }
+
+        @Test void observeSqlAppliesSetConfig() {
+            GucState s = new GucState();
+            assertTrue(s.observeSql("SELECT set_config('app.user_id', '42', false)"),
+                "set_config must mutate the hash like SET would");
+            assertNotEquals(0L, s.hash());
+
+            // Same value via SET produces the same hash — observability parity.
+            GucState ref = new GucState();
+            ref.observeSql("SET app.user_id = '42'");
+            assertEquals(ref.hash(), s.hash());
+        }
+
+        @Test void observeSqlSetConfigLocalIsNoop() {
+            GucState s = new GucState();
+            s.observeSql("SELECT set_config('app.user_id', '42', true)");
+            assertEquals(0L, s.hash(), "is_local=true ⇒ SET LOCAL ⇒ no hash change");
+        }
+
+        @Test void observeSqlSetConfigInMultiStatement() {
+            GucState s = new GucState();
+            s.observeSql("SELECT set_config('app.user_id', '42', false); SELECT * FROM t");
+            assertNotEquals(0L, s.hash());
+        }
+    }
+
 
     // ---- ConnectionGucState core invariants ----
 
@@ -217,11 +442,11 @@ class GucStateTest {
 
         @Test void safeSetDoesNotChangeHash() {
             GucState s = new GucState();
-            s.observeSql("SET timezone = 'UTC'");
-            assertEquals(0L, s.hash(), "harmless GUC must leave hash untouched");
             s.observeSql("SET application_name = 'foo'");
-            assertEquals(0L, s.hash());
+            assertEquals(0L, s.hash(), "harmless GUC must leave hash untouched");
             s.observeSql("SET statement_timeout = 5000");
+            assertEquals(0L, s.hash());
+            s.observeSql("SET work_mem = '64MB'");
             assertEquals(0L, s.hash());
         }
 
@@ -293,7 +518,7 @@ class GucStateTest {
             GucState s = new GucState();
             assertTrue(s.observeSql("SET app.user_id = '42'"), "first set ⇒ changed");
             assertFalse(s.observeSql("SELECT 1"), "non-SET ⇒ unchanged");
-            assertFalse(s.observeSql("SET timezone = 'UTC'"), "safe SET ⇒ unchanged");
+            assertFalse(s.observeSql("SET application_name = 'foo'"), "safe SET ⇒ unchanged");
             assertTrue(s.observeSql("RESET app.user_id"), "RESET unsafe ⇒ changed");
         }
 
@@ -301,7 +526,7 @@ class GucStateTest {
             GucState s = new GucState();
             s.observeSql("SET app.user_id = '42'");
             long h = s.hash();
-            s.observeSql("RESET timezone");
+            s.observeSql("RESET application_name");
             assertEquals(h, s.hash());
         }
 

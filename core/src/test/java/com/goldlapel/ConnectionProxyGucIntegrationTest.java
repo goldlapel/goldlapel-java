@@ -92,8 +92,11 @@ class ConnectionProxyGucIntegrationTest {
         Connection raw = makeFakeConnection(driver);
         Connection wrapped = ConnectionProxy.wrap(raw, cache);
 
-        // Read once, then issue a HARMLESS SET (timezone), then read again.
-        // The state hash must NOT move, so the second read must hit the cache.
+        // Read once, then issue a HARMLESS SET (application_name), then read
+        // again. The state hash must NOT move, so the second read must hit
+        // the cache. NB: timezone is unsafe per the locale-formatting GUC
+        // expansion (java-rls-hardening, 2026-05-05) — application_name
+        // remains the canonical safe-knob example.
         driver.scalar = "first";
         try (Statement s = wrapped.createStatement()) {
             ResultSet rs = s.executeQuery("SELECT data FROM accounts");
@@ -101,7 +104,7 @@ class ConnectionProxyGucIntegrationTest {
             assertEquals("first", rs.getString(1));
         }
         try (Statement s = wrapped.createStatement()) {
-            s.execute("SET timezone = 'UTC'");
+            s.execute("SET application_name = 'analytics'");
         }
         driver.scalar = "WOULD-NOT-BE-CACHED-IF-HIT";
         try (Statement s = wrapped.createStatement()) {
