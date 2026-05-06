@@ -511,6 +511,99 @@ class GoldLapelAutoConfigurationTest {
     }
 
     @Test
+    void aggressiveVerifyDefaultsToAuto() {
+        // Wave-2 smart-auto-enable. With no goldlapel.aggressive-verify
+        // property set, the post-processor must forward AUTO to GoldLapelOptions
+        // and construct a CachedDataSource that carries the same mode plus
+        // the JDBC URL the proxy listens on (the detection cache key).
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            HikariDataSource ds = new HikariDataSource();
+            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            // aggressiveVerify left at default ("auto").
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+            Object result = processor.postProcessAfterInitialization(ds, "dataSource");
+
+            assertThat(captured).hasSize(1);
+            assertThat(captured.get(0).getAggressiveVerify())
+                    .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
+            assertThat(result).isInstanceOf(CachedDataSource.class);
+            CachedDataSource cached = (CachedDataSource) result;
+            assertThat(cached.aggressiveVerify())
+                    .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
+            assertThat(cached.jdbcUrl())
+                    .isEqualTo("jdbc:postgresql://localhost:7932/testdb");
+        }
+    }
+
+    @Test
+    void aggressiveVerifyOnPropertyForwarded() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.aggressive-verify=on")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).getAggressiveVerify())
+                                .isEqualTo(com.goldlapel.AggressiveVerifyMode.ON);
+                        assertThat(context.getBean(DataSource.class))
+                                .isInstanceOf(CachedDataSource.class);
+                        CachedDataSource cached = (CachedDataSource) context.getBean(DataSource.class);
+                        assertThat(cached.aggressiveVerify())
+                                .isEqualTo(com.goldlapel.AggressiveVerifyMode.ON);
+                    });
+        }
+    }
+
+    @Test
+    void aggressiveVerifyOffPropertyForwarded() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            dataSourceRunner.withPropertyValues(
+                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
+                            "spring.datasource.driver-class-name=org.postgresql.Driver",
+                            "goldlapel.aggressive-verify=off")
+                    .run(context -> {
+                        assertThat(captured).hasSize(1);
+                        assertThat(captured.get(0).getAggressiveVerify())
+                                .isEqualTo(com.goldlapel.AggressiveVerifyMode.OFF);
+                        CachedDataSource cached = (CachedDataSource) context.getBean(DataSource.class);
+                        assertThat(cached.aggressiveVerify())
+                                .isEqualTo(com.goldlapel.AggressiveVerifyMode.OFF);
+                    });
+        }
+    }
+
+    @Test
+    void aggressiveVerifyUnknownStringFallsBackToAuto() {
+        // Concierge, not bouncer: a typo ("agressive") shouldn't quietly
+        // disable a safety feature. Anything we can't parse falls back to
+        // AUTO (the documented default).
+        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify("agressive"))
+                .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
+        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify(null))
+                .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
+        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify(""))
+                .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
+        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify("on"))
+                .isEqualTo(com.goldlapel.AggressiveVerifyMode.ON);
+        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify("OFF"))
+                .isEqualTo(com.goldlapel.AggressiveVerifyMode.OFF);
+        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify("Auto"))
+                .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
+    }
+
+    @Test
     void disableNativeCacheFlowsThroughToOptions() {
         // When goldlapel.disable-native-cache=true the property must also be
         // forwarded into GoldLapelOptions so the wrapper passes the flag to

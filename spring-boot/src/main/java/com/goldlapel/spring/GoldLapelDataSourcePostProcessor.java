@@ -1,5 +1,6 @@
 package com.goldlapel.spring;
 
+import com.goldlapel.AggressiveVerifyMode;
 import com.goldlapel.GoldLapel;
 import com.goldlapel.NativeCache;
 import org.slf4j.Logger;
@@ -154,6 +155,7 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                     opts.setConfigFile(properties.getConfigFile());
                 }
                 opts.setDisableNativeCache(properties.isDisableNativeCache());
+                opts.setAggressiveVerify(resolveAggressiveVerify(properties.getAggressiveVerify()));
                 opts.setClient("spring-boot");
             });
         } catch (RuntimeException e) {
@@ -193,7 +195,27 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
 
         log.info("Gold Lapel native cache enabled for {} (invalidation port {})", beanName, invPort);
 
-        return new CachedDataSource(ds, cache);
+        // Thread the aggressive-verify mode + the proxy's JDBC URL into the
+        // wrapped DataSource so the per-connection wrap path picks the right
+        // detection cache key. The URL is the proxy's URL (the one the
+        // JDBC driver actually connects to) — that's what every connection
+        // out of this DataSource will use, and it's the right key for the
+        // first-connection probe. Routing the original upstream URL would
+        // probe pg_trigger via the proxy on a different port and key the
+        // cache off a string the user pool never actually opens.
+        AggressiveVerifyMode mode = resolveAggressiveVerify(properties.getAggressiveVerify());
+        return new CachedDataSource(ds, cache, mode, proxy.getJdbcUrl());
+    }
+
+    /**
+     * Map the {@code goldlapel.aggressive-verify} string property onto an
+     * {@link AggressiveVerifyMode}. Falls back to {@link AggressiveVerifyMode#AUTO}
+     * for null / unrecognised inputs (matches the property's documented
+     * default — a typo shouldn't disable a safety feature).
+     */
+    static AggressiveVerifyMode resolveAggressiveVerify(String raw) {
+        AggressiveVerifyMode parsed = AggressiveVerifyMode.parse(raw);
+        return parsed == null ? AggressiveVerifyMode.AUTO : parsed;
     }
 
     // Visible for testing

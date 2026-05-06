@@ -25,6 +25,7 @@ public class GoldLapelProperties {
     private boolean disableMatviews = false;
     private boolean disableSqloptimize = false;
     private boolean disableAutoIndexes = false;
+    private String aggressiveVerify = "auto";
     private Map<String, String> config = new LinkedHashMap<>();
 
     public boolean isEnabled() {
@@ -316,5 +317,32 @@ public class GoldLapelProperties {
      */
     public void setDisableAutoIndexes(boolean disableAutoIndexes) {
         this.disableAutoIndexes = disableAutoIndexes;
+    }
+
+    public String getAggressiveVerify() {
+        return aggressiveVerify;
+    }
+
+    /**
+     * Post-DML aggressive-verify mode. Accepts {@code auto} (default),
+     * {@code on}, or {@code off} (case-insensitive). The boolean spellings
+     * {@code true}/{@code false} also work for convenience but the
+     * canonical YAML values are the three named ones.
+     *
+     * <p>{@code auto} (default) probes {@code pg_trigger}/{@code pg_proc} on
+     * the first connection per JDBC URL and turns post-DML verify on for
+     * the URL if the schema has any trigger that issues a session
+     * {@code SET}. {@code on} forces post-DML verify on regardless;
+     * {@code off} turns it off (Wave 1's post-function-call verify still
+     * runs in OFF mode).
+     *
+     * <p>Background: Wave 1's verify covers stored functions/procedures.
+     * This setting controls the Wave 2 expansion to cover trigger-internal
+     * SETs — see {@code goldlapel/docs/todos/aggressive-verify-flag.md}.
+     *
+     * <p>YAML: {@code goldlapel.aggressive-verify: on}.
+     */
+    public void setAggressiveVerify(String aggressiveVerify) {
+        this.aggressiveVerify = aggressiveVerify;
     }
 }
