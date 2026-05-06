@@ -209,6 +209,69 @@ public final class GucState {
     }
 
     /**
+     * Snapshot of {@link #values} for transactional revert. Returned by
+     * {@link #snapshot()}; restored by {@link #restoreOrReset}. Used by
+     * {@link ConnectionProxy} to defer state-hash mutation until the JDBC
+     * call returns successfully — wire-side observation is optimistic, but
+     * a {@link java.sql.SQLException} from the server means the SET never
+     * actually applied, and the wrapper must roll back to avoid diverging
+     * from server-side state.
+     *
+     * <p>Snapshot cost is bounded: typical apps hold a handful of unsafe
+     * GUCs (one or two namespaced RLS keys, maybe a search_path) — copying
+     * a TreeMap with ~5 entries is &lt;1µs and dominated by allocation.
+     * Taken on every Statement / PreparedStatement / CallableStatement
+     * invoke that touches the wire — frequent, but cheap.
+     *
+     * <p>Records the {@link #hash} alongside the values so
+     * {@link #restoreOrReset} doesn't have to re-fold the FNV mixer; restore
+     * is hot too (the exception path), so paying the bytes here is the right
+     * trade.
+     */
+    public static final class Snapshot {
+        final TreeMap<String, String> values;
+        final long hash;
+        Snapshot(TreeMap<String, String> values, long hash) {
+            this.values = values;
+            this.hash = hash;
+        }
+    }
+
+    /**
+     * Capture the current state for a possible {@link #restoreOrReset} on
+     * JDBC failure. Returns {@code null} when there's nothing to roll
+     * back — an empty-state snapshot would just allocate for no reason;
+     * the caller treats null as "no revert needed". Callers who restore
+     * unconditionally (e.g. catch-all error path) should use
+     * {@link #restoreOrReset} which handles the null-snapshot case.
+     *
+     * <p>Allocates a fresh TreeMap on every call — JDBC connections are
+     * single-threaded per spec, so there's no concurrent mutator to worry
+     * about, but the snapshot must be a deep copy so a subsequent
+     * {@link #apply} doesn't ride through into the snapshot.
+     */
+    public Snapshot snapshot() {
+        if (values.isEmpty() && hash == 0L) return null;
+        return new Snapshot(new TreeMap<>(values), hash);
+    }
+
+    /**
+     * Restore the state captured by {@link #snapshot()}. {@code null}
+     * means "snapshot was taken on an empty state" — restore the empty
+     * state directly. Idempotent — restoring twice from the same snapshot
+     * leaves the state in the same place.
+     */
+    public void restoreOrReset(Snapshot snap) {
+        values.clear();
+        if (snap != null) {
+            values.putAll(snap.values);
+            hash = snap.hash;
+        } else {
+            hash = 0L;
+        }
+    }
+
+    /**
      * Apply a parsed {@link SetCommand} to the state. No-op for
      * {@link SetCommand.Kind#SET_LOCAL} (transient — see class doc) and for
      * safe GUC names.

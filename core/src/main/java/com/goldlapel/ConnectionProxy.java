@@ -152,10 +152,24 @@ public class ConnectionProxy {
                         inTransaction = !autoCommit;
                         return method.invoke(real, args);
                     case "commit":
+                        // COMMIT preserves session-level SETs issued inside
+                        // the txn — no GUC-state revert needed (the wrapper's
+                        // wire-side observation already reflects server state).
                         inTransaction = false;
                         return method.invoke(real, args);
                     case "rollback":
+                        // PG semantics: SET issued inside a transaction is
+                        // reverted on ROLLBACK (per the SQL-SET docs). We don't
+                        // know which (if any) SETs the user issued during the
+                        // transaction, so mark dirty — the next user query's
+                        // verifyIfDirty path will reconcile against pg_settings
+                        // before consulting the cache. Cheaper than tracking a
+                        // per-txn snapshot for a code path most apps hit
+                        // rarely. Applies to both 0-arg rollback and the
+                        // Savepoint-arg rollback (partial rollback can also
+                        // revert SETs done after the savepoint).
                         inTransaction = false;
+                        gucState.markDirty();
                         return method.invoke(real, args);
                     default:
                         return method.invoke(real, args);
@@ -192,6 +206,20 @@ public class ConnectionProxy {
         private final Statement real;
         private final NativeCache cache;
         private final ConnectionHandler connHandler;
+        /**
+         * Pending batched SQL strings. Recorded at {@code addBatch} time but
+         * not observed against the GUC state until the JDBC driver reports
+         * {@code executeBatch} success (the SETs may have failed mid-batch on
+         * the server, in which case we can't trust optimistic observation).
+         * On {@code executeBatch} success: each entry is observed in source
+         * order. On failure: dropped + state marked dirty so the next path
+         * reconciles with pg_settings (JDBC's BatchUpdateException carries
+         * partial-success counts, but PG runs the whole batch in an implicit
+         * transaction by default — partial state on the wrapper side is worse
+         * than a forced reconcile). On {@code clearBatch}: dropped without
+         * observation.
+         */
+        private final java.util.List<String> pendingBatch = new java.util.ArrayList<>();
 
         StatementHandler(Statement real, NativeCache cache, ConnectionHandler connHandler) {
             this.real = real;
@@ -235,20 +263,25 @@ public class ConnectionProxy {
                         }
                         return method.invoke(real, args);
                     case "addBatch":
-                        // Statement.addBatch(String) appends the SQL to a batch
-                        // that's flushed on executeBatch(). Pre-fix, neither
-                        // addBatch nor executeBatch observed SET commands —
-                        // batched session-state changes never shifted the
-                        // wrapper-side L1 state hash. We observe at addBatch
-                        // time so the side effect is recorded in source order
-                        // (executeBatch is atomic on the wire, but each
-                        // observed SET must take effect before subsequent
-                        // batched statements would see it).
-                        // (java-jdbc-callable-batch-statehash-gap.md, 2026-05-04)
+                        // Statement.addBatch(String) buffers the SQL on the
+                        // driver side; nothing hits the server until
+                        // executeBatch(). We accumulate the same buffer locally
+                        // and observe each entry against the GUC state ONLY
+                        // after executeBatch reports success — observing at
+                        // addBatch time would diverge state-hash from the
+                        // server if executeBatch later throws.
+                        // (java-set-actually-applied, 2026-05-05)
                         if (args != null && args.length > 0 && args[0] instanceof String) {
-                            connHandler.gucState.observeSql((String) args[0]);
+                            pendingBatch.add((String) args[0]);
                         }
                         return method.invoke(real, args);
+                    case "clearBatch":
+                        // Driver drops the buffer; we drop our pending list to
+                        // match. No state-hash effect — nothing was observed.
+                        pendingBatch.clear();
+                        return method.invoke(real, args);
+                    case "executeBatch":
+                        return handleExecuteBatch();
                     default:
                         return method.invoke(real, args);
                 }
@@ -273,9 +306,20 @@ public class ConnectionProxy {
             // Write detection — multi-statement-aware so writes buried after
             // a SET in a Q body still invalidate the right tables.
             if (handleWriteInvalidation(sql)) {
-                ResultSet rs = real.executeQuery(sql);
-                maybeScheduleVerify(sql);
-                return rs;
+                // SET-in-the-same-body still needs the wire-side observation,
+                // but the JDBC call may fail and we'd be left with a hash that
+                // doesn't match server state. Snapshot + revert-on-throw.
+                GucState.Snapshot snap = connHandler.gucState.snapshot();
+                connHandler.gucState.observeSql(sql);
+                try {
+                    ResultSet rs = real.executeQuery(sql);
+                    maybeScheduleVerify(sql);
+                    return rs;
+                } catch (SQLException | RuntimeException e) {
+                    connHandler.gucState.restoreOrReset(snap);
+                    connHandler.gucState.markDirty();
+                    throw e;
+                }
             }
 
             // Pure-TX commands skip the cache path entirely (no rows to cache).
@@ -283,23 +327,35 @@ public class ConnectionProxy {
                 return real.executeQuery(sql);
             }
 
-            // SET / RESET observation. Runs on every query so a SET that's
-            // batched into a multi-statement Q ("SET app.user_id='42'; SELECT
-            // ...") still updates the per-connection state hash before we
-            // build the cache key.
-            connHandler.gucState.observeSql(sql);
-
             // Lazy verify-on-checkout — if a previous stored-function call
             // marked us dirty (or a previous verify failed), reconcile state
             // before we use the hash as a cache key. Synchronous; we already
-            // hold the connection lock.
+            // hold the connection lock. Runs BEFORE the snapshot so a JDBC-
+            // failure revert doesn't unwind a fresh pg_settings reconciliation
+            // (the verify may have happened on stale dirty bits unrelated to
+            // this SQL — preserving its result on the revert path saves a
+            // round-trip on the next call).
             connHandler.verifyIfDirty();
+
+            // SET / RESET observation. Runs on every query so a SET that's
+            // batched into a multi-statement Q ("SET app.user_id='42'; SELECT
+            // ...") still updates the per-connection state hash before we
+            // build the cache key. Optimistic — the wire-side mutation may
+            // be wrong if the JDBC call throws; snap + revert in the catch.
+            GucState.Snapshot snap = connHandler.gucState.snapshot();
+            connHandler.gucState.observeSql(sql);
 
             // In transaction: bypass cache
             if (connHandler.inTransaction) {
-                ResultSet rs = real.executeQuery(sql);
-                maybeScheduleVerify(sql);
-                return rs;
+                try {
+                    ResultSet rs = real.executeQuery(sql);
+                    maybeScheduleVerify(sql);
+                    return rs;
+                } catch (SQLException | RuntimeException e) {
+                    connHandler.gucState.restoreOrReset(snap);
+                    connHandler.gucState.markDirty();
+                    throw e;
+                }
             }
 
             // Check native cache
@@ -308,15 +364,28 @@ public class ConnectionProxy {
             if (entry != null) {
                 // Function-call hits don't trigger a verify either way — the
                 // function never actually ran on this trip (cache served the
-                // result), so the server-side state can't have shifted.
+                // result), so the server-side state can't have shifted. We
+                // don't need to revert the snapshot either: a cache HIT means
+                // no JDBC call was made, the optimistic SET observation
+                // (if any) was applied without a wire round-trip, and the
+                // server already had the same SET applied earlier (else the
+                // hash wouldn't match the cached entry's slot).
                 return CachedResultSet.create(entry.rows, entry.columns);
             }
 
-            // Cache miss
-            ResultSet rs = real.executeQuery(sql);
-            ResultSet out = cacheAndReturn(sql, null, rs, stateHash);
-            maybeScheduleVerify(sql);
-            return out;
+            // Cache miss — issue the real query, revert state on failure so
+            // the wrapper-side hash doesn't diverge from what the server
+            // actually applied.
+            try {
+                ResultSet rs = real.executeQuery(sql);
+                ResultSet out = cacheAndReturn(sql, null, rs, stateHash);
+                maybeScheduleVerify(sql);
+                return out;
+            } catch (SQLException | RuntimeException e) {
+                connHandler.gucState.restoreOrReset(snap);
+                connHandler.gucState.markDirty();
+                throw e;
+            }
         }
 
         private int handleExecuteUpdate(String sql) throws SQLException {
@@ -325,22 +394,63 @@ public class ConnectionProxy {
             // "BEGIN; UPDATE...; COMMIT" body must leave the wrapper-side
             // tx flag matching the server's post-COMMIT state.
             connHandler.inTransaction = NativeCache.updateTxState(connHandler.inTransaction, sql);
+            GucState.Snapshot snap = connHandler.gucState.snapshot();
             connHandler.gucState.observeSql(sql);
             handleWriteInvalidation(sql);
-            int rows = real.executeUpdate(sql);
-            maybeScheduleVerify(sql);
-            return rows;
+            try {
+                int rows = real.executeUpdate(sql);
+                maybeScheduleVerify(sql);
+                return rows;
+            } catch (SQLException | RuntimeException e) {
+                connHandler.gucState.restoreOrReset(snap);
+                connHandler.gucState.markDirty();
+                throw e;
+            }
         }
 
         private boolean handleExecute(String sql) throws SQLException {
             // Multi-statement-aware tx-state walk; see handleExecuteQuery for
             // the BEGIN-then-COMMIT-buried-in-the-same-body bug it fixes.
             connHandler.inTransaction = NativeCache.updateTxState(connHandler.inTransaction, sql);
+            GucState.Snapshot snap = connHandler.gucState.snapshot();
             connHandler.gucState.observeSql(sql);
             handleWriteInvalidation(sql);
-            boolean result = real.execute(sql);
-            maybeScheduleVerify(sql);
-            return result;
+            try {
+                boolean result = real.execute(sql);
+                maybeScheduleVerify(sql);
+                return result;
+            } catch (SQLException | RuntimeException e) {
+                connHandler.gucState.restoreOrReset(snap);
+                connHandler.gucState.markDirty();
+                throw e;
+            }
+        }
+
+        /**
+         * Execute the buffered batch with deferred GUC-state observation.
+         * On JDBC success: replay each pending SQL through {@code observeSql}
+         * in source order so the state hash settles to what the server saw.
+         * On any failure (SQLException, BatchUpdateException, or runtime
+         * error mid-flight): drop the pending list, mark dirty, and rethrow.
+         * pgjdbc executes batches inside an implicit transaction with a
+         * single error-ends-the-batch failure mode — a partial-success commit
+         * could leave us inconsistent either way, so the conservative path is
+         * "force a verify on next checkout".
+         */
+        private int[] handleExecuteBatch() throws SQLException {
+            try {
+                int[] counts = real.executeBatch();
+                // Driver's buffer is flushed on success; ours commits.
+                for (String sql : pendingBatch) {
+                    connHandler.gucState.observeSql(sql);
+                }
+                pendingBatch.clear();
+                return counts;
+            } catch (SQLException | RuntimeException e) {
+                pendingBatch.clear();
+                connHandler.gucState.markDirty();
+                throw e;
+            }
         }
 
         /**
@@ -405,6 +515,18 @@ public class ConnectionProxy {
         private final NativeCache cache;
         private final ConnectionHandler connHandler;
         private final Map<Integer, Object> params = new HashMap<>();
+        /**
+         * Whether {@code addBatch()} (no-arg form, buffers the current
+         * parameter set against the prepared SQL) has been called since the
+         * last {@code executeBatch} / {@code clearBatch}. Used to defer GUC
+         * observation: prepared SQL doesn't change between adds, so we observe
+         * once on executeBatch success regardless of how many param sets were
+         * batched. {@code SET name = $1} isn't actually accepted by PG (SET
+         * takes literals, not parameters), so this is largely cosmetic — but
+         * cheap, and keeps the cache key shape consistent with the Statement
+         * path's deferred-observation contract.
+         */
+        private boolean pendingBatchAdds = false;
 
         PreparedStatementHandler(PreparedStatement real, String sql, NativeCache cache, ConnectionHandler connHandler) {
             this.real = real;
@@ -458,9 +580,48 @@ public class ConnectionProxy {
                     case "clearParameters":
                         params.clear();
                         return method.invoke(real, args);
+                    case "addBatch":
+                        // PreparedStatement.addBatch() (no-arg) buffers the
+                        // current parameter set. addBatch(String) is also
+                        // inherited from Statement but pgjdbc throws — we
+                        // delegate either way. The no-arg form is what
+                        // matters: observation is deferred until executeBatch
+                        // succeeds (see pendingBatchAdds field doc).
+                        if (args == null || args.length == 0) {
+                            pendingBatchAdds = true;
+                        }
+                        return method.invoke(real, args);
+                    case "clearBatch":
+                        pendingBatchAdds = false;
+                        return method.invoke(real, args);
+                    case "executeBatch":
+                        return handlePreparedExecuteBatch();
                     default:
                         return method.invoke(real, args);
                 }
+            }
+        }
+
+        /**
+         * Mirror of {@link StatementHandler#handleExecuteBatch()} for the
+         * PreparedStatement no-arg execute path. Defers observing the
+         * prepared SQL until the JDBC call returns successfully — on
+         * SQLException / runtime error, drops the deferred observation and
+         * marks dirty. Observation runs at most once even if N param sets
+         * were batched: the SQL string is the same for every add.
+         */
+        private int[] handlePreparedExecuteBatch() throws SQLException {
+            try {
+                int[] counts = real.executeBatch();
+                if (pendingBatchAdds) {
+                    connHandler.gucState.observeSql(sql);
+                    pendingBatchAdds = false;
+                }
+                return counts;
+            } catch (SQLException | RuntimeException e) {
+                pendingBatchAdds = false;
+                connHandler.gucState.markDirty();
+                throw e;
             }
         }
 
@@ -478,34 +639,60 @@ public class ConnectionProxy {
             Object[] p = paramsArray();
 
             if (handleWriteInvalidation(sql)) {
-                ResultSet rs = real.executeQuery();
-                maybeScheduleVerify(sql);
-                return rs;
+                GucState.Snapshot snap = connHandler.gucState.snapshot();
+                connHandler.gucState.observeSql(sql);
+                try {
+                    ResultSet rs = real.executeQuery();
+                    maybeScheduleVerify(sql);
+                    return rs;
+                } catch (SQLException | RuntimeException e) {
+                    connHandler.gucState.restoreOrReset(snap);
+                    connHandler.gucState.markDirty();
+                    throw e;
+                }
             }
 
             // SET / RESET observation. PreparedStatement is unusual for SET
             // (parameters typically aren't permitted in `SET name = $1`), but
             // the bookkeeping is cheap and the symmetry with Statement keeps
             // the cache key shape consistent regardless of which path the
-            // SET arrived on.
+            // SET arrived on. Observation is optimistic — if the JDBC call
+            // throws, we revert from the pre-call snapshot.
+            GucState.Snapshot snap = connHandler.gucState.snapshot();
             connHandler.gucState.observeSql(sql);
 
             // Lazy verify-on-checkout — see StatementHandler.handleExecuteQuery.
             connHandler.verifyIfDirty();
 
             if (connHandler.inTransaction) {
-                ResultSet rs = real.executeQuery();
-                maybeScheduleVerify(sql);
-                return rs;
+                try {
+                    ResultSet rs = real.executeQuery();
+                    maybeScheduleVerify(sql);
+                    return rs;
+                } catch (SQLException | RuntimeException e) {
+                    connHandler.gucState.restoreOrReset(snap);
+                    connHandler.gucState.markDirty();
+                    throw e;
+                }
             }
 
             long stateHash = connHandler.gucState.hash();
             NativeCache.CacheEntry entry = cache.get(sql, p, stateHash);
             if (entry != null) {
+                // Cache hit — no JDBC call, no opportunity for divergence.
+                // See StatementHandler.handleExecuteQuery for the symmetry
+                // argument.
                 return CachedResultSet.create(entry.rows, entry.columns);
             }
 
-            ResultSet rs = real.executeQuery();
+            ResultSet rs;
+            try {
+                rs = real.executeQuery();
+            } catch (SQLException | RuntimeException e) {
+                connHandler.gucState.restoreOrReset(snap);
+                connHandler.gucState.markDirty();
+                throw e;
+            }
             // Reuse Statement's caching logic
             try {
                 ResultSetMetaData meta = rs.getMetaData();
@@ -538,19 +725,33 @@ public class ConnectionProxy {
         }
 
         private int handlePreparedUpdate() throws SQLException {
+            GucState.Snapshot snap = connHandler.gucState.snapshot();
             connHandler.gucState.observeSql(sql);
             handleWriteInvalidation(sql);
-            int rows = real.executeUpdate();
-            maybeScheduleVerify(sql);
-            return rows;
+            try {
+                int rows = real.executeUpdate();
+                maybeScheduleVerify(sql);
+                return rows;
+            } catch (SQLException | RuntimeException e) {
+                connHandler.gucState.restoreOrReset(snap);
+                connHandler.gucState.markDirty();
+                throw e;
+            }
         }
 
         private boolean handlePreparedExecute() throws SQLException {
+            GucState.Snapshot snap = connHandler.gucState.snapshot();
             connHandler.gucState.observeSql(sql);
             handleWriteInvalidation(sql);
-            boolean result = real.execute();
-            maybeScheduleVerify(sql);
-            return result;
+            try {
+                boolean result = real.execute();
+                maybeScheduleVerify(sql);
+                return result;
+            } catch (SQLException | RuntimeException e) {
+                connHandler.gucState.restoreOrReset(snap);
+                connHandler.gucState.markDirty();
+                throw e;
+            }
         }
 
         /** See {@link StatementHandler#maybeScheduleVerify(String)}. */
@@ -584,6 +785,23 @@ public class ConnectionProxy {
         private final String sql;
         private final NativeCache cache;
         private final ConnectionHandler connHandler;
+        /**
+         * Pending batched SQL strings from {@code addBatch(String)} calls
+         * (CallableStatement inherits Statement.addBatch(String)). The
+         * no-arg {@code addBatch()} variant uses the bound SQL and is
+         * tracked by {@link #pendingBoundBatchAdds}.
+         *
+         * <p>See {@link StatementHandler#pendingBatch} for the deferred-
+         * observation rationale.
+         */
+        private final java.util.List<String> pendingStringBatch = new java.util.ArrayList<>();
+        /**
+         * Whether the no-arg {@code addBatch()} (using the bound SQL captured
+         * at {@code prepareCall} time) has been called since the last
+         * {@code executeBatch} / {@code clearBatch}. Mirrors the
+         * PreparedStatement flag with the same name.
+         */
+        private boolean pendingBoundBatchAdds = false;
 
         CallableStatementHandler(CallableStatement real, String sql, NativeCache cache, ConnectionHandler connHandler) {
             this.real = real;
@@ -648,40 +866,101 @@ public class ConnectionProxy {
                         // CallableStatement contract (inherited but undefined),
                         // so we just delegate without observation.
                         if (args == null || args.length == 0) {
+                            // Optimistic observation — snapshot first, then on
+                            // JDBC failure restore. Matches Statement /
+                            // PreparedStatement deferral semantics so a
+                            // CallableStatement-routed SET that errors at the
+                            // server doesn't leave the wrapper-side hash
+                            // diverged.
+                            GucState.Snapshot snap = connHandler.gucState.snapshot();
                             connHandler.gucState.observeSql(sql);
                             handleWriteInvalidation(sql);
-                            Object result = method.invoke(real, args);
-                            // Schedule post-call verify when the bound SQL is
-                            // recognisably a stored function or proc call —
-                            // including the JDBC `{call my_proc(...)}` escape
-                            // form, which lexes differently from the bare
-                            // `SELECT ident(` / `CALL ident(` checked by
-                            // GucState.isFunctionCall. CallableStatement is
-                            // also a legitimate Statement substitute (some
-                            // apps run `SET app.user_id = '42'` through
-                            // prepareCall), so we can't unconditionally fire —
-                            // a verify after every prepareCall execute would
-                            // wipe wire-observed SETs against any non-PG-aware
-                            // backend.
-                            if (looksLikeProcCall(sql) || GucState.isFunctionCall(sql)) {
+                            try {
+                                Object result = method.invoke(real, args);
+                                // Schedule post-call verify when the bound SQL
+                                // is recognisably a stored function or proc
+                                // call — including the JDBC `{call ...}`
+                                // escape form, which lexes differently from
+                                // the bare `SELECT ident(` / `CALL ident(`
+                                // checked by GucState.isFunctionCall.
+                                // CallableStatement is also a legitimate
+                                // Statement substitute (some apps run
+                                // `SET app.user_id = '42'` through
+                                // prepareCall), so we can't unconditionally
+                                // fire — a verify after every prepareCall
+                                // execute would wipe wire-observed SETs
+                                // against any non-PG-aware backend.
+                                if (looksLikeProcCall(sql) || GucState.isFunctionCall(sql)) {
+                                    connHandler.gucState.markDirty();
+                                    connHandler.scheduleVerify();
+                                }
+                                return result;
+                            } catch (java.lang.reflect.InvocationTargetException ite) {
+                                // Reflection wraps the JDBC driver's actual
+                                // exception — unwrap so the caller sees the
+                                // SQLException pgjdbc would have thrown if
+                                // we'd called real.execute() directly.
+                                Throwable cause = ite.getCause();
+                                connHandler.gucState.restoreOrReset(snap);
                                 connHandler.gucState.markDirty();
-                                connHandler.scheduleVerify();
+                                throw cause != null ? cause : ite;
+                            } catch (RuntimeException e) {
+                                connHandler.gucState.restoreOrReset(snap);
+                                connHandler.gucState.markDirty();
+                                throw e;
                             }
-                            return result;
                         }
                         return method.invoke(real, args);
                     case "addBatch":
-                        // Mirror StatementHandler.addBatch: observe the
-                        // String-arg form. The no-arg form uses the bound SQL
-                        // (already observed at execute time, so re-observing
-                        // at addBatch would double-count).
-                        if (args != null && args.length > 0 && args[0] instanceof String) {
-                            connHandler.gucState.observeSql((String) args[0]);
+                        // Defer observation: track addBatch(String) entries
+                        // and the no-arg form, then observe each on
+                        // executeBatch success. Pre-fix, we observed at
+                        // addBatch time — but executeBatch can fail and the
+                        // server may never have applied any of the buffered
+                        // SETs. The Statement-path equivalent uses the same
+                        // pendingBatch list pattern.
+                        if (args == null || args.length == 0) {
+                            pendingBoundBatchAdds = true;
+                        } else if (args[0] instanceof String) {
+                            pendingStringBatch.add((String) args[0]);
                         }
                         return method.invoke(real, args);
+                    case "clearBatch":
+                        pendingStringBatch.clear();
+                        pendingBoundBatchAdds = false;
+                        return method.invoke(real, args);
+                    case "executeBatch":
+                        return handleExecuteBatch();
                     default:
                         return method.invoke(real, args);
                 }
+            }
+        }
+
+        /**
+         * Execute the buffered batch with deferred GUC-state observation.
+         * On JDBC success: replay each pending addBatch(String) SQL through
+         * {@code observeSql}, then observe the bound SQL once if the no-arg
+         * {@code addBatch()} was called. On failure: drop both buffers + mark
+         * dirty so the next path reconciles via pg_settings.
+         */
+        private int[] handleExecuteBatch() throws SQLException {
+            try {
+                int[] counts = real.executeBatch();
+                for (String s : pendingStringBatch) {
+                    connHandler.gucState.observeSql(s);
+                }
+                if (pendingBoundBatchAdds) {
+                    connHandler.gucState.observeSql(sql);
+                }
+                pendingStringBatch.clear();
+                pendingBoundBatchAdds = false;
+                return counts;
+            } catch (SQLException | RuntimeException e) {
+                pendingStringBatch.clear();
+                pendingBoundBatchAdds = false;
+                connHandler.gucState.markDirty();
+                throw e;
             }
         }
     }
