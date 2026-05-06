@@ -44,6 +44,7 @@ public class GoldLapelOptions {
     private boolean disableMatviews;
     private boolean disableSqloptimize;
     private boolean disableAutoIndexes;
+    private AggressiveVerifyMode aggressiveVerify = AggressiveVerifyMode.AUTO;
 
     public Integer getProxyPort() {
         return proxyPort;
@@ -287,5 +288,27 @@ public class GoldLapelOptions {
 
     public void setDisableAutoIndexes(boolean disableAutoIndexes) {
         this.disableAutoIndexes = disableAutoIndexes;
+    }
+
+    /**
+     * Post-DML aggressive-verify mode. Default {@link AggressiveVerifyMode#AUTO},
+     * which probes {@code pg_trigger}/{@code pg_proc} on the first connection
+     * to each JDBC URL and turns post-DML verify on if the schema has any
+     * trigger that issues a session-level {@code SET}. Set
+     * {@link AggressiveVerifyMode#ON} to force-enable, {@link AggressiveVerifyMode#OFF}
+     * to force-disable.
+     *
+     * <p>Background: Wave 1 covers stored function/procedure SETs. This setting
+     * controls the Wave 2 "post-DML expansion" — verifying after every
+     * INSERT/UPDATE/DELETE/MERGE/TRUNCATE to catch SETs issued from inside
+     * trigger function bodies. See
+     * {@code goldlapel/docs/todos/aggressive-verify-flag.md}.
+     */
+    public AggressiveVerifyMode getAggressiveVerify() {
+        return aggressiveVerify;
+    }
+
+    public void setAggressiveVerify(AggressiveVerifyMode aggressiveVerify) {
+        this.aggressiveVerify = aggressiveVerify == null ? AggressiveVerifyMode.AUTO : aggressiveVerify;
     }
 }

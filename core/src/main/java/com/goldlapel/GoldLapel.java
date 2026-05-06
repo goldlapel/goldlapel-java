@@ -116,6 +116,7 @@ public class GoldLapel implements AutoCloseable {
     private final boolean disableMatviews;
     private final boolean disableSqloptimize;
     private final boolean disableAutoIndexes;
+    private final AggressiveVerifyMode aggressiveVerify;
     private Process process;
     private String proxyUrl;
     private Connection internalConn;
@@ -205,6 +206,8 @@ public class GoldLapel implements AutoCloseable {
         this.disableMatviews = options.isDisableMatviews();
         this.disableSqloptimize = options.isDisableSqloptimize();
         this.disableAutoIndexes = options.isDisableAutoIndexes();
+        AggressiveVerifyMode mode = options.getAggressiveVerify();
+        this.aggressiveVerify = mode == null ? AggressiveVerifyMode.AUTO : mode;
         this.process = null;
         this.proxyUrl = null;
 
@@ -730,6 +733,17 @@ public class GoldLapel implements AutoCloseable {
 
     boolean disableAutoIndexes() {
         return disableAutoIndexes;
+    }
+
+    /**
+     * The post-DML aggressive-verify mode that this instance was started with.
+     * Read by the Spring-Boot wiring (and by raw-JDBC callers who want to
+     * thread the same mode into a custom {@link ConnectionProxy#wrap} call)
+     * so the customer's CLI/Spring/options choice flows all the way to the
+     * connection wrapper. Defaults to {@link AggressiveVerifyMode#AUTO}.
+     */
+    public AggressiveVerifyMode aggressiveVerify() {
+        return aggressiveVerify;
     }
 
     public String getDashboardUrl() {

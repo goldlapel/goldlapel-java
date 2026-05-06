@@ -40,12 +40,72 @@ public class ConnectionProxy {
         return VERIFY_EXECUTOR.submit(r);
     }
 
+    /**
+     * Wrap {@code real} with the GUC-aware proxy and the wrapper-side native
+     * cache. Aggressive-verify is OFF for connections wrapped through this
+     * overload — Wave 1's verify-on-checkout / post-call-function verify still
+     * runs, but no post-DML expansion is scheduled. Suitable for tests and
+     * for callers that have decided aggressive-verify is not warranted.
+     */
     public static Connection wrap(Connection real, NativeCache cache) {
+        return wrap(real, cache, AggressiveVerifyMode.OFF, null);
+    }
+
+    /**
+     * Wrap {@code real} with the GUC-aware proxy plus optional smart-auto
+     * post-DML aggressive verify. {@code mode} controls whether the wrapper
+     * schedules a verify after every INSERT/UPDATE/DELETE/MERGE/TRUNCATE/DDL
+     * (in addition to the post-function-call verify Wave 1 already wires):
+     *
+     * <ul>
+     *   <li>{@link AggressiveVerifyMode#AUTO} — probe {@code pg_trigger} on
+     *       first connection per JDBC URL via
+     *       {@link AggressiveVerifyDetector#isActive}. If the schema has any
+     *       trigger that issues a session SET, post-DML verify is enabled
+     *       for every connection to that URL (and the result is cached for
+     *       the JVM's lifetime).</li>
+     *   <li>{@link AggressiveVerifyMode#ON} — always schedule post-DML
+     *       verify, regardless of detection.</li>
+     *   <li>{@link AggressiveVerifyMode#OFF} — never schedule post-DML
+     *       verify. Wave 1 paths still run.</li>
+     * </ul>
+     *
+     * <p>{@code jdbcUrl} is used as the detection cache key in AUTO mode and
+     * for license-payload overrides; pass {@code null} to skip detection
+     * (treats AUTO as OFF). The probe runs synchronously on {@code real}
+     * before the wrap returns the proxy — the calling thread pays the
+     * one-query cost on the first wrapped connection per URL, after which
+     * the cached decision is free.
+     */
+    public static Connection wrap(Connection real, NativeCache cache,
+                                  AggressiveVerifyMode mode, String jdbcUrl) {
+        boolean aggressive = resolveAggressive(real, mode, jdbcUrl);
         return (Connection) Proxy.newProxyInstance(
             ConnectionProxy.class.getClassLoader(),
             new Class[]{Connection.class},
-            new ConnectionHandler(real, cache)
+            new ConnectionHandler(real, cache, aggressive)
         );
+    }
+
+    /**
+     * Resolve the effective post-DML verify decision. AUTO consults the
+     * detector (which caches per-URL); ON / OFF are pass-through. A null URL
+     * disables detection — the caller deliberately opted out of the
+     * per-URL cache (e.g. a unit-test fake connection where probing
+     * {@code pg_trigger} would have no meaning).
+     */
+    static boolean resolveAggressive(Connection probeConn, AggressiveVerifyMode mode, String jdbcUrl) {
+        if (mode == null) mode = AggressiveVerifyMode.AUTO;
+        switch (mode) {
+            case ON:
+                return true;
+            case OFF:
+                return false;
+            case AUTO:
+            default:
+                if (jdbcUrl == null) return false;
+                return AggressiveVerifyDetector.isActive(jdbcUrl, probeConn);
+        }
     }
 
     static class ConnectionHandler implements InvocationHandler {
@@ -58,6 +118,23 @@ public class ConnectionProxy {
         // the proxy-side ConnectionGucState in src/guc_state.rs.
         final GucState gucState = new GucState();
         boolean inTransaction = false;
+        /**
+         * Whether to schedule a post-DML verify after every observed write
+         * (INSERT / UPDATE / DELETE / MERGE / TRUNCATE / CALL / DDL). Set at
+         * wrap time per {@link AggressiveVerifyMode}; immutable for the
+         * lifetime of the connection. {@code false} means Wave 1's
+         * post-function-call verify is the only verify trigger — that path
+         * still runs in OFF mode and covers the common stored-function case.
+         *
+         * <p>When {@code true}, the wrapper also fires a verify after writes
+         * to catch trigger-internal SETs (a customer trigger that runs
+         * {@code SET app.user_id = ...} on INSERT). The cost is ~1ms of
+         * post-write verify-pool occupancy per write, doesn't block the
+         * write response, and is the only way to cover the trigger-internal
+         * SET case without server-side instrumentation. See
+         * {@code goldlapel/docs/todos/aggressive-verify-flag.md}.
+         */
+        final boolean aggressiveVerify;
 
         /**
          * Per-connection lock that serializes user-facing JDBC calls with the
@@ -78,8 +155,13 @@ public class ConnectionProxy {
         final Object connectionLock = new Object();
 
         ConnectionHandler(Connection real, NativeCache cache) {
+            this(real, cache, false);
+        }
+
+        ConnectionHandler(Connection real, NativeCache cache, boolean aggressiveVerify) {
             this.real = real;
             this.cache = cache;
+            this.aggressiveVerify = aggressiveVerify;
         }
 
         /**
@@ -314,6 +396,7 @@ public class ConnectionProxy {
                 try {
                     ResultSet rs = real.executeQuery(sql);
                     maybeScheduleVerify(sql);
+                    maybeSchedulePostDmlVerify();
                     return rs;
                 } catch (SQLException | RuntimeException e) {
                     connHandler.gucState.restoreOrReset(snap);
@@ -396,10 +479,11 @@ public class ConnectionProxy {
             connHandler.inTransaction = NativeCache.updateTxState(connHandler.inTransaction, sql);
             GucState.Snapshot snap = connHandler.gucState.snapshot();
             connHandler.gucState.observeSql(sql);
-            handleWriteInvalidation(sql);
+            boolean isWrite = handleWriteInvalidation(sql);
             try {
                 int rows = real.executeUpdate(sql);
                 maybeScheduleVerify(sql);
+                if (isWrite) maybeSchedulePostDmlVerify();
                 return rows;
             } catch (SQLException | RuntimeException e) {
                 connHandler.gucState.restoreOrReset(snap);
@@ -414,16 +498,38 @@ public class ConnectionProxy {
             connHandler.inTransaction = NativeCache.updateTxState(connHandler.inTransaction, sql);
             GucState.Snapshot snap = connHandler.gucState.snapshot();
             connHandler.gucState.observeSql(sql);
-            handleWriteInvalidation(sql);
+            boolean isWrite = handleWriteInvalidation(sql);
             try {
                 boolean result = real.execute(sql);
                 maybeScheduleVerify(sql);
+                if (isWrite) maybeSchedulePostDmlVerify();
                 return result;
             } catch (SQLException | RuntimeException e) {
                 connHandler.gucState.restoreOrReset(snap);
                 connHandler.gucState.markDirty();
                 throw e;
             }
+        }
+
+        /**
+         * Schedule a post-DML verify if {@link ConnectionHandler#aggressiveVerify}
+         * is set on this connection. Called from the executeQuery / executeUpdate /
+         * execute paths after any write was observed by
+         * {@link #handleWriteInvalidation(String)}, so we cover INSERT / UPDATE /
+         * DELETE / MERGE / TRUNCATE / CALL / DDL — anything {@link NativeCache#detectWritesMulti}
+         * recognises as state-mutating.
+         *
+         * <p>Triggers fire server-side on these statements, and a customer
+         * trigger could legitimately {@code SET app.user_id = ...} in its
+         * body; the wrapper has no way to see that SET on the wire. Marking
+         * dirty + queueing a verify means the next user query reconciles
+         * via {@code pg_settings} before consulting the cache. Skipping this
+         * when aggressive mode is off keeps the no-trigger path zero-tax.
+         */
+        private void maybeSchedulePostDmlVerify() {
+            if (!connHandler.aggressiveVerify) return;
+            connHandler.gucState.markDirty();
+            connHandler.scheduleVerify();
         }
 
         /**
@@ -644,6 +750,7 @@ public class ConnectionProxy {
                 try {
                     ResultSet rs = real.executeQuery();
                     maybeScheduleVerify(sql);
+                    maybeSchedulePostDmlVerify();
                     return rs;
                 } catch (SQLException | RuntimeException e) {
                     connHandler.gucState.restoreOrReset(snap);
@@ -727,10 +834,11 @@ public class ConnectionProxy {
         private int handlePreparedUpdate() throws SQLException {
             GucState.Snapshot snap = connHandler.gucState.snapshot();
             connHandler.gucState.observeSql(sql);
-            handleWriteInvalidation(sql);
+            boolean isWrite = handleWriteInvalidation(sql);
             try {
                 int rows = real.executeUpdate();
                 maybeScheduleVerify(sql);
+                if (isWrite) maybeSchedulePostDmlVerify();
                 return rows;
             } catch (SQLException | RuntimeException e) {
                 connHandler.gucState.restoreOrReset(snap);
@@ -742,10 +850,11 @@ public class ConnectionProxy {
         private boolean handlePreparedExecute() throws SQLException {
             GucState.Snapshot snap = connHandler.gucState.snapshot();
             connHandler.gucState.observeSql(sql);
-            handleWriteInvalidation(sql);
+            boolean isWrite = handleWriteInvalidation(sql);
             try {
                 boolean result = real.execute();
                 maybeScheduleVerify(sql);
+                if (isWrite) maybeSchedulePostDmlVerify();
                 return result;
             } catch (SQLException | RuntimeException e) {
                 connHandler.gucState.restoreOrReset(snap);
@@ -760,6 +869,13 @@ public class ConnectionProxy {
                 connHandler.gucState.markDirty();
                 connHandler.scheduleVerify();
             }
+        }
+
+        /** See {@link StatementHandler#maybeSchedulePostDmlVerify()}. */
+        private void maybeSchedulePostDmlVerify() {
+            if (!connHandler.aggressiveVerify) return;
+            connHandler.gucState.markDirty();
+            connHandler.scheduleVerify();
         }
     }
 
@@ -811,14 +927,15 @@ public class ConnectionProxy {
         }
 
         /** See {@link StatementHandler#handleWriteInvalidation(String)}. */
-        private void handleWriteInvalidation(String sql) {
+        private boolean handleWriteInvalidation(String sql) {
             NativeCache.WriteSummary w = NativeCache.detectWritesMulti(sql);
-            if (w == null) return;
+            if (w == null) return false;
             if (w.ddl) {
                 cache.invalidateAll();
             } else {
                 for (String table : w.tables) cache.invalidateTable(table);
             }
+            return true;
         }
 
         /**
@@ -874,7 +991,7 @@ public class ConnectionProxy {
                             // diverged.
                             GucState.Snapshot snap = connHandler.gucState.snapshot();
                             connHandler.gucState.observeSql(sql);
-                            handleWriteInvalidation(sql);
+                            boolean isWrite = handleWriteInvalidation(sql);
                             try {
                                 Object result = method.invoke(real, args);
                                 // Schedule post-call verify when the bound SQL
@@ -891,6 +1008,17 @@ public class ConnectionProxy {
                                 // execute would wipe wire-observed SETs
                                 // against any non-PG-aware backend.
                                 if (looksLikeProcCall(sql) || GucState.isFunctionCall(sql)) {
+                                    connHandler.gucState.markDirty();
+                                    connHandler.scheduleVerify();
+                                } else if (isWrite && connHandler.aggressiveVerify) {
+                                    // Post-DML aggressive verify on the
+                                    // CallableStatement path. CallableStatement
+                                    // is also a legitimate Statement substitute
+                                    // (some apps run plain INSERTs through
+                                    // prepareCall); cover that case too. The
+                                    // function-call branch already covers the
+                                    // CALL/SELECT-fn shapes — this guard
+                                    // catches the bare DML routes.
                                     connHandler.gucState.markDirty();
                                     connHandler.scheduleVerify();
                                 }
