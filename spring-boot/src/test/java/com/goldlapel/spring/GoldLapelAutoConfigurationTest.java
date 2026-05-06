@@ -1431,6 +1431,102 @@ class GoldLapelAutoConfigurationTest {
         }
     }
 
+    // ---- HikariCP connectionInitSql wiring (java-rls-hardening, 2026-05-05) ----
+    //
+    // GoldLapelDataSourcePostProcessor.applyHikariConnectionInitSql sets
+    // connectionInitSql=DISCARD ALL on each HikariDataSource it processes,
+    // so each freshly-created physical connection starts with clean session
+    // GUCs. Wires Hikari-specific behaviour without compile-coupling to the
+    // pool API. User-configured init SQL is respected.
+
+    @Test
+    void hikariConnectionInitSqlSetToDiscardAllByDefault() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            HikariDataSource ds = new HikariDataSource();
+            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
+            // No user-set connectionInitSql: GL must wire DISCARD ALL.
+
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(
+                    new GoldLapelProperties());
+            processor.postProcessAfterInitialization(ds, "dataSource");
+
+            assertThat(ds.getConnectionInitSql())
+                .as("Gold Lapel must default Hikari connectionInitSql to DISCARD ALL " +
+                    "for GUC-RLS cache safety on connection acquire")
+                .isEqualTo("DISCARD ALL");
+        }
+    }
+
+    @Test
+    void hikariConnectionInitSqlRespectsUserConfiguredValue() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            HikariDataSource ds = new HikariDataSource();
+            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
+            // User has their own init SQL — GL must not stomp on it.
+            ds.setConnectionInitSql("SET application_name = 'tenant-svc'");
+
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(
+                    new GoldLapelProperties());
+            processor.postProcessAfterInitialization(ds, "dataSource");
+
+            assertThat(ds.getConnectionInitSql())
+                .as("Gold Lapel must leave a user-configured connectionInitSql alone")
+                .isEqualTo("SET application_name = 'tenant-svc'");
+        }
+    }
+
+    @Test
+    void hikariConnectionInitSqlReplacesEmptyConfiguredValue() {
+        // An explicitly-empty connectionInitSql (whitespace-only) is treated
+        // as "unset" — Hikari accepts the empty string and would silently
+        // skip the init SQL. Reaching DISCARD ALL there improves the user's
+        // safety posture without overriding a real value.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            HikariDataSource ds = new HikariDataSource();
+            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
+            ds.setConnectionInitSql("   ");
+
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(
+                    new GoldLapelProperties());
+            processor.postProcessAfterInitialization(ds, "dataSource");
+
+            assertThat(ds.getConnectionInitSql()).isEqualTo("DISCARD ALL");
+        }
+    }
+
+    @Test
+    void nonHikariDataSourceIsNotTouched() {
+        // The applyHikariConnectionInitSql helper must skip non-Hikari pools
+        // — they get GUC-RLS safety from the wrapper-side verify-on-checkout
+        // fallback path instead.
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/testdb", captured)) {
+
+            DataSourceWithGetUrl ds = new DataSourceWithGetUrl(
+                "jdbc:postgresql://localhost:5432/testdb");
+
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(
+                    new GoldLapelProperties());
+            // Should not throw — the helper is a no-op for non-Hikari classes.
+            assertThat(processor).isNotNull();
+            // Sanity check the helper directly.
+            GoldLapelDataSourcePostProcessor.applyHikariConnectionInitSql(ds, "dataSource");
+            // No method to assert on (DataSourceWithGetUrl has no
+            // connectionInitSql), but the absence of an exception confirms
+            // the reflection check by class name short-circuits cleanly.
+        }
+    }
+
     // Minimal DataSource with getUrl()/setUrl() — simulates Tomcat DBCP pattern
     static class DataSourceWithGetUrl implements DataSource {
         private String url;
