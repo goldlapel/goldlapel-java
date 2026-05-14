@@ -329,16 +329,23 @@ public class GoldLapelProperties {
      * {@code true}/{@code false} also work for convenience but the
      * canonical YAML values are the three named ones.
      *
-     * <p>{@code auto} (default) probes {@code pg_trigger}/{@code pg_proc} on
-     * the first connection per JDBC URL and turns post-DML verify on for
-     * the URL if the schema has any trigger that issues a session
-     * {@code SET}. {@code on} forces post-DML verify on regardless;
-     * {@code off} turns it off (Wave 1's post-function-call verify still
-     * runs in OFF mode).
+     * <p>{@code auto} (default) and {@code on} bump the per-connection
+     * post-DML sequence counter after every observed INSERT/UPDATE/DELETE/
+     * MERGE/TRUNCATE/CALL/DDL, rolling the wrapper-side cache key forward
+     * so a cached pre-DML response cannot be served against
+     * potentially-trigger-mutated session state. {@code off} skips the
+     * bump (peer-shareable cache slot post-DML) and logs a one-time
+     * warning at startup — use only when you've audited your schema and
+     * confirmed no triggers issue session-level SETs from inside their
+     * bodies. Wave 1's post-function-call verify still runs in OFF mode.
      *
      * <p>Background: Wave 1's verify covers stored functions/procedures.
      * This setting controls the Wave 2 expansion to cover trigger-internal
      * SETs — see {@code goldlapel/docs/todos/aggressive-verify-flag.md}.
+     * Earlier iterations gated the bump on a {@code pg_trigger} probe; the
+     * always-on bump replaces that design because the cost is a single
+     * counter increment per write (measurably free) and the safety is
+     * universal.
      *
      * <p>YAML: {@code goldlapel.aggressive-verify: on}.
      */
