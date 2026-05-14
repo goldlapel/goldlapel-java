@@ -292,16 +292,17 @@ public class GoldLapelOptions {
 
     /**
      * Post-DML aggressive-verify mode. Default {@link AggressiveVerifyMode#AUTO},
-     * which probes {@code pg_trigger}/{@code pg_proc} on the first connection
-     * to each JDBC URL and turns post-DML verify on if the schema has any
-     * trigger that issues a session-level {@code SET}. Set
-     * {@link AggressiveVerifyMode#ON} to force-enable, {@link AggressiveVerifyMode#OFF}
-     * to force-disable.
+     * which bumps the per-connection post-DML sequence counter after every
+     * observed INSERT/UPDATE/DELETE/MERGE/TRUNCATE/CALL/DDL, rolling the
+     * wrapper-side cache key forward so a cached pre-DML response cannot be
+     * served against potentially-trigger-mutated session state.
+     * {@link AggressiveVerifyMode#ON} is a synonym for AUTO;
+     * {@link AggressiveVerifyMode#OFF} skips the bump (audited-schema
+     * opt-out, logs a one-time warning).
      *
      * <p>Background: Wave 1 covers stored function/procedure SETs. This setting
-     * controls the Wave 2 "post-DML expansion" — verifying after every
-     * INSERT/UPDATE/DELETE/MERGE/TRUNCATE to catch SETs issued from inside
-     * trigger function bodies. See
+     * controls the Wave 2 "post-DML expansion" — closing the trigger-internal
+     * SET correctness gap. See
      * {@code goldlapel/docs/todos/aggressive-verify-flag.md}.
      */
     public AggressiveVerifyMode getAggressiveVerify() {

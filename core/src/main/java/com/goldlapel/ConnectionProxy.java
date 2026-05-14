@@ -42,44 +42,38 @@ public class ConnectionProxy {
 
     /**
      * Wrap {@code real} with the GUC-aware proxy and the wrapper-side native
-     * cache. Aggressive-verify is OFF for connections wrapped through this
-     * overload — Wave 1's verify-on-checkout / post-call-function verify still
-     * runs, but no post-DML expansion is scheduled. Suitable for tests and
-     * for callers that have decided aggressive-verify is not warranted.
+     * cache. Defaults to {@link AggressiveVerifyMode#AUTO} — every observed
+     * write bumps the per-connection post-DML sequence counter so the cache
+     * key rolls forward and trigger-internal SETs can't replay a stale row
+     * through the cache. See {@link AggressiveVerifyMode}.
      */
     public static Connection wrap(Connection real, NativeCache cache) {
-        return wrap(real, cache, AggressiveVerifyMode.OFF, null);
+        return wrap(real, cache, AggressiveVerifyMode.AUTO, null);
     }
 
     /**
-     * Wrap {@code real} with the GUC-aware proxy plus optional smart-auto
-     * post-DML aggressive verify. {@code mode} controls whether the wrapper
-     * schedules a verify after every INSERT/UPDATE/DELETE/MERGE/TRUNCATE/DDL
-     * (in addition to the post-function-call verify Wave 1 already wires):
+     * Wrap {@code real} with the GUC-aware proxy plus the post-DML
+     * sequence-bump cache-isolation. {@code mode} controls the bump:
      *
      * <ul>
-     *   <li>{@link AggressiveVerifyMode#AUTO} — probe {@code pg_trigger} on
-     *       first connection per JDBC URL via
-     *       {@link AggressiveVerifyDetector#isActive}. If the schema has any
-     *       trigger that issues a session SET, post-DML verify is enabled
-     *       for every connection to that URL (and the result is cached for
-     *       the JVM's lifetime).</li>
-     *   <li>{@link AggressiveVerifyMode#ON} — always schedule post-DML
-     *       verify, regardless of detection.</li>
-     *   <li>{@link AggressiveVerifyMode#OFF} — never schedule post-DML
-     *       verify. Wave 1 paths still run.</li>
+     *   <li>{@link AggressiveVerifyMode#AUTO} (default) /
+     *       {@link AggressiveVerifyMode#ON} — bump {@link GucState#bumpDmlSeq()}
+     *       on every observed write so a cached pre-DML response cannot be
+     *       served against potentially-trigger-mutated session state.</li>
+     *   <li>{@link AggressiveVerifyMode#OFF} — skip the bump. Wave 1's
+     *       post-function-call verify still runs. A one-time warning is
+     *       logged so the operator sees the explicit opt-out in their logs.</li>
      * </ul>
      *
-     * <p>{@code jdbcUrl} is used as the detection cache key in AUTO mode and
-     * for license-payload overrides; pass {@code null} to skip detection
-     * (treats AUTO as OFF). The probe runs synchronously on {@code real}
-     * before the wrap returns the proxy — the calling thread pays the
-     * one-query cost on the first wrapped connection per URL, after which
-     * the cached decision is free.
+     * <p>{@code jdbcUrl} is accepted for source compatibility with callers
+     * that threaded a URL through the previous smart-auto-enable design
+     * (which probed {@code pg_trigger} on first connection per URL). It is
+     * unused — bumping is always-on under AUTO/ON regardless of URL — and
+     * may be {@code null}. Callers may drop the argument over time.
      */
     public static Connection wrap(Connection real, NativeCache cache,
                                   AggressiveVerifyMode mode, String jdbcUrl) {
-        boolean aggressive = resolveAggressive(real, mode, jdbcUrl);
+        boolean aggressive = resolveAggressive(mode);
         return (Connection) Proxy.newProxyInstance(
             ConnectionProxy.class.getClassLoader(),
             new Class[]{Connection.class},
@@ -88,24 +82,53 @@ public class ConnectionProxy {
     }
 
     /**
-     * Resolve the effective post-DML verify decision. AUTO consults the
-     * detector (which caches per-URL); ON / OFF are pass-through. A null URL
-     * disables detection — the caller deliberately opted out of the
-     * per-URL cache (e.g. a unit-test fake connection where probing
-     * {@code pg_trigger} would have no meaning).
+     * Resolve the effective post-DML bump decision. AUTO / ON / null all
+     * map to {@code true} (bump on every write); OFF maps to {@code false}
+     * and triggers the one-time opt-out warning. No catalog probe — the
+     * Wave 2 design is always-on for the safety-default modes.
      */
-    static boolean resolveAggressive(Connection probeConn, AggressiveVerifyMode mode, String jdbcUrl) {
+    static boolean resolveAggressive(AggressiveVerifyMode mode) {
         if (mode == null) mode = AggressiveVerifyMode.AUTO;
         switch (mode) {
-            case ON:
-                return true;
             case OFF:
+                warnOptOutOnce();
                 return false;
+            case ON:
             case AUTO:
             default:
-                if (jdbcUrl == null) return false;
-                return AggressiveVerifyDetector.isActive(jdbcUrl, probeConn);
+                return true;
         }
+    }
+
+    /**
+     * Process-wide guard so the OFF-mode opt-out warning emits exactly
+     * once per JVM regardless of how many connections are wrapped. The
+     * warning's purpose is forensic — if a future bug report blames
+     * trigger-internal SETs, the log line in the customer's stderr at
+     * startup is the audit trail of the explicit opt-out decision.
+     *
+     * <p>Sent to {@code System.err} so it survives in environments that
+     * haven't wired SLF4J (e.g. minimal CLI invocations); the spring-boot
+     * module logs against SLF4J independently via its own property binding.
+     */
+    private static final java.util.concurrent.atomic.AtomicBoolean OFF_WARNED =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private static void warnOptOutOnce() {
+        if (OFF_WARNED.compareAndSet(false, true)) {
+            System.err.println(
+                "Gold Lapel: AggressiveVerifyMode=OFF — post-DML cache-key "
+                + "isolation disabled. Trigger-internal SET commands "
+                + "(SET ... from inside a trigger body) can now leak across "
+                + "cached rows on the same connection. Switch to AUTO (the "
+                + "default) unless you've audited your schema and confirmed "
+                + "no triggers issue session-level SETs.");
+        }
+    }
+
+    /** Test-only — reset the OFF-mode warn-once latch. */
+    static void resetOptOutWarningForTesting() {
+        OFF_WARNED.set(false);
     }
 
     static class ConnectionHandler implements InvocationHandler {
@@ -119,20 +142,27 @@ public class ConnectionProxy {
         final GucState gucState = new GucState();
         boolean inTransaction = false;
         /**
-         * Whether to schedule a post-DML verify after every observed write
-         * (INSERT / UPDATE / DELETE / MERGE / TRUNCATE / CALL / DDL). Set at
+         * Whether to bump the post-DML sequence counter
+         * ({@link GucState#bumpDmlSeq()}) after every observed write. Set at
          * wrap time per {@link AggressiveVerifyMode}; immutable for the
-         * lifetime of the connection. {@code false} means Wave 1's
-         * post-function-call verify is the only verify trigger — that path
-         * still runs in OFF mode and covers the common stored-function case.
+         * lifetime of the connection.
          *
-         * <p>When {@code true}, the wrapper also fires a verify after writes
-         * to catch trigger-internal SETs (a customer trigger that runs
-         * {@code SET app.user_id = ...} on INSERT). The cost is ~1ms of
-         * post-write verify-pool occupancy per write, doesn't block the
-         * write response, and is the only way to cover the trigger-internal
-         * SET case without server-side instrumentation. See
-         * {@code goldlapel/docs/todos/aggressive-verify-flag.md}.
+         * <p>{@code true} (AUTO/ON, the default) — bump on every observed
+         * INSERT/UPDATE/DELETE/MERGE/TRUNCATE/CALL/DDL so a cached pre-DML
+         * response cannot be served against potentially-trigger-mutated
+         * session state. The cost is a single counter increment + hash
+         * recompute per write — measurably free against the wire-trip a
+         * write already takes — and the safety is universal.
+         *
+         * <p>{@code false} (OFF) — skip the bump. Wave 1's
+         * post-function-call verify still runs. The wrapper logs a one-time
+         * warning on the first OFF-mode wrap so the operator sees the
+         * explicit opt-out in their logs.
+         *
+         * <p>The field name is preserved (rather than renamed to
+         * {@code bumpPostDml}) so existing test scaffolding that reads it
+         * via reflection continues to work. The semantic mapping is
+         * one-to-one: "aggressive verify is on" ↔ "post-DML bump is on."
          */
         final boolean aggressiveVerify;
 
@@ -190,7 +220,24 @@ public class ConnectionProxy {
          * Lazy verify-on-checkout. Called from the user-facing invoke paths
          * <i>before</i> consulting the cache; runs synchronously under the
          * connection lock so the next cache key uses up-to-date state.
-         * Failures leave the dirty flag set — the next call will retry.
+         *
+         * <p>Serialization contract: the user-facing JDBC call sites all
+         * {@code synchronized (connectionLock)} for the entire duration of
+         * their wire interaction. The async post-call verify task (submitted
+         * to {@link #VERIFY_EXECUTOR}) also takes the same lock before
+         * touching the connection. Consequence: a subsequent user query
+         * cannot run while a verify is in flight on the same connection —
+         * it queues behind the lock, picks up the freshly-reconciled state
+         * (or the still-dirty flag, triggering the cache-bypass below), and
+         * proceeds. JDBC's "no concurrent use" rule is preserved.
+         *
+         * <p>Failures leave the dirty flag set. The query that triggered
+         * the failed verify proceeds, but the subsequent cache lookup is
+         * bypassed (see the {@code isDirty()} guards around
+         * {@code cache.get(...)}) and the next call retries the verify.
+         * This means: verify-failure is fail-safe for cache correctness —
+         * we route to the proxy until the wrapper has a trusted view of
+         * server-side state.
          */
         void verifyIfDirty() {
             if (gucState.isDirty()) {
@@ -396,7 +443,7 @@ public class ConnectionProxy {
                 try {
                     ResultSet rs = real.executeQuery(sql);
                     maybeScheduleVerify(sql);
-                    maybeSchedulePostDmlVerify();
+                    maybeBumpDmlSeq();
                     return rs;
                 } catch (SQLException | RuntimeException e) {
                     connHandler.gucState.restoreOrReset(snap);
@@ -441,9 +488,18 @@ public class ConnectionProxy {
                 }
             }
 
-            // Check native cache
+            // Check native cache. If the state is still dirty after the
+            // verify-on-checkout above — i.e. the verify itself failed,
+            // leaving us with no trusted view of server-side state — bypass
+            // L1 entirely and route to the proxy. The current query AND any
+            // subsequent reads stay on the bypass path until the dirty flag
+            // clears (a successful verify on a future invocation will reset
+            // it). Serving a cached row under unknown state risks the exact
+            // GUC-RLS leak this class exists to prevent.
             long stateHash = connHandler.gucState.hash();
-            NativeCache.CacheEntry entry = cache.get(sql, null, stateHash);
+            NativeCache.CacheEntry entry = connHandler.gucState.isDirty()
+                ? null
+                : cache.get(sql, null, stateHash);
             if (entry != null) {
                 // Function-call hits don't trigger a verify either way — the
                 // function never actually ran on this trip (cache served the
@@ -483,7 +539,7 @@ public class ConnectionProxy {
             try {
                 int rows = real.executeUpdate(sql);
                 maybeScheduleVerify(sql);
-                if (isWrite) maybeSchedulePostDmlVerify();
+                if (isWrite) maybeBumpDmlSeq();
                 return rows;
             } catch (SQLException | RuntimeException e) {
                 connHandler.gucState.restoreOrReset(snap);
@@ -502,7 +558,7 @@ public class ConnectionProxy {
             try {
                 boolean result = real.execute(sql);
                 maybeScheduleVerify(sql);
-                if (isWrite) maybeSchedulePostDmlVerify();
+                if (isWrite) maybeBumpDmlSeq();
                 return result;
             } catch (SQLException | RuntimeException e) {
                 connHandler.gucState.restoreOrReset(snap);
@@ -512,24 +568,30 @@ public class ConnectionProxy {
         }
 
         /**
-         * Schedule a post-DML verify if {@link ConnectionHandler#aggressiveVerify}
-         * is set on this connection. Called from the executeQuery / executeUpdate /
-         * execute paths after any write was observed by
-         * {@link #handleWriteInvalidation(String)}, so we cover INSERT / UPDATE /
-         * DELETE / MERGE / TRUNCATE / CALL / DDL — anything {@link NativeCache#detectWritesMulti}
-         * recognises as state-mutating.
+         * Bump the post-DML sequence counter if
+         * {@link ConnectionHandler#aggressiveVerify} is set on this
+         * connection. Called from the executeQuery / executeUpdate / execute
+         * paths after any write was observed by
+         * {@link #handleWriteInvalidation(String)}, so we cover INSERT /
+         * UPDATE / DELETE / MERGE / TRUNCATE / CALL / DDL — anything
+         * {@link NativeCache#detectWritesMulti} recognises as state-mutating.
          *
          * <p>Triggers fire server-side on these statements, and a customer
          * trigger could legitimately {@code SET app.user_id = ...} in its
-         * body; the wrapper has no way to see that SET on the wire. Marking
-         * dirty + queueing a verify means the next user query reconciles
-         * via {@code pg_settings} before consulting the cache. Skipping this
-         * when aggressive mode is off keeps the no-trigger path zero-tax.
+         * body; the wrapper has no way to see that SET on the wire. Bumping
+         * the sequence counter rolls the cache key forward so any subsequent
+         * cacheable read on this connection lands on a fresh slot — the
+         * trigger-mutated session state cannot replay a stale cached row.
+         *
+         * <p>Cheap (single increment + 8-byte mix into the FNV accumulator),
+         * synchronous (no executor pool, no inter-thread coordination), and
+         * universally correct (no probe to be wrong about). Replaces the
+         * earlier smart-auto-enable post-DML verify-query design (commit
+         * 3ad329f in the proxy repo, plus the Java parallel).
          */
-        private void maybeSchedulePostDmlVerify() {
+        private void maybeBumpDmlSeq() {
             if (!connHandler.aggressiveVerify) return;
-            connHandler.gucState.markDirty();
-            connHandler.scheduleVerify();
+            connHandler.gucState.bumpDmlSeq();
         }
 
         /**
@@ -750,7 +812,7 @@ public class ConnectionProxy {
                 try {
                     ResultSet rs = real.executeQuery();
                     maybeScheduleVerify(sql);
-                    maybeSchedulePostDmlVerify();
+                    maybeBumpDmlSeq();
                     return rs;
                 } catch (SQLException | RuntimeException e) {
                     connHandler.gucState.restoreOrReset(snap);
@@ -783,8 +845,14 @@ public class ConnectionProxy {
                 }
             }
 
+            // Dirty-bypass: if verify-on-checkout couldn't reconcile, route
+            // to the proxy rather than risk serving a cached row under
+            // unknown server-side state. See the matching block in
+            // StatementHandler.handleExecuteQuery.
             long stateHash = connHandler.gucState.hash();
-            NativeCache.CacheEntry entry = cache.get(sql, p, stateHash);
+            NativeCache.CacheEntry entry = connHandler.gucState.isDirty()
+                ? null
+                : cache.get(sql, p, stateHash);
             if (entry != null) {
                 // Cache hit — no JDBC call, no opportunity for divergence.
                 // See StatementHandler.handleExecuteQuery for the symmetry
@@ -838,7 +906,7 @@ public class ConnectionProxy {
             try {
                 int rows = real.executeUpdate();
                 maybeScheduleVerify(sql);
-                if (isWrite) maybeSchedulePostDmlVerify();
+                if (isWrite) maybeBumpDmlSeq();
                 return rows;
             } catch (SQLException | RuntimeException e) {
                 connHandler.gucState.restoreOrReset(snap);
@@ -854,7 +922,7 @@ public class ConnectionProxy {
             try {
                 boolean result = real.execute();
                 maybeScheduleVerify(sql);
-                if (isWrite) maybeSchedulePostDmlVerify();
+                if (isWrite) maybeBumpDmlSeq();
                 return result;
             } catch (SQLException | RuntimeException e) {
                 connHandler.gucState.restoreOrReset(snap);
@@ -871,11 +939,10 @@ public class ConnectionProxy {
             }
         }
 
-        /** See {@link StatementHandler#maybeSchedulePostDmlVerify()}. */
-        private void maybeSchedulePostDmlVerify() {
+        /** See {@link StatementHandler#maybeBumpDmlSeq()}. */
+        private void maybeBumpDmlSeq() {
             if (!connHandler.aggressiveVerify) return;
-            connHandler.gucState.markDirty();
-            connHandler.scheduleVerify();
+            connHandler.gucState.bumpDmlSeq();
         }
     }
 
@@ -1011,16 +1078,15 @@ public class ConnectionProxy {
                                     connHandler.gucState.markDirty();
                                     connHandler.scheduleVerify();
                                 } else if (isWrite && connHandler.aggressiveVerify) {
-                                    // Post-DML aggressive verify on the
-                                    // CallableStatement path. CallableStatement
-                                    // is also a legitimate Statement substitute
-                                    // (some apps run plain INSERTs through
+                                    // Post-DML bump on the CallableStatement
+                                    // path. CallableStatement is also a
+                                    // legitimate Statement substitute (some
+                                    // apps run plain INSERTs through
                                     // prepareCall); cover that case too. The
-                                    // function-call branch already covers the
-                                    // CALL/SELECT-fn shapes — this guard
-                                    // catches the bare DML routes.
-                                    connHandler.gucState.markDirty();
-                                    connHandler.scheduleVerify();
+                                    // function-call branch already covers
+                                    // the CALL/SELECT-fn shapes — this
+                                    // guard catches the bare DML routes.
+                                    connHandler.gucState.bumpDmlSeq();
                                 }
                                 return result;
                             } catch (java.lang.reflect.InvocationTargetException ite) {

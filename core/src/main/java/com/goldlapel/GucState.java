@@ -78,12 +78,33 @@ public final class GucState {
     private final TreeMap<String, String> values = new TreeMap<>();
 
     /**
-     * Cached hash of {@link #values}, recomputed on every mutation. {@code 0}
-     * for the empty (default) state — a fresh connection's hash must match
-     * "no GUCs set" cache slots populated by peers, which is exactly what we
-     * want. {@code volatile} for cross-thread visibility (see class doc).
+     * Cached hash of {@link #values} mixed with {@link #dmlSeq}, recomputed
+     * on every mutation. {@code 0} for the empty (default) state — a fresh
+     * connection's hash must match "no GUCs set" cache slots populated by
+     * peers, which is exactly what we want. {@code volatile} for cross-thread
+     * visibility (see class doc).
      */
     private volatile long hash = 0L;
+
+    /**
+     * Monotonic counter bumped by {@link #bumpDmlSeq()} after every observed
+     * INSERT/UPDATE/DELETE/MERGE/TRUNCATE/CALL/DDL. Mixed into {@link #hash}
+     * so each post-DML lookup gets a unique cache key — closes the
+     * trigger-internal-SET correctness gap (a server-side trigger that did
+     * {@code SET app.user_id = ...} would otherwise be invisible to the
+     * wire-side state observer and a cached pre-DML response could be served
+     * under the mutated session state).
+     *
+     * <p>Reset to {@code 0} whenever the rest of the state is wiped (RESET
+     * ALL / DISCARD ALL) so a recycled connection re-converges to a
+     * peer-shareable baseline (hash {@code 0}).
+     *
+     * <p>{@code volatile} mirrors {@link #hash} — the verify executor reads
+     * the state from a worker thread while the user-facing JDBC thread
+     * mutates it; the connection lock in {@link ConnectionProxy} provides
+     * the serialization, the volatile guarantees visibility.
+     */
+    private volatile long dmlSeq = 0L;
 
     /**
      * "State may have shifted server-side without us seeing the wire SET" flag.
@@ -135,6 +156,42 @@ public final class GucState {
     /** Test-only — clear the dirty flag without running a real verify. */
     void clearDirty() {
         dirty = false;
+    }
+
+    /** Current post-DML sequence counter. Visible for testing. */
+    long dmlSeq() {
+        return dmlSeq;
+    }
+
+    /**
+     * Bump the post-DML sequence counter so the next cache-key computation
+     * on this connection produces a fresh slot. Called from the
+     * {@link ConnectionProxy} statement handlers after every observed
+     * INSERT/UPDATE/DELETE/MERGE/TRUNCATE/CALL/DDL.
+     *
+     * <p>The bump means: any subsequent cacheable read on this connection
+     * cannot share a cache slot with a pre-DML read from this same connection
+     * — closing the trigger-internal-SET correctness gap (a server-side
+     * trigger that mutated {@code app.user_id} via {@code SET} from inside
+     * its body would otherwise be invisible to the wire-side state observer,
+     * and a stale cached response could be served under the mutated state).
+     *
+     * <p>This is cache-key isolation, not actual observation of the new GUC
+     * values. A trigger that mutated state produces correct results from PG
+     * itself (PG always knows its own session state); the wrapper just
+     * guarantees the cache can't hand back a stale response keyed on the
+     * previous state. Mirrors the proxy's
+     * {@code ConnectionGucState::mark_post_dml} in {@code src/guc_state.rs}.
+     *
+     * <p>{@code wrapping} arithmetic — {@code Long#sum} -style overflow on a
+     * {@code long} is fine; even at 1 GHz of bumps (an absurd upper bound)
+     * the counter takes ~292 years to wrap, and the worst case at wrap is a
+     * single coincidental cache-key collision with a state hundreds of years
+     * old on a connection that hasn't been recycled since.
+     */
+    public void bumpDmlSeq() {
+        dmlSeq++;
+        recomputeHash();
     }
 
     /**
@@ -190,6 +247,13 @@ public final class GucState {
         }
         values.clear();
         values.putAll(rebuilt);
+        // A successful verify means we've reconciled with the live server
+        // state — the post-DML sequence's reason for existing (cache-key
+        // isolation across an unknown server-side mutation window) is now
+        // closed. Resetting the counter lets this connection re-converge
+        // to the peer-shareable baseline (hash {@code 0} if values is
+        // empty) for its next cacheable read.
+        dmlSeq = 0L;
         recomputeHash();
         dirty = false;
     }
@@ -231,9 +295,11 @@ public final class GucState {
     public static final class Snapshot {
         final TreeMap<String, String> values;
         final long hash;
-        Snapshot(TreeMap<String, String> values, long hash) {
+        final long dmlSeq;
+        Snapshot(TreeMap<String, String> values, long hash, long dmlSeq) {
             this.values = values;
             this.hash = hash;
+            this.dmlSeq = dmlSeq;
         }
     }
 
@@ -251,8 +317,8 @@ public final class GucState {
      * {@link #apply} doesn't ride through into the snapshot.
      */
     public Snapshot snapshot() {
-        if (values.isEmpty() && hash == 0L) return null;
-        return new Snapshot(new TreeMap<>(values), hash);
+        if (values.isEmpty() && hash == 0L && dmlSeq == 0L) return null;
+        return new Snapshot(new TreeMap<>(values), hash, dmlSeq);
     }
 
     /**
@@ -266,8 +332,10 @@ public final class GucState {
         if (snap != null) {
             values.putAll(snap.values);
             hash = snap.hash;
+            dmlSeq = snap.dmlSeq;
         } else {
             hash = 0L;
+            dmlSeq = 0L;
         }
     }
 
@@ -301,9 +369,15 @@ public final class GucState {
                 // teardown. The wrapper doesn't maintain a prepared-statement
                 // cache (the JDBC PreparedStatement objects belong to the
                 // driver, not us), so the state-map effect is identical to
-                // RESET ALL: drop every tracked unsafe GUC.
-                if (!values.isEmpty()) {
+                // RESET ALL: drop every tracked unsafe GUC AND reset
+                // {@link #dmlSeq} so the connection re-converges to the
+                // peer-shareable baseline (a recycled connection should land
+                // on hash {@code 0} so its cache entries can be hit by any
+                // other connection).
+                boolean hadState = !values.isEmpty() || dmlSeq != 0L;
+                if (hadState) {
                     values.clear();
+                    dmlSeq = 0L;
                     recomputeHash();
                 }
                 break;
@@ -356,7 +430,12 @@ public final class GucState {
     }
 
     private void recomputeHash() {
-        if (values.isEmpty()) {
+        // Empty values + zero dmlSeq is the canonical "fresh connection"
+        // state — keep the hash exactly 0 so the cache-slot-sharing
+        // semantics are preserved for the common case (no unsafe SETs, no
+        // DMLs yet). Mirrors the proxy's ConnectionGucState::recompute_hash
+        // in src/guc_state.rs.
+        if (values.isEmpty() && dmlSeq == 0L) {
             hash = 0L;
             return;
         }
@@ -376,6 +455,16 @@ public final class GucState {
             // Record separator between (k,v) pairs.
             acc ^= 0x1EL;
             acc *= 0x100000001b3L;
+        }
+        // Mix in the post-DML sequence so each DML rolls the cache key
+        // forward. Mixed last (after the BTreeMap) so a connection with no
+        // SETs but a non-zero dmlSeq still gets a unique hash distinct
+        // from any peer's "no DMLs yet" baseline.
+        long seq = dmlSeq;
+        for (int i = 0; i < 8; i++) {
+            acc ^= (seq & 0xFFL);
+            acc *= 0x100000001b3L;
+            seq >>>= 8;
         }
         // Avoid the sentinel 0 (which means "empty / baseline state"). Vanishingly
         // rare collision with a real non-empty state, but we'd rather not have to

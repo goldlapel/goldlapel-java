@@ -776,4 +776,190 @@ class GucStateTest {
             }
         }
     }
+
+    // ---- bumpDmlSeq (always-on post-DML cache-key isolation) ----
+
+    @Nested class BumpDmlSeqTest {
+        @Test void bumpFromBaselineChangesHash() {
+            // A fresh connection's hash is 0 (matches peers). After a single
+            // bump the hash is non-zero so the next cache-key lookup uses a
+            // fresh slot — trigger-internal SETs can't replay through.
+            GucState s = new GucState();
+            assertEquals(0L, s.hash());
+            s.bumpDmlSeq();
+            assertNotEquals(0L, s.hash(),
+                "bumpDmlSeq must roll the cache key forward off the baseline");
+            assertEquals(1L, s.dmlSeq());
+        }
+
+        @Test void sequentialBumpsAllYieldDistinctHashes() {
+            // Sequential bumps must each produce a distinct cache slot —
+            // otherwise two consecutive DMLs would share a slot and a
+            // trigger-mutated session state could leak across.
+            GucState s = new GucState();
+            long h0 = s.hash();
+            s.bumpDmlSeq();
+            long h1 = s.hash();
+            s.bumpDmlSeq();
+            long h2 = s.hash();
+            s.bumpDmlSeq();
+            long h3 = s.hash();
+            assertNotEquals(h0, h1);
+            assertNotEquals(h1, h2);
+            assertNotEquals(h2, h3);
+            assertNotEquals(h0, h2);
+            assertNotEquals(h0, h3);
+        }
+
+        @Test void bumpIsolatesFromPeerWithSameUnsafeGuc() {
+            // Two connections both SET app.user_id = '42'. Without bumps,
+            // their hashes match (peer cache-slot sharing). After A does a
+            // DML, A's hash MUST differ from B's so the cache doesn't share
+            // their slots while A is mid-DML window.
+            GucState a = new GucState();
+            GucState b = new GucState();
+            a.observeSql("SET app.user_id = '42'");
+            b.observeSql("SET app.user_id = '42'");
+            assertEquals(a.hash(), b.hash(),
+                "peer state must match before DML");
+            a.bumpDmlSeq();
+            assertNotEquals(a.hash(), b.hash(),
+                "post-DML must isolate from peer");
+        }
+
+        @Test void resetAllResetsDmlSeq() {
+            // RESET ALL wipes session GUCs AND resets the post-DML sequence
+            // — a recycled connection returns to the peer-shareable
+            // baseline (hash 0) so its cache entries can be hit by any
+            // other connection.
+            GucState s = new GucState();
+            s.observeSql("SET app.user_id = '42'");
+            s.bumpDmlSeq();
+            assertNotEquals(0L, s.hash());
+            assertEquals(1L, s.dmlSeq());
+
+            s.observeSql("RESET ALL");
+            assertEquals(0L, s.hash(),
+                "RESET ALL must restore baseline hash (peer-shareable)");
+            assertEquals(0L, s.dmlSeq(),
+                "RESET ALL must reset dml_seq to 0");
+        }
+
+        @Test void discardAllResetsDmlSeq() {
+            // DISCARD ALL behaves like RESET ALL for state-map purposes —
+            // including dml_seq reset.
+            GucState s = new GucState();
+            s.bumpDmlSeq();
+            s.bumpDmlSeq();
+            assertEquals(2L, s.dmlSeq());
+
+            s.observeSql("DISCARD ALL");
+            assertEquals(0L, s.dmlSeq(),
+                "DISCARD ALL must reset dml_seq to 0");
+            assertEquals(0L, s.hash(),
+                "DISCARD ALL must restore baseline hash");
+        }
+
+        @Test void namedResetDoesNotResetDmlSeq() {
+            // RESET <name> removes one named GUC; it doesn't wipe session
+            // state. The dml_seq counter should survive.
+            GucState s = new GucState();
+            s.observeSql("SET app.user_id = '42'");
+            s.bumpDmlSeq();
+            assertEquals(1L, s.dmlSeq());
+
+            s.observeSql("RESET app.user_id");
+            assertEquals(1L, s.dmlSeq(),
+                "named RESET must preserve dml_seq (only RESET ALL/DISCARD ALL reset it)");
+        }
+
+        @Test void verifyResetsDmlSeq() {
+            // A successful verify reconciles against pg_settings — the
+            // reason dml_seq exists (cache-key isolation across an unknown
+            // mutation window) is closed, so reset it.
+            GucState s = new GucState();
+            s.bumpDmlSeq();
+            s.bumpDmlSeq();
+            assertEquals(2L, s.dmlSeq());
+            s.markDirty();
+
+            // Fake a verify against an empty pg_settings result.
+            java.sql.Connection conn = (java.sql.Connection) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(),
+                new Class[]{java.sql.Connection.class},
+                (proxy, method, args) -> {
+                    if ("createStatement".equals(method.getName())) {
+                        return java.lang.reflect.Proxy.newProxyInstance(
+                            getClass().getClassLoader(),
+                            new Class[]{java.sql.Statement.class},
+                            (p2, m2, a2) -> {
+                                switch (m2.getName()) {
+                                    case "executeQuery":
+                                        return java.lang.reflect.Proxy.newProxyInstance(
+                                            getClass().getClassLoader(),
+                                            new Class[]{java.sql.ResultSet.class},
+                                            (p3, m3, a3) -> {
+                                                if ("next".equals(m3.getName())) return Boolean.FALSE;
+                                                if ("close".equals(m3.getName())) return null;
+                                                return null;
+                                            });
+                                    case "close":
+                                        return null;
+                                    default:
+                                        return null;
+                                }
+                            });
+                    }
+                    return null;
+                });
+
+            s.verify(conn);
+            assertEquals(0L, s.dmlSeq(),
+                "successful verify must reset dml_seq");
+            assertEquals(0L, s.hash(),
+                "verify of empty pg_settings + reset dml_seq → baseline hash");
+            assertFalse(s.isDirty());
+        }
+
+        @Test void snapshotAndRestoreRoundTripsDmlSeq() {
+            // The optimistic SET-observation revert path must preserve
+            // dml_seq across snapshot/restore — otherwise a JDBC failure on
+            // a SET would silently undo a bump from an earlier DML on the
+            // same connection.
+            GucState s = new GucState();
+            s.bumpDmlSeq();
+            s.bumpDmlSeq();
+            long midSeq = s.dmlSeq();
+            long midHash = s.hash();
+
+            GucState.Snapshot snap = s.snapshot();
+            // Mutate post-snapshot.
+            s.observeSql("SET app.user_id = '99'");
+            assertNotEquals(midHash, s.hash());
+
+            s.restoreOrReset(snap);
+            assertEquals(midSeq, s.dmlSeq(),
+                "restoreOrReset must preserve dml_seq");
+            assertEquals(midHash, s.hash(),
+                "restoreOrReset must preserve hash");
+        }
+
+        @Test void freshConnectionMatchesPeerAcrossRecycle() {
+            // The end-to-end peer-isolation contract: connection A does
+            // some work (SET + DMLs), gets recycled (RESET ALL), and is
+            // picked up by a new request. Its hash must match a brand-new
+            // connection B's hash — they should share peer cache slots.
+            GucState a = new GucState();
+            a.observeSql("SET app.user_id = '42'");
+            a.bumpDmlSeq();
+            a.bumpDmlSeq();
+            a.observeSql("RESET ALL");
+
+            GucState b = new GucState();
+
+            assertEquals(b.hash(), a.hash(),
+                "recycled connection must converge to peer-shareable baseline");
+            assertEquals(0L, a.hash());
+        }
+    }
 }
