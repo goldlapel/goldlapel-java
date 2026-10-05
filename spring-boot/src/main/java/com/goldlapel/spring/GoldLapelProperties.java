@@ -38,9 +38,11 @@ public class GoldLapelProperties {
 
     /**
      * Proxy listen port (default 7932). The first DataSource's proxy gets it.
-     * Each further upstream gets the next port at or above it whose proxy and
-     * dashboard ports are both free of the proxies already started, so two
-     * DataSources land on 7932 and 7934 (7933 is the first one's dashboard).
+     * DataSources sharing an upstream share its proxy. Each further upstream
+     * gets the next port at or above it whose proxy and dashboard ports are
+     * both free of the proxies already started, so two DataSources land on
+     * 7932 and 7934 (7933 is the first one's dashboard), or on 7932 and 7933
+     * with {@code dashboard-port: 0}.
      */
     public void setProxyPort(int proxyPort) {
         this.proxyPort = proxyPort;
@@ -86,10 +88,10 @@ public class GoldLapelProperties {
     /**
      * Dashboard listen port. When {@code null} (the default), the dashboard
      * port is auto-derived as {@code proxyPort + 1}. Set to {@code 0} to
-     * disable the dashboard entirely.
+     * disable the dashboard on every proxy.
      *
      * <p>With several DataSources pointing at different upstreams, each gets
-     * its own proxy, and this setting applies to the <em>first</em> proxy
+     * its own proxy, and a non-zero port applies to the <em>first</em> proxy
      * only. Later proxies derive their dashboard as their own proxy port + 1,
      * and port allocation skips this port so nothing collides. For example,
      * {@code proxy-port: 7932} with {@code dashboard-port: 8000} gives the

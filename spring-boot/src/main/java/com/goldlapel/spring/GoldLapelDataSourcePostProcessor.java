@@ -26,11 +26,9 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
     private static final String JDBC_PG_PREFIX = "jdbc:postgresql://";
 
     private final GoldLapelProperties properties;
-    private final List<GoldLapel> proxies = new ArrayList<>();
-    // Track which upstream URLs have been assigned which port, so each unique
-    // upstream gets its own proxy instance while duplicate DataSources sharing
-    // the same upstream reuse the same proxy.
-    private final Map<String, Integer> upstreamPorts = new LinkedHashMap<>();
+    // One proxy per unique upstream URL: DataSources sharing an upstream
+    // share its proxy rather than starting a second one on the same port.
+    private final Map<String, GoldLapel> proxies = new LinkedHashMap<>();
     // Every port a proxy started here listens on: its proxy port and its
     // dashboard port (unless the dashboard is disabled).
     private final Set<Integer> claimedPorts = new HashSet<>();
@@ -49,7 +47,7 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
      */
     @Override
     public void destroy() {
-        for (GoldLapel proxy : proxies) {
+        for (GoldLapel proxy : proxies.values()) {
             try {
                 proxy.stop();
             } catch (RuntimeException e) {
@@ -57,6 +55,7 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                 log.warn("Gold Lapel: proxy stop() failed during context shutdown", e);
             }
         }
+        proxies.clear();
     }
 
     @Override
@@ -87,27 +86,50 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
             upstream = injectUserinfo(upstream, dsUser, dsPassword);
         }
 
-        // Assign a port per unique upstream URL. If two DataSource beans point
-        // to the same upstream, they share a proxy's port. An explicit
-        // goldlapel.dashboard-port belongs to the first upstream's proxy only;
-        // the others derive theirs (proxy port + 1).
-        boolean firstUpstream = upstreamPorts.isEmpty()
-                || upstreamPorts.keySet().iterator().next().equals(upstream);
-        Integer dashboardPort = firstUpstream ? properties.getDashboardPort() : null;
-        Integer port = upstreamPorts.get(upstream);
-        if (port == null) {
-            port = claimPorts(dashboardPort);
-            upstreamPorts.put(upstream, port);
+        GoldLapel proxy = proxies.get(upstream);
+        if (proxy == null) {
+            proxy = startProxy(upstream, beanName);
+            proxies.put(upstream, proxy);
+            log.info("Gold Lapel proxy started — {} now routes through localhost:{}",
+                    beanName, proxy.getProxyPort());
+        } else {
+            log.info("Gold Lapel: {} shares the proxy on localhost:{} (same upstream)",
+                    beanName, proxy.getProxyPort());
         }
+
+        // Use the wrapper's JDBC-safe helpers: the PG JDBC driver rejects
+        // inline userinfo (it reads user@host as the hostname), so we set the
+        // URL without userinfo and push the user/password onto the DataSource
+        // via its separate setters (same reflection pattern as setJdbcUrl).
+        setJdbcUrl(ds, proxy.getJdbcUrl());
+        String jdbcUser = proxy.getJdbcUser();
+        String jdbcPassword = proxy.getJdbcPassword();
+        if (jdbcUser != null) {
+            setStringProperty(ds, "setUsername", jdbcUser);
+        }
+        if (jdbcPassword != null) {
+            setStringProperty(ds, "setPassword", jdbcPassword);
+        }
+        return ds;
+    }
+
+    // Start the proxy for a new upstream. A dashboard-port of 0 disables the
+    // dashboard on every proxy; any other explicit dashboard-port belongs to
+    // the first proxy only, and later ones derive theirs (proxy port + 1).
+    private GoldLapel startProxy(String upstream, String beanName) {
+        Integer dashboardPort = properties.getDashboardPort();
+        if (dashboardPort != null && dashboardPort != 0 && !proxies.isEmpty()) {
+            dashboardPort = null;
+        }
+        final Integer assignedDashboardPort = dashboardPort;
+        final int port = claimPorts(dashboardPort);
 
         String extraArgsStr = properties.getExtraArgs();
         Map<String, String> configMap = properties.getConfig();
-        final int assignedPort = port;
 
-        GoldLapel proxy;
         try {
-            proxy = GoldLapel.start(upstream, opts -> {
-                opts.setProxyPort(assignedPort);
+            return GoldLapel.start(upstream, opts -> {
+                opts.setProxyPort(port);
                 if (configMap != null && !configMap.isEmpty()) {
                     opts.setConfig(normalizeCamelCase(configMap));
                 }
@@ -123,8 +145,8 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                 opts.setDisableProxyCache(properties.isDisableProxyCache());
                 opts.setDisableSqloptimize(properties.isDisableSqloptimize());
                 opts.setDisableAutoIndexes(properties.isDisableAutoIndexes());
-                if (dashboardPort != null) {
-                    opts.setDashboardPort(dashboardPort);
+                if (assignedDashboardPort != null) {
+                    opts.setDashboardPort(assignedDashboardPort);
                 }
                 if (properties.getLogLevel() != null) {
                     opts.setLogLevel(properties.getLogLevel());
@@ -146,24 +168,6 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                     "Gold Lapel failed to start proxy for datasource '" + beanName +
                     "' (upstream: " + safeUpstream + ", port: " + port + ")", e);
         }
-
-        proxies.add(proxy);
-        // Use the wrapper's JDBC-safe helpers: the PG JDBC driver rejects
-        // inline userinfo (it reads user@host as the hostname), so we set the
-        // URL without userinfo and push the user/password onto the DataSource
-        // via its separate setters (same reflection pattern as setJdbcUrl).
-        setJdbcUrl(ds, proxy.getJdbcUrl());
-        String jdbcUser = proxy.getJdbcUser();
-        String jdbcPassword = proxy.getJdbcPassword();
-        if (jdbcUser != null) {
-            setStringProperty(ds, "setUsername", jdbcUser);
-        }
-        if (jdbcPassword != null) {
-            setStringProperty(ds, "setPassword", jdbcPassword);
-        }
-
-        log.info("Gold Lapel proxy started — {} now routes through localhost:{}", beanName, port);
-        return ds;
     }
 
     // Pick the smallest proxy port >= goldlapel.proxy-port such that neither it
@@ -186,12 +190,14 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
 
     // Visible for testing
     List<GoldLapel> getProxies() {
-        return proxies;
+        return new ArrayList<>(proxies.values());
     }
 
     // Visible for testing
     Map<String, Integer> getUpstreamPorts() {
-        return upstreamPorts;
+        Map<String, Integer> ports = new LinkedHashMap<>();
+        proxies.forEach((upstream, proxy) -> ports.put(upstream, proxy.getProxyPort()));
+        return ports;
     }
 
     // Extract the JDBC URL from any DataSource implementation. Tries common

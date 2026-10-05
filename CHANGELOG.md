@@ -173,6 +173,10 @@ two ports (proxy and dashboard, proxy + 1), but a second upstream was given
 the next port up — the first proxy's dashboard. Each new upstream now gets
 the smallest port at or above `goldlapel.proxy-port` whose proxy and
 dashboard ports are both unclaimed, so two DataSources land on 7932 and 7934.
-`goldlapel.dashboard-port` now applies to the first proxy only (it used to
-be handed to every proxy, which could never all bind it); later proxies
-derive proxy port + 1, and allocation skips the explicit dashboard port.
+An explicit `goldlapel.dashboard-port` now applies to the first proxy only
+(it used to be handed to every proxy, which could never all bind it); later
+proxies derive proxy port + 1, and allocation skips the explicit dashboard
+port. `goldlapel.dashboard-port: 0` disables the dashboard on every proxy,
+so each claims only its proxy port and they sit on consecutive ports (7932,
+7933). DataSources sharing an upstream now share one proxy — previously
+each started its own process on the same port, which could not bind.
