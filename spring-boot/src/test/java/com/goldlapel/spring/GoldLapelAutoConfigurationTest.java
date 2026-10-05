@@ -2,9 +2,7 @@ package com.goldlapel.spring;
 
 import com.goldlapel.GoldLapel;
 import com.goldlapel.GoldLapelOptions;
-import com.goldlapel.NativeCache;
 import com.zaxxer.hikari.HikariDataSource;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.mockito.invocation.InvocationOnMock;
@@ -44,11 +42,6 @@ class GoldLapelAutoConfigurationTest {
 
     private final ApplicationContextRunner simpleRunner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(GoldLapelAutoConfiguration.class));
-
-    @AfterEach
-    void resetCache() {
-        NativeCache.reset();
-    }
 
     /**
      * Build a MockedStatic that intercepts {@code GoldLapel.start(String, Consumer)}.
@@ -154,8 +147,8 @@ class GoldLapelAutoConfigurationTest {
                     .run(context -> {
                         assertThat(context).hasSingleBean(GoldLapelDataSourcePostProcessor.class);
                         DataSource ds = context.getBean(DataSource.class);
-                        assertThat(ds).isInstanceOf(CachedDataSource.class);
-                        HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
+                        assertThat(ds).isInstanceOf(HikariDataSource.class);
+                        HikariDataSource hikari = (HikariDataSource) ds;
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/testdb");
                         assertThat(captured).hasSize(1);
                     });
@@ -201,8 +194,8 @@ class GoldLapelAutoConfigurationTest {
                             "goldlapel.extra-args=--threshold-duration-ms,200")
                     .run(context -> {
                         DataSource ds = context.getBean(DataSource.class);
-                        assertThat(ds).isInstanceOf(CachedDataSource.class);
-                        HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
+                        assertThat(ds).isInstanceOf(HikariDataSource.class);
+                        HikariDataSource hikari = (HikariDataSource) ds;
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:9999/testdb");
                         assertThat(captured).hasSize(1);
                         assertThat(captured.get(0).getProxyPort()).isEqualTo(9999);
@@ -245,8 +238,8 @@ class GoldLapelAutoConfigurationTest {
             assertThat(ds2.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7933/db2");
 
             assertThat(processor.getProxies()).hasSize(2);
-            assertThat(result1).isInstanceOf(CachedDataSource.class);
-            assertThat(result2).isInstanceOf(CachedDataSource.class);
+            assertThat(result1).isSameAs(ds1);
+            assertThat(result2).isSameAs(ds2);
 
             // Each unique upstream gets its own port
             assertThat(processor.getUpstreamPorts()).hasSize(2);
@@ -292,8 +285,8 @@ class GoldLapelAutoConfigurationTest {
                     .run(context -> {
                         assertThat(context).hasSingleBean(GoldLapelDataSourcePostProcessor.class);
                         DataSource ds = context.getBean(DataSource.class);
-                        assertThat(ds).isInstanceOf(CachedDataSource.class);
-                        HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
+                        assertThat(ds).isInstanceOf(HikariDataSource.class);
+                        HikariDataSource hikari = (HikariDataSource) ds;
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/testdb");
 
                         assertThat(captured).hasSize(1);
@@ -317,8 +310,8 @@ class GoldLapelAutoConfigurationTest {
                             "goldlapel.config.disableN1=true")
                     .run(context -> {
                         DataSource ds = context.getBean(DataSource.class);
-                        assertThat(ds).isInstanceOf(CachedDataSource.class);
-                        HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
+                        assertThat(ds).isInstanceOf(HikariDataSource.class);
+                        HikariDataSource hikari = (HikariDataSource) ds;
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/testdb");
                         assertThat(captured).hasSize(1);
                     });
@@ -339,8 +332,8 @@ class GoldLapelAutoConfigurationTest {
                             "goldlapel.extra-args=--verbose")
                     .run(context -> {
                         DataSource ds = context.getBean(DataSource.class);
-                        assertThat(ds).isInstanceOf(CachedDataSource.class);
-                        HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
+                        assertThat(ds).isInstanceOf(HikariDataSource.class);
+                        HikariDataSource hikari = (HikariDataSource) ds;
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:9000/testdb");
                         assertThat(captured).hasSize(1);
                         assertThat(captured.get(0).getProxyPort()).isEqualTo(9000);
@@ -359,8 +352,8 @@ class GoldLapelAutoConfigurationTest {
                             "spring.datasource.driver-class-name=org.postgresql.Driver")
                     .run(context -> {
                         DataSource ds = context.getBean(DataSource.class);
-                        assertThat(ds).isInstanceOf(CachedDataSource.class);
-                        HikariDataSource hikari = (HikariDataSource) ((CachedDataSource) ds).getDelegate();
+                        assertThat(ds).isInstanceOf(HikariDataSource.class);
+                        HikariDataSource hikari = (HikariDataSource) ds;
                         assertThat(hikari.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/testdb");
                         assertThat(captured).hasSize(1);
                         // Empty config map means setConfig was not called
@@ -435,23 +428,21 @@ class GoldLapelAutoConfigurationTest {
     void normalizeCamelCaseCoercesBooleanAndListValues() {
         Map<String, String> input = Map.of(
                 "disable-n1", "true",
-                "enable-coalescing", "false",
+                "disable-coalescing", "false",
                 "exclude-tables", "users,orders",
                 "pool-size", "30",
                 "mode", "waiter"
         );
         Map<String, Object> result = GoldLapelDataSourcePostProcessor.normalizeCamelCase(input);
         assertThat(result).containsEntry("disableN1", Boolean.TRUE);
-        assertThat(result).containsEntry("enableCoalescing", Boolean.FALSE);
+        assertThat(result).containsEntry("disableCoalescing", Boolean.FALSE);
         assertThat(result).containsEntry("excludeTables", List.of("users", "orders"));
         assertThat(result).containsEntry("poolSize", "30");
         assertThat(result).containsEntry("mode", "waiter");
     }
 
-    // --- native cache tests ---
-
     @Test
-    void wrapsDataSourceWithCachedDataSource() {
+    void returnsTheSameDataSourceUnwrapped() {
         List<GoldLapelOptions> captured = new ArrayList<>();
         try (MockedStatic<GoldLapel> ignored = stubStart(
                 u -> "postgresql://localhost:7932/testdb", captured)) {
@@ -460,279 +451,18 @@ class GoldLapelAutoConfigurationTest {
             ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
-
-            Object result = processor.postProcessAfterInitialization(ds, "dataSource");
-
-            assertThat(result).isInstanceOf(CachedDataSource.class);
-            CachedDataSource cached = (CachedDataSource) result;
-            assertThat(cached.getDelegate()).isSameAs(ds);
-            assertThat(cached.getCache()).isNotNull();
-        }
-    }
-
-    @Test
-    void nativeCacheDisabledReturnsBareDataSource() {
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            HikariDataSource ds = new HikariDataSource();
-            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
-
-            GoldLapelProperties props = new GoldLapelProperties();
-            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             Object result = processor.postProcessAfterInitialization(ds, "dataSource");
 
             assertThat(result).isSameAs(ds);
-            assertThat(result).isNotInstanceOf(CachedDataSource.class);
+            assertThat(ds.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/testdb");
         }
-    }
-
-    @Test
-    void nativeCacheDisabledViaProperty() {
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            dataSourceRunner.withPropertyValues(
-                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
-                            "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.disable-native-cache=true")
-                    .run(context -> {
-                        DataSource ds = context.getBean(DataSource.class);
-                        assertThat(ds).isInstanceOf(HikariDataSource.class);
-                        assertThat(ds).isNotInstanceOf(CachedDataSource.class);
-                        assertThat(((HikariDataSource) ds).getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/testdb");
-                    });
-        }
-    }
-
-    @Test
-    void aggressiveVerifyDefaultsToAuto() {
-        // Wave-2 smart-auto-enable. With no goldlapel.aggressive-verify
-        // property set, the post-processor must forward AUTO to GoldLapelOptions
-        // and construct a CachedDataSource that carries the same mode plus
-        // the JDBC URL the proxy listens on (the detection cache key).
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            HikariDataSource ds = new HikariDataSource();
-            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
-
-            GoldLapelProperties props = new GoldLapelProperties();
-            // aggressiveVerify left at default ("auto").
-            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
-            Object result = processor.postProcessAfterInitialization(ds, "dataSource");
-
-            assertThat(captured).hasSize(1);
-            assertThat(captured.get(0).getAggressiveVerify())
-                    .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
-            assertThat(result).isInstanceOf(CachedDataSource.class);
-            CachedDataSource cached = (CachedDataSource) result;
-            assertThat(cached.aggressiveVerify())
-                    .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
-            assertThat(cached.jdbcUrl())
-                    .isEqualTo("jdbc:postgresql://localhost:7932/testdb");
-        }
-    }
-
-    @Test
-    void aggressiveVerifyOnPropertyForwarded() {
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            dataSourceRunner.withPropertyValues(
-                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
-                            "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.aggressive-verify=on")
-                    .run(context -> {
-                        assertThat(captured).hasSize(1);
-                        assertThat(captured.get(0).getAggressiveVerify())
-                                .isEqualTo(com.goldlapel.AggressiveVerifyMode.ON);
-                        assertThat(context.getBean(DataSource.class))
-                                .isInstanceOf(CachedDataSource.class);
-                        CachedDataSource cached = (CachedDataSource) context.getBean(DataSource.class);
-                        assertThat(cached.aggressiveVerify())
-                                .isEqualTo(com.goldlapel.AggressiveVerifyMode.ON);
-                    });
-        }
-    }
-
-    @Test
-    void aggressiveVerifyOffPropertyForwarded() {
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            dataSourceRunner.withPropertyValues(
-                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
-                            "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.aggressive-verify=off")
-                    .run(context -> {
-                        assertThat(captured).hasSize(1);
-                        assertThat(captured.get(0).getAggressiveVerify())
-                                .isEqualTo(com.goldlapel.AggressiveVerifyMode.OFF);
-                        CachedDataSource cached = (CachedDataSource) context.getBean(DataSource.class);
-                        assertThat(cached.aggressiveVerify())
-                                .isEqualTo(com.goldlapel.AggressiveVerifyMode.OFF);
-                    });
-        }
-    }
-
-    @Test
-    void aggressiveVerifyUnknownStringFallsBackToAuto() {
-        // Concierge, not bouncer: a typo ("agressive") shouldn't quietly
-        // disable a safety feature. Anything we can't parse falls back to
-        // AUTO (the documented default).
-        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify("agressive"))
-                .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
-        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify(null))
-                .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
-        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify(""))
-                .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
-        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify("on"))
-                .isEqualTo(com.goldlapel.AggressiveVerifyMode.ON);
-        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify("OFF"))
-                .isEqualTo(com.goldlapel.AggressiveVerifyMode.OFF);
-        assertThat(GoldLapelDataSourcePostProcessor.resolveAggressiveVerify("Auto"))
-                .isEqualTo(com.goldlapel.AggressiveVerifyMode.AUTO);
-    }
-
-    @Test
-    void disableNativeCacheFlowsThroughToOptions() {
-        // When goldlapel.disable-native-cache=true the property must also be
-        // forwarded into GoldLapelOptions so the wrapper passes the flag to
-        // the binary (the binary uses it to suppress the invalidation feed).
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            dataSourceRunner.withPropertyValues(
-                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
-                            "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.disable-native-cache=true")
-                    .run(context -> {
-                        assertThat(captured).hasSize(1);
-                        assertThat(captured.get(0).isDisableNativeCache()).isTrue();
-                    });
-        }
-    }
-
-    @Test
-    void defaultInvalidationPortIsProxyPortPlusTwo() {
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            HikariDataSource ds = new HikariDataSource();
-            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
-
-            GoldLapelProperties props = new GoldLapelProperties();
-            props.setProxyPort(7932);
-            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
-
-            Object result = processor.postProcessAfterInitialization(ds, "dataSource");
-
-            assertThat(result).isInstanceOf(CachedDataSource.class);
-            // Default invalidation port = proxy port + 2 = 7934
-            // We can't directly check the port used, but we verify the cache was created
-            CachedDataSource cached = (CachedDataSource) result;
-            assertThat(cached.getCache()).isSameAs(NativeCache.getInstance());
-        }
-    }
-
-    @Test
-    void customInvalidationPort() {
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            HikariDataSource ds = new HikariDataSource();
-            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
-
-            GoldLapelProperties props = new GoldLapelProperties();
-            props.setInvalidationPort(9999);
-            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
-
-            Object result = processor.postProcessAfterInitialization(ds, "dataSource");
-
-            assertThat(result).isInstanceOf(CachedDataSource.class);
-            CachedDataSource cached = (CachedDataSource) result;
-            assertThat(cached.getCache()).isNotNull();
-
-            // Both sides of the invalidation port must agree — the wrapper
-            // connects to `invalidationPort` and the spawned proxy must
-            // listen on the same port. Pre-fix, only the wrapper-side
-            // connectInvalidation() saw the configured port; the proxy
-            // launched on its default proxy_port + 2 (mismatch).
-            // (java-spring-invalidation-port-forwarding-gap.md, 2026-05-04)
-            assertThat(captured).hasSize(1);
-            assertThat(captured.get(0).getInvalidationPort()).isEqualTo(9999);
-        }
-    }
-
-    @Test
-    void defaultInvalidationPortNotForwarded() {
-        // The "unset" sentinel for invalidationPort is 0 (matching how the
-        // property defaults in GoldLapelProperties). When the user hasn't
-        // touched it, we must NOT forward to GoldLapelOptions — the core
-        // module derives invalidationPort = proxyPort + 2 itself, and
-        // forcing 0 would override that with an invalid port.
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            HikariDataSource ds = new HikariDataSource();
-            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
-
-            GoldLapelProperties props = new GoldLapelProperties();
-            // invalidationPort untouched — stays at default 0.
-            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
-
-            processor.postProcessAfterInitialization(ds, "dataSource");
-
-            assertThat(captured).hasSize(1);
-            assertThat(captured.get(0).getInvalidationPort()).isNull();
-        }
-    }
-
-    @Test
-    void customInvalidationPortViaProperty() {
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            dataSourceRunner.withPropertyValues(
-                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
-                            "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.invalidation-port=8888")
-                    .run(context -> {
-                        DataSource ds = context.getBean(DataSource.class);
-                        assertThat(ds).isInstanceOf(CachedDataSource.class);
-                    });
-        }
-    }
-
-    @Test
-    void cachedDataSourceDelegatesUnwrap() throws Exception {
-        HikariDataSource hikari = new HikariDataSource();
-        NativeCache cache = NativeCache.getInstance();
-        CachedDataSource cached = new CachedDataSource(hikari, cache);
-
-        assertThat(cached.isWrapperFor(CachedDataSource.class)).isTrue();
-        assertThat(cached.unwrap(CachedDataSource.class)).isSameAs(cached);
     }
 
     @Test
     void propertiesDefaults() {
         GoldLapelProperties props = new GoldLapelProperties();
-        assertThat(props.isDisableNativeCache()).isFalse();
-        assertThat(props.getInvalidationPort()).isEqualTo(0);
         assertThat(props.isEnabled()).isTrue();
         assertThat(props.getProxyPort()).isEqualTo(7932);
         // Top-level options surfaced from GoldLapelOptions: defaults must
@@ -743,17 +473,14 @@ class GoldLapelAutoConfigurationTest {
         assertThat(props.getMeshTag()).isNull();
         // Round 2 additions: dashboardPort, logLevel, mode, license,
         // configFile all default to null (= no override → core default
-        // behavior). disableNativeCache defaults to false (cache active).
+        // behavior).
         assertThat(props.getDashboardPort()).isNull();
         assertThat(props.getLogLevel()).isNull();
         assertThat(props.getMode()).isNull();
         assertThat(props.getLicense()).isNull();
         assertThat(props.getConfigFile()).isNull();
-        // Wave 2.5 (Model B pivot): the four promoted disable flags default
-        // to false. enableProxyCacheForWrappers is gone — per-connection
-        // wrapper-skip is the only proxy-cache routing today.
+        // The three promoted disable flags default to false.
         assertThat(props.isDisableProxyCache()).isFalse();
-        assertThat(props.isDisableMatviews()).isFalse();
         assertThat(props.isDisableSqloptimize()).isFalse();
         assertThat(props.isDisableAutoIndexes()).isFalse();
     }
@@ -858,23 +585,6 @@ class GoldLapelAutoConfigurationTest {
     }
 
     @Test
-    void disableMatviewsViaKebabCaseProperty() {
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            dataSourceRunner.withPropertyValues(
-                            "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
-                            "spring.datasource.driver-class-name=org.postgresql.Driver",
-                            "goldlapel.disable-matviews=true")
-                    .run(context -> {
-                        assertThat(captured).hasSize(1);
-                        assertThat(captured.get(0).isDisableMatviews()).isTrue();
-                    });
-        }
-    }
-
-    @Test
     void disableSqloptimizeViaKebabCaseProperty() {
         List<GoldLapelOptions> captured = new ArrayList<>();
         try (MockedStatic<GoldLapel> ignored = stubStart(
@@ -909,7 +619,7 @@ class GoldLapelAutoConfigurationTest {
     }
 
     @Test
-    void allFourPromotedDisableFlagsTogether() {
+    void allPromotedDisableFlagsTogether() {
         List<GoldLapelOptions> captured = new ArrayList<>();
         try (MockedStatic<GoldLapel> ignored = stubStart(
                 u -> "postgresql://localhost:7932/testdb", captured)) {
@@ -918,14 +628,12 @@ class GoldLapelAutoConfigurationTest {
                             "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
                             "spring.datasource.driver-class-name=org.postgresql.Driver",
                             "goldlapel.disable-proxy-cache=true",
-                            "goldlapel.disable-matviews=true",
                             "goldlapel.disable-sqloptimize=true",
                             "goldlapel.disable-auto-indexes=true")
                     .run(context -> {
                         assertThat(captured).hasSize(1);
                         GoldLapelOptions opts = captured.get(0);
                         assertThat(opts.isDisableProxyCache()).isTrue();
-                        assertThat(opts.isDisableMatviews()).isTrue();
                         assertThat(opts.isDisableSqloptimize()).isTrue();
                         assertThat(opts.isDisableAutoIndexes()).isTrue();
                     });
@@ -984,7 +692,6 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(captured.get(0).getMode()).isNull();
                         assertThat(captured.get(0).getLicense()).isNull();
                         assertThat(captured.get(0).getConfigFile()).isNull();
-                        assertThat(captured.get(0).isDisableNativeCache()).isFalse();
                     });
         }
     }
@@ -1082,9 +789,9 @@ class GoldLapelAutoConfigurationTest {
         // GoldLapelOptions through GoldLapelProperties bound from
         // application-style properties + verified end-to-end. Combines the
         // round-1 surface (silent/mesh/meshTag), round-2 additions
-        // (dashboardPort/logLevel/mode/license/configFile/disableNativeCache),
-        // and Wave-2.5 promoted disable flags (disableProxyCache /
-        // disableMatviews / disableSqloptimize / disableAutoIndexes).
+        // (dashboardPort/logLevel/mode/license/configFile), and the promoted
+        // disable flags (disableProxyCache / disableSqloptimize /
+        // disableAutoIndexes).
         List<GoldLapelOptions> captured = new ArrayList<>();
         try (MockedStatic<GoldLapel> ignored = stubStart(
                 u -> "postgresql://localhost:7932/testdb", captured)) {
@@ -1100,9 +807,7 @@ class GoldLapelAutoConfigurationTest {
                             "goldlapel.mode=consideration",
                             "goldlapel.license=/etc/goldlapel/license.json",
                             "goldlapel.config-file=/etc/goldlapel/goldlapel.toml",
-                            "goldlapel.disable-native-cache=true",
                             "goldlapel.disable-proxy-cache=true",
-                            "goldlapel.disable-matviews=true",
                             "goldlapel.disable-sqloptimize=true",
                             "goldlapel.disable-auto-indexes=true")
                     .run(context -> {
@@ -1118,10 +823,8 @@ class GoldLapelAutoConfigurationTest {
                         assertThat(opts.getMode()).isEqualTo("consideration");
                         assertThat(opts.getLicense()).isEqualTo("/etc/goldlapel/license.json");
                         assertThat(opts.getConfigFile()).isEqualTo("/etc/goldlapel/goldlapel.toml");
-                        assertThat(opts.isDisableNativeCache()).isTrue();
-                        // Wave 2.5: promoted disable flags
+                        // Promoted disable flags
                         assertThat(opts.isDisableProxyCache()).isTrue();
-                        assertThat(opts.isDisableMatviews()).isTrue();
                         assertThat(opts.isDisableSqloptimize()).isTrue();
                         assertThat(opts.isDisableAutoIndexes()).isTrue();
                         // Existing options still wired correctly alongside
@@ -1163,7 +866,6 @@ class GoldLapelAutoConfigurationTest {
             DataSourceWithGetUrl ds = new DataSourceWithGetUrl("jdbc:postgresql://host:5432/db");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             Object result = processor.postProcessAfterInitialization(ds, "dataSource");
@@ -1190,7 +892,6 @@ class GoldLapelAutoConfigurationTest {
             ds.setJdbcUrl("jdbc:postgresql://alice:s3cret@upstream-host:5432/db");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds, "dataSource");
@@ -1222,7 +923,6 @@ class GoldLapelAutoConfigurationTest {
             ds.setPassword("s3cret");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds, "dataSource");
@@ -1249,7 +949,6 @@ class GoldLapelAutoConfigurationTest {
             ds.setPassword("p@ss:w/rd");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds, "dataSource");
@@ -1276,7 +975,6 @@ class GoldLapelAutoConfigurationTest {
             ds.setPassword("otherpw");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds, "dataSource");
@@ -1428,7 +1126,6 @@ class GoldLapelAutoConfigurationTest {
             ds2.setJdbcUrl("jdbc:postgresql://host2:5432/db2");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds1, "ds1");
@@ -1490,7 +1187,6 @@ class GoldLapelAutoConfigurationTest {
             ds2.setJdbcUrl("jdbc:postgresql://host2:5432/db2");
 
             GoldLapelProperties props = new GoldLapelProperties();
-            props.setDisableNativeCache(true);
             GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
 
             processor.postProcessAfterInitialization(ds1, "ds1");
@@ -1521,102 +1217,6 @@ class GoldLapelAutoConfigurationTest {
 
             assertThat(result).isSameAs(bean);
             stat.verify(() -> GoldLapel.start(anyString(), any()), times(0));
-        }
-    }
-
-    // ---- HikariCP connectionInitSql wiring (java-rls-hardening, 2026-05-05) ----
-    //
-    // GoldLapelDataSourcePostProcessor.applyHikariConnectionInitSql sets
-    // connectionInitSql=DISCARD ALL on each HikariDataSource it processes,
-    // so each freshly-created physical connection starts with clean session
-    // GUCs. Wires Hikari-specific behaviour without compile-coupling to the
-    // pool API. User-configured init SQL is respected.
-
-    @Test
-    void hikariConnectionInitSqlSetToDiscardAllByDefault() {
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            HikariDataSource ds = new HikariDataSource();
-            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
-            // No user-set connectionInitSql: GL must wire DISCARD ALL.
-
-            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(
-                    new GoldLapelProperties());
-            processor.postProcessAfterInitialization(ds, "dataSource");
-
-            assertThat(ds.getConnectionInitSql())
-                .as("Gold Lapel must default Hikari connectionInitSql to DISCARD ALL " +
-                    "for GUC-RLS cache safety on connection acquire")
-                .isEqualTo("DISCARD ALL");
-        }
-    }
-
-    @Test
-    void hikariConnectionInitSqlRespectsUserConfiguredValue() {
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            HikariDataSource ds = new HikariDataSource();
-            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
-            // User has their own init SQL — GL must not stomp on it.
-            ds.setConnectionInitSql("SET application_name = 'tenant-svc'");
-
-            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(
-                    new GoldLapelProperties());
-            processor.postProcessAfterInitialization(ds, "dataSource");
-
-            assertThat(ds.getConnectionInitSql())
-                .as("Gold Lapel must leave a user-configured connectionInitSql alone")
-                .isEqualTo("SET application_name = 'tenant-svc'");
-        }
-    }
-
-    @Test
-    void hikariConnectionInitSqlReplacesEmptyConfiguredValue() {
-        // An explicitly-empty connectionInitSql (whitespace-only) is treated
-        // as "unset" — Hikari accepts the empty string and would silently
-        // skip the init SQL. Reaching DISCARD ALL there improves the user's
-        // safety posture without overriding a real value.
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            HikariDataSource ds = new HikariDataSource();
-            ds.setJdbcUrl("jdbc:postgresql://localhost:5432/testdb");
-            ds.setConnectionInitSql("   ");
-
-            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(
-                    new GoldLapelProperties());
-            processor.postProcessAfterInitialization(ds, "dataSource");
-
-            assertThat(ds.getConnectionInitSql()).isEqualTo("DISCARD ALL");
-        }
-    }
-
-    @Test
-    void nonHikariDataSourceIsNotTouched() {
-        // The applyHikariConnectionInitSql helper must skip non-Hikari pools
-        // — they get GUC-RLS safety from the wrapper-side verify-on-checkout
-        // fallback path instead.
-        List<GoldLapelOptions> captured = new ArrayList<>();
-        try (MockedStatic<GoldLapel> ignored = stubStart(
-                u -> "postgresql://localhost:7932/testdb", captured)) {
-
-            DataSourceWithGetUrl ds = new DataSourceWithGetUrl(
-                "jdbc:postgresql://localhost:5432/testdb");
-
-            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(
-                    new GoldLapelProperties());
-            // Should not throw — the helper is a no-op for non-Hikari classes.
-            assertThat(processor).isNotNull();
-            // Sanity check the helper directly.
-            GoldLapelDataSourcePostProcessor.applyHikariConnectionInitSql(ds, "dataSource");
-            // No method to assert on (DataSourceWithGetUrl has no
-            // connectionInitSql), but the absence of an exception confirms
-            // the reflection check by class name short-circuits cleanly.
         }
     }
 

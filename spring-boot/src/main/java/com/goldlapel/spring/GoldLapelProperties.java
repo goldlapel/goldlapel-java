@@ -11,21 +11,17 @@ public class GoldLapelProperties {
     private boolean enabled = true;
     private int proxyPort = 7932;
     private Integer dashboardPort = null;
-    private int invalidationPort = 0;
     private String extraArgs = "";
     private String logLevel = null;
     private String mode = null;
     private String license = null;
     private String configFile = null;
-    private boolean disableNativeCache = false;
     private boolean silent = false;
     private boolean mesh = false;
     private String meshTag = null;
     private boolean disableProxyCache = false;
-    private boolean disableMatviews = false;
     private boolean disableSqloptimize = false;
     private boolean disableAutoIndexes = false;
-    private String aggressiveVerify = "auto";
     private Map<String, String> config = new LinkedHashMap<>();
 
     public boolean isEnabled() {
@@ -75,14 +71,6 @@ public class GoldLapelProperties {
 
     public void setConfig(Map<String, String> config) {
         this.config = config;
-    }
-
-    public int getInvalidationPort() {
-        return invalidationPort;
-    }
-
-    public void setInvalidationPort(int invalidationPort) {
-        this.invalidationPort = invalidationPort;
     }
 
     public Integer getDashboardPort() {
@@ -176,28 +164,6 @@ public class GoldLapelProperties {
         this.configFile = configFile;
     }
 
-    public boolean isDisableNativeCache() {
-        return disableNativeCache;
-    }
-
-    /**
-     * Whether to disable the in-process native cache layer. The native
-     * cache wraps the {@link javax.sql.DataSource} bean in a
-     * {@link CachedDataSource} that consults an in-process {@link
-     * com.goldlapel.NativeCache} before falling through to the underlying
-     * pool — fast lookups on repeat queries, with the proxy keeping the
-     * cache fresh via the invalidation port. Spring users reach for this
-     * to opt out (e.g. they have their own application-level cache and
-     * want the proxy to handle caching exclusively, or they're debugging
-     * a query behavior issue and want to eliminate the cache layer).
-     *
-     * <p>Default {@code false} (the cache is active). YAML to disable:
-     * {@code goldlapel.disable-native-cache: true}.
-     */
-    public void setDisableNativeCache(boolean disableNativeCache) {
-        this.disableNativeCache = disableNativeCache;
-    }
-
     public boolean isSilent() {
         return silent;
     }
@@ -259,31 +225,12 @@ public class GoldLapelProperties {
      * {@code --disable-proxy-cache}. Spring users reach for this when
      * the proxy-side cache is causing operational pain (debugging stale
      * data, isolating an invalidation bug) and they want to keep every
-     * other Gold Lapel feature on. Distinct from
-     * {@link #isDisableNativeCache()}, which toggles the wrapper-side
-     * (in-process) cache.
+     * other Gold Lapel feature on.
      *
      * <p>YAML: {@code goldlapel.disable-proxy-cache: true}.
      */
     public void setDisableProxyCache(boolean disableProxyCache) {
         this.disableProxyCache = disableProxyCache;
-    }
-
-    public boolean isDisableMatviews() {
-        return disableMatviews;
-    }
-
-    /**
-     * Whether to disable automatic materialized-view creation. Default
-     * {@code false}. Maps 1:1 to the proxy CLI flag {@code --disable-matviews}.
-     * Reach for this in environments where matviews would conflict with an
-     * existing migration / ownership model, or while debugging which Gold
-     * Lapel optimization is responsible for an observed behaviour change.
-     *
-     * <p>YAML: {@code goldlapel.disable-matviews: true}.
-     */
-    public void setDisableMatviews(boolean disableMatviews) {
-        this.disableMatviews = disableMatviews;
     }
 
     public boolean isDisableSqloptimize() {
@@ -294,7 +241,7 @@ public class GoldLapelProperties {
      * Whether to disable the SQL-rewrite optimization pipeline ("sqloptimize").
      * Default {@code false}. Maps 1:1 to the proxy CLI flag
      * {@code --disable-sqloptimize}. Disable to bypass per-kind SQL
-     * rewriting while keeping caching, matviews, and auto-indexes active.
+     * rewriting while keeping caching and auto-indexes active.
      *
      * <p>YAML: {@code goldlapel.disable-sqloptimize: true}.
      */
@@ -317,39 +264,5 @@ public class GoldLapelProperties {
      */
     public void setDisableAutoIndexes(boolean disableAutoIndexes) {
         this.disableAutoIndexes = disableAutoIndexes;
-    }
-
-    public String getAggressiveVerify() {
-        return aggressiveVerify;
-    }
-
-    /**
-     * Post-DML aggressive-verify mode. Accepts {@code auto} (default),
-     * {@code on}, or {@code off} (case-insensitive). The boolean spellings
-     * {@code true}/{@code false} also work for convenience but the
-     * canonical YAML values are the three named ones.
-     *
-     * <p>{@code auto} (default) and {@code on} bump the per-connection
-     * post-DML sequence counter after every observed INSERT/UPDATE/DELETE/
-     * MERGE/TRUNCATE/CALL/DDL, rolling the wrapper-side cache key forward
-     * so a cached pre-DML response cannot be served against
-     * potentially-trigger-mutated session state. {@code off} skips the
-     * bump (peer-shareable cache slot post-DML) and logs a one-time
-     * warning at startup — use only when you've audited your schema and
-     * confirmed no triggers issue session-level SETs from inside their
-     * bodies. Wave 1's post-function-call verify still runs in OFF mode.
-     *
-     * <p>Background: Wave 1's verify covers stored functions/procedures.
-     * This setting controls the Wave 2 expansion to cover trigger-internal
-     * SETs — see {@code goldlapel/docs/todos/aggressive-verify-flag.md}.
-     * Earlier iterations gated the bump on a {@code pg_trigger} probe; the
-     * always-on bump replaces that design because the cost is a single
-     * counter increment per write (measurably free) and the safety is
-     * universal.
-     *
-     * <p>YAML: {@code goldlapel.aggressive-verify: on}.
-     */
-    public void setAggressiveVerify(String aggressiveVerify) {
-        this.aggressiveVerify = aggressiveVerify;
     }
 }

@@ -1,8 +1,6 @@
 package com.goldlapel.spring;
 
-import com.goldlapel.AggressiveVerifyMode;
 import com.goldlapel.GoldLapel;
-import com.goldlapel.NativeCache;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeansException;
@@ -73,19 +71,6 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
             return bean;
         }
 
-        // GUC-RLS hardening (java-rls-hardening, 2026-05-05). HikariCP doesn't
-        // issue any "wipe session state" command on connection acquire by
-        // default — pooled connections retain GUCs (and session-level state
-        // generally) from whichever request released them last. For RLS-style
-        // patterns where one request sets `app.user_id` per-tenant, that
-        // means the next request can inherit a stale identity. Wire HikariCP's
-        // `connectionInitSql` to `DISCARD ALL` so each freshly-created
-        // physical connection starts with clean state. We don't override a
-        // user-configured value (their setup wins); we don't apply this to
-        // non-Hikari pools (out of scope for v1; they get the wrapper-side
-        // verify-on-checkout fallback instead).
-        applyHikariConnectionInitSql(ds, beanName);
-
         String upstream = jdbcUrl.substring(JDBC_PREFIX.length());
 
         // If the DataSource carries credentials as separate properties
@@ -125,22 +110,10 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                     opts.setMeshTag(properties.getMeshTag());
                 }
                 opts.setDisableProxyCache(properties.isDisableProxyCache());
-                opts.setDisableMatviews(properties.isDisableMatviews());
                 opts.setDisableSqloptimize(properties.isDisableSqloptimize());
                 opts.setDisableAutoIndexes(properties.isDisableAutoIndexes());
                 if (properties.getDashboardPort() != null) {
                     opts.setDashboardPort(properties.getDashboardPort());
-                }
-                // Forward an explicitly-configured invalidation port to the
-                // spawned proxy so the wrapper-side connectInvalidation() port
-                // (read further down) and the proxy-side listener agree. Pre-
-                // fix, GoldLapelProperties.invalidationPort fed only the
-                // wrapper-side connect, leaving the proxy on its default
-                // proxy_port + 2 — mismatch → invalidation socket failure.
-                // 0 is the "unset" sentinel here (default), so only forward
-                // when the user actually set a value.
-                if (properties.getInvalidationPort() != 0) {
-                    opts.setInvalidationPort(properties.getInvalidationPort());
                 }
                 if (properties.getLogLevel() != null) {
                     opts.setLogLevel(properties.getLogLevel());
@@ -154,8 +127,6 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                 if (properties.getConfigFile() != null) {
                     opts.setConfigFile(properties.getConfigFile());
                 }
-                opts.setDisableNativeCache(properties.isDisableNativeCache());
-                opts.setAggressiveVerify(resolveAggressiveVerify(properties.getAggressiveVerify()));
                 opts.setClient("spring-boot");
             });
         } catch (RuntimeException e) {
@@ -181,41 +152,7 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
         }
 
         log.info("Gold Lapel proxy started — {} now routes through localhost:{}", beanName, port);
-
-        if (properties.isDisableNativeCache()) {
-            return ds;
-        }
-
-        int invPort = properties.getInvalidationPort();
-        if (invPort == 0) {
-            invPort = port + 2;
-        }
-        NativeCache cache = NativeCache.getInstance();
-        cache.connectInvalidation(invPort);
-
-        log.info("Gold Lapel native cache enabled for {} (invalidation port {})", beanName, invPort);
-
-        // Thread the aggressive-verify mode + the proxy's JDBC URL into the
-        // wrapped DataSource so the per-connection wrap path picks the right
-        // detection cache key. The URL is the proxy's URL (the one the
-        // JDBC driver actually connects to) — that's what every connection
-        // out of this DataSource will use, and it's the right key for the
-        // first-connection probe. Routing the original upstream URL would
-        // probe pg_trigger via the proxy on a different port and key the
-        // cache off a string the user pool never actually opens.
-        AggressiveVerifyMode mode = resolveAggressiveVerify(properties.getAggressiveVerify());
-        return new CachedDataSource(ds, cache, mode, proxy.getJdbcUrl());
-    }
-
-    /**
-     * Map the {@code goldlapel.aggressive-verify} string property onto an
-     * {@link AggressiveVerifyMode}. Falls back to {@link AggressiveVerifyMode#AUTO}
-     * for null / unrecognised inputs (matches the property's documented
-     * default — a typo shouldn't disable a safety feature).
-     */
-    static AggressiveVerifyMode resolveAggressiveVerify(String raw) {
-        AggressiveVerifyMode parsed = AggressiveVerifyMode.parse(raw);
-        return parsed == null ? AggressiveVerifyMode.AUTO : parsed;
+        return ds;
     }
 
     // Visible for testing
@@ -226,62 +163,6 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
     // Visible for testing
     Map<String, Integer> getUpstreamPorts() {
         return upstreamPorts;
-    }
-
-    /**
-     * Wire HikariCP's {@code connectionInitSql} to {@code DISCARD ALL} so each
-     * physical connection starts with clean session state — wipes any GUC
-     * left behind by a prior pooled checkout. No-op for non-Hikari
-     * DataSources (unrecognised pools fall through to the wrapper-side
-     * verify-on-checkout fallback). No-op when the user has already set a
-     * non-empty {@code connectionInitSql} — their value wins, on the
-     * assumption that anyone who customised it has a deliberate reason
-     * (e.g. they're already issuing {@code DISCARD ALL; SET SESSION ...}
-     * from their own init SQL).
-     *
-     * <p>Reflection-based so the spring-boot module doesn't have to
-     * compile-depend on HikariCP's internal API surface (the public
-     * {@code HikariDataSource} class is stable, but using reflection here
-     * keeps us robust against minor-version method-signature drift and
-     * lets us share this code path with non-Hikari Hikari-look-alikes that
-     * happen to expose the same setter shape).
-     */
-    static void applyHikariConnectionInitSql(DataSource ds, String beanName) {
-        // HikariDataSource is the canonical class; check by class name rather
-        // than instanceof to avoid pulling HikariCP into the auto-config
-        // hot-load path when the user is on a different pool.
-        String className = ds.getClass().getName();
-        if (!className.equals("com.zaxxer.hikari.HikariDataSource")) {
-            return;
-        }
-        try {
-            Method getter = ds.getClass().getMethod("getConnectionInitSql");
-            Object existing = getter.invoke(ds);
-            if (existing instanceof String s && !s.isBlank()) {
-                // User-configured init SQL — leave alone.
-                log.debug(
-                    "Gold Lapel: HikariDataSource '{}' already has connectionInitSql='{}', " +
-                    "leaving unchanged (Gold Lapel relies on the wrapper-side verify-on-checkout " +
-                    "fallback for GUC-RLS safety in this case)", beanName, s);
-                return;
-            }
-            Method setter = ds.getClass().getMethod("setConnectionInitSql", String.class);
-            setter.invoke(ds, "DISCARD ALL");
-            log.info(
-                "Gold Lapel: wired HikariDataSource '{}' connectionInitSql=\"DISCARD ALL\" " +
-                "for GUC-RLS cache safety (clears session GUCs on each new physical connection)",
-                beanName);
-        } catch (NoSuchMethodException e) {
-            // Older HikariCP without these getters/setters — extremely
-            // unlikely in practice (the API has been stable for years).
-            // Silently fall through to the verify-on-checkout fallback.
-            log.debug("Gold Lapel: HikariDataSource '{}' missing connectionInitSql accessors", beanName);
-        } catch (Exception e) {
-            log.warn(
-                "Gold Lapel: failed to wire connectionInitSql on HikariDataSource '{}'; " +
-                "GUC-RLS safety falls back to the wrapper-side verify-on-checkout path",
-                beanName, e);
-        }
     }
 
     // Extract the JDBC URL from any DataSource implementation. Tries common

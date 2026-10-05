@@ -7,7 +7,6 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -115,10 +114,9 @@ class ExtractBinaryTest {
 class MakeProxyUrlTest {
 
     // The wrapper appends `application_name=goldlapel:java:<version>` to every
-    // rewritten URL so the proxy can classify wrapper-vs-raw traffic and skip
-    // the proxy cache for wrappers (they have their own native cache). PGAPPNAME
-    // is not set in the test JVM; if it ever were, callers would see different
-    // URLs.
+    // rewritten URL so its connections are recognisable in pg_stat_activity.
+    // PGAPPNAME is not set in the test JVM; if it ever were, callers would see
+    // different URLs.
     private static final String APP_NAME_SUFFIX =
         "application_name=" + GoldLapel.applicationNameMarker();
 
@@ -232,9 +230,8 @@ class MakeProxyUrlTest {
 
 
 class ApplicationNameMarkerTest {
-    // Proxy-cache router architecture: wrappers identify themselves to the
-    // proxy via PG `application_name` so the proxy can gate the proxy cache
-    // (wrappers have their own native cache; raw clients don't).
+    // Wrappers identify themselves via PG `application_name`; the proxy
+    // caches them like any other client.
 
     @Test
     void markerHasGoldlapelJavaShape() {
@@ -465,23 +462,6 @@ class DashboardUrlTest {
             () -> GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts)
         );
     }
-
-    @Test
-    void invalidationPortDerivesFromCustomProxyPort() {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setProxyPort(17932);
-        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
-        assertEquals(17934, gl.invalidationPort());
-    }
-
-    @Test
-    void explicitInvalidationPortOverridesDerivation() {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setProxyPort(17932);
-        opts.setInvalidationPort(9999);
-        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
-        assertEquals(9999, gl.invalidationPort());
-    }
 }
 
 
@@ -659,33 +639,45 @@ class ConfigKeysTest {
         Set<String> keys = GoldLapel.configKeys();
         // Tuning knobs still live in the structured config map.
         assertTrue(keys.contains("poolSize"));
-        // disableConsolidation is a representative tuning-only flag that
+        // disableCoalescing is a representative tuning-only flag that
         // wasn't promoted to a top-level option (its CLI flag exists, but
         // the option surface intentionally keeps the long tail of disable_*
         // tuning knobs inside the config bag).
-        assertTrue(keys.contains("disableConsolidation"));
+        assertTrue(keys.contains("disableCoalescing"));
         assertTrue(keys.contains("replica"));
     }
 
     @Test
     void doesNotContainPromotedTopLevelKeys() {
-        // Canonical surface: mode, logLevel, dashboardPort, invalidationPort,
-        // client, config, license are top-level options on GoldLapelOptions,
-        // not structured-config keys. The four promoted disable flags
-        // (disableProxyCache / disableMatviews / disableSqloptimize /
-        // disableAutoIndexes) are likewise top-level, never config-map keys.
+        // Canonical surface: mode, logLevel, dashboardPort, client, config,
+        // license are top-level options on GoldLapelOptions, not
+        // structured-config keys. The three promoted disable flags
+        // (disableProxyCache / disableSqloptimize / disableAutoIndexes) are
+        // likewise top-level, never config-map keys.
         Set<String> keys = GoldLapel.configKeys();
         assertFalse(keys.contains("mode"));
         assertFalse(keys.contains("logLevel"));
         assertFalse(keys.contains("dashboardPort"));
-        assertFalse(keys.contains("invalidationPort"));
         assertFalse(keys.contains("client"));
         assertFalse(keys.contains("config"));
         assertFalse(keys.contains("license"));
         assertFalse(keys.contains("disableProxyCache"));
-        assertFalse(keys.contains("disableMatviews"));
         assertFalse(keys.contains("disableSqloptimize"));
         assertFalse(keys.contains("disableAutoIndexes"));
+    }
+
+    @Test
+    void removedKeysAreRejected() {
+        // The proxy no longer builds materialized views, and its coalescing
+        // flag is --disable-coalescing. These keys must fail loudly rather
+        // than spawn the proxy with flags it doesn't accept.
+        for (String key : new String[]{
+                "refreshIntervalSecs", "patternTtlSecs", "maxTablesPerView",
+                "maxColumnsPerView", "disableConsolidation", "disableRewrite",
+                "disableShadowMode", "enableCoalescing"}) {
+            assertThrows(IllegalArgumentException.class,
+                () -> GoldLapel.configToArgs(Collections.singletonMap(key, true)), key);
+        }
     }
 
     @Test
@@ -765,14 +757,14 @@ class ConfigToArgsTest {
         Map<String, Object> config = new LinkedHashMap<>();
         config.put("poolMode", "transaction");
         config.put("poolSize", 10);
-        config.put("disableRewrite", true);
+        config.put("disableCoalescing", true);
         List<String> args = GoldLapel.configToArgs(config);
         assertEquals(5, args.size());
         assertTrue(args.contains("--pool-mode"));
         assertTrue(args.contains("transaction"));
         assertTrue(args.contains("--pool-size"));
         assertTrue(args.contains("10"));
-        assertTrue(args.contains("--disable-rewrite"));
+        assertTrue(args.contains("--disable-coalescing"));
     }
 
     @Test
@@ -908,8 +900,8 @@ class ConfigToArgsTest {
         );
     }
 
-    // ── Promoted disable flags (Wave 2.5: disableProxyCache /
-    //    disableMatviews / disableSqloptimize / disableAutoIndexes) ───────
+    // ── Promoted disable flags (disableProxyCache / disableSqloptimize /
+    //    disableAutoIndexes) ───────
     //
     // Each flag maps 1:1 to a proxy CLI flag and is a first-class top-level
     // option on GoldLapelOptions (Model B pivot — the older
@@ -920,7 +912,6 @@ class ConfigToArgsTest {
     void testPromotedDisableFlagsDefaultFalse() {
         GoldLapelOptions opts = new GoldLapelOptions();
         assertFalse(opts.isDisableProxyCache());
-        assertFalse(opts.isDisableMatviews());
         assertFalse(opts.isDisableSqloptimize());
         assertFalse(opts.isDisableAutoIndexes());
     }
@@ -929,11 +920,9 @@ class ConfigToArgsTest {
     void testPromotedDisableFlagsSetterGetter() {
         GoldLapelOptions opts = new GoldLapelOptions();
         opts.setDisableProxyCache(true);
-        opts.setDisableMatviews(true);
         opts.setDisableSqloptimize(true);
         opts.setDisableAutoIndexes(true);
         assertTrue(opts.isDisableProxyCache());
-        assertTrue(opts.isDisableMatviews());
         assertTrue(opts.isDisableSqloptimize());
         assertTrue(opts.isDisableAutoIndexes());
     }
@@ -942,12 +931,10 @@ class ConfigToArgsTest {
     void testPromotedDisableFlagsStoredOnInstance() {
         GoldLapelOptions opts = new GoldLapelOptions();
         opts.setDisableProxyCache(true);
-        opts.setDisableMatviews(true);
         opts.setDisableSqloptimize(true);
         opts.setDisableAutoIndexes(true);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         assertTrue(gl.disableProxyCache());
-        assertTrue(gl.disableMatviews());
         assertTrue(gl.disableSqloptimize());
         assertTrue(gl.disableAutoIndexes());
     }
@@ -956,7 +943,6 @@ class ConfigToArgsTest {
     void testPromotedDisableFlagsDefaultStoredOnInstance() {
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
         assertFalse(gl.disableProxyCache());
-        assertFalse(gl.disableMatviews());
         assertFalse(gl.disableSqloptimize());
         assertFalse(gl.disableAutoIndexes());
     }
@@ -965,12 +951,10 @@ class ConfigToArgsTest {
     void testPromotedDisableFlagsInConfigMapRejected() {
         // Regression guard: each flag is a top-level canonical-surface option
         // — never valid inside the structured config map. disableProxyCache
-        // and disableMatviews used to live in the config map; the promotion
-        // explicitly removes them from VALID_CONFIG_KEYS.
+        // used to live in the config map; the promotion explicitly removes
+        // it from VALID_CONFIG_KEYS.
         assertThrows(IllegalArgumentException.class,
             () -> GoldLapel.configToArgs(Collections.singletonMap("disableProxyCache", true)));
-        assertThrows(IllegalArgumentException.class,
-            () -> GoldLapel.configToArgs(Collections.singletonMap("disableMatviews", true)));
         assertThrows(IllegalArgumentException.class,
             () -> GoldLapel.configToArgs(Collections.singletonMap("disableSqloptimize", true)));
         assertThrows(IllegalArgumentException.class,
@@ -981,13 +965,11 @@ class ConfigToArgsTest {
     void testPromotedDisableFlagsEmitCliFlagsWhenSet() {
         GoldLapelOptions opts = new GoldLapelOptions();
         opts.setDisableProxyCache(true);
-        opts.setDisableMatviews(true);
         opts.setDisableSqloptimize(true);
         opts.setDisableAutoIndexes(true);
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
         List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
         assertTrue(cmd.contains("--disable-proxy-cache"), "got: " + cmd);
-        assertTrue(cmd.contains("--disable-matviews"), "got: " + cmd);
         assertTrue(cmd.contains("--disable-sqloptimize"), "got: " + cmd);
         assertTrue(cmd.contains("--disable-auto-indexes"), "got: " + cmd);
     }
@@ -997,7 +979,6 @@ class ConfigToArgsTest {
         GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
         List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
         assertFalse(cmd.contains("--disable-proxy-cache"), "got: " + cmd);
-        assertFalse(cmd.contains("--disable-matviews"), "got: " + cmd);
         assertFalse(cmd.contains("--disable-sqloptimize"), "got: " + cmd);
         assertFalse(cmd.contains("--disable-auto-indexes"), "got: " + cmd);
     }
@@ -1015,249 +996,6 @@ class ConfigToArgsTest {
         for (java.lang.reflect.Method m : GoldLapelOptions.class.getDeclaredMethods()) {
             assertFalse(m.getName().contains("EnableProxyCacheForWrappers"),
                 "Model B pivot: " + m.getName() + " must not be reintroduced");
-        }
-    }
-
-    // ── disableNativeCache startup option ───────────────────────────────────
-
-    @Test
-    void testDisableNativeCacheDefaultFalse() {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        assertFalse(opts.isDisableNativeCache());
-    }
-
-    @Test
-    void testDisableNativeCacheSetterGetter() {
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setDisableNativeCache(true);
-        assertTrue(opts.isDisableNativeCache());
-        opts.setDisableNativeCache(false);
-        assertFalse(opts.isDisableNativeCache());
-    }
-
-    @Test
-    void testDisableNativeCacheStoredOnInstance() {
-        // Mirrors testEnableProxyCacheForWrappersStoredOnInstance — verify the
-        // option flows from the bag onto the GoldLapel instance via the
-        // constructor.
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setDisableNativeCache(true);
-        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
-        assertTrue(gl.disableNativeCache());
-    }
-
-    @Test
-    void testDisableNativeCacheDefaultStoredOnInstance() {
-        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
-        assertFalse(gl.disableNativeCache());
-    }
-
-    @Test
-    void testDisableNativeCacheInConfigMapRejected() {
-        // Regression guard: disableNativeCache is a top-level canonical-surface
-        // option, never valid inside the structured config map.
-        assertThrows(
-            IllegalArgumentException.class,
-            () -> GoldLapel.configToArgs(Collections.singletonMap("disableNativeCache", true))
-        );
-    }
-
-    @Test
-    void testDisableNativeCacheAbsentFromArgvByDefault() {
-        // disableNativeCache is a wrapper-side flag — it must NOT translate
-        // into a CLI arg passed to the Rust binary (the binary doesn't know
-        // about the wrapper's native cache).
-        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb");
-        List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
-        assertFalse(cmd.contains("--disable-native-cache"),
-            "argv must NOT contain --disable-native-cache (wrapper-only flag); got: " + cmd);
-    }
-
-    @Test
-    void testDisableNativeCacheAbsentFromArgvWhenSet() {
-        // Same regression guard as above with the option explicitly set —
-        // even when the user opts out of the native cache, the Rust binary
-        // spawn argv stays native-cache-knob-free (the flag flows to
-        // NativeCache, not to argv).
-        GoldLapelOptions opts = new GoldLapelOptions();
-        opts.setDisableNativeCache(true);
-        GoldLapel gl = GoldLapelClassTest.newUnstarted("postgresql://localhost:5432/mydb", opts);
-        List<String> cmd = gl.buildSpawnCmd("/fake/goldlapel");
-        assertFalse(cmd.contains("--disable-native-cache"),
-            "argv must NOT contain --disable-native-cache even when option is true; got: " + cmd);
-    }
-
-    // ── disableNativeCache cache wiring ─────────────────────────────────────
-    //
-    // Validate the start-time wiring fix: opts.setDisableNativeCache(true) must
-    // flow onto NativeCache.getInstance() before invalidation connects, so the
-    // cache's get/put behaviour and the very first wrapper_connected snapshot
-    // both reflect the chosen flag. Tests invoke
-    // applyDisableNativeCacheToCacheSingleton() directly (the method startProxy
-    // calls before spawning the Rust binary) so we don't have to start a real
-    // proxy in unit tests.
-
-    @Test
-    void testDisableNativeCacheWiringFlipsCacheSingleton() throws Exception {
-        // Reset the singleton in case a previous test left it in a non-default
-        // state — the singleton is process-wide.
-        NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
-        try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", null);
-            GoldLapelOptions opts = new GoldLapelOptions();
-            opts.setDisableNativeCache(true);
-            GoldLapel gl = GoldLapelClassTest.newUnstarted(
-                "postgresql://localhost:5432/mydb", opts);
-            gl.applyDisableNativeCacheToCacheSingleton();
-            assertTrue(NativeCache.getInstance().isDisabled());
-        } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
-            NativeCache.reset();
-        }
-    }
-
-    @Test
-    void testDisableNativeCacheWiringDefaultLeavesCacheEnabled() throws Exception {
-        NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
-        try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", null);
-            // Default options (disableNativeCache=false) — wiring must leave the
-            // singleton's flag at its constructed default (false here, since
-            // env is unset).
-            GoldLapel gl = GoldLapelClassTest.newUnstarted(
-                "postgresql://localhost:5432/mydb");
-            gl.applyDisableNativeCacheToCacheSingleton();
-            assertFalse(NativeCache.getInstance().isDisabled());
-        } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
-            NativeCache.reset();
-        }
-    }
-
-    @Test
-    void testDisableNativeCacheWiringMakesGetMiss() throws Exception {
-        // End-to-end behaviour: after wiring with disableNativeCache=true, the
-        // singleton's get() returns null (miss) and bumps the miss counter
-        // even on a "cached" key — put() is a no-op too.
-        NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
-        try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", null);
-            GoldLapelOptions opts = new GoldLapelOptions();
-            opts.setDisableNativeCache(true);
-            GoldLapel gl = GoldLapelClassTest.newUnstarted(
-                "postgresql://localhost:5432/mydb", opts);
-            gl.applyDisableNativeCacheToCacheSingleton();
-
-            NativeCache cache = NativeCache.getInstance();
-            // Bypass the connect-required gate so the disabled branch is
-            // exercised (mirrors NativeCacheTest's pattern).
-            java.lang.reflect.Field connected = NativeCache.class.getDeclaredField("invalidationConnected");
-            connected.setAccessible(true);
-            connected.setBoolean(cache, true);
-
-            cache.put("SELECT 1", null,
-                Collections.singletonList(new Object[]{1}), new String[]{"x"});
-            assertNull(cache.get("SELECT 1", null));
-            assertEquals(0L, cache.statsHits.get());
-            assertTrue(cache.statsMisses.get() >= 1L,
-                "expected at least one miss tick; got " + cache.statsMisses.get());
-        } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
-            NativeCache.reset();
-        }
-    }
-
-    @Test
-    void testDisableNativeCacheWiringEnabledCacheHitsNormally() throws Exception {
-        // End-to-end behaviour: with disableNativeCache=false (default), the
-        // singleton round-trips put → get normally after wiring.
-        NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
-        try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", null);
-            GoldLapel gl = GoldLapelClassTest.newUnstarted(
-                "postgresql://localhost:5432/mydb");
-            gl.applyDisableNativeCacheToCacheSingleton();
-
-            NativeCache cache = NativeCache.getInstance();
-            java.lang.reflect.Field connected = NativeCache.class.getDeclaredField("invalidationConnected");
-            connected.setAccessible(true);
-            connected.setBoolean(cache, true);
-
-            cache.put("SELECT 1", null,
-                Collections.singletonList(new Object[]{1}), new String[]{"x"});
-            assertNotNull(cache.get("SELECT 1", null));
-            assertEquals(1L, cache.statsHits.get());
-        } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
-            NativeCache.reset();
-        }
-    }
-
-    @Test
-    void testDisableNativeCacheWiringFirstSnapshotCarriesDisabled() throws Exception {
-        // The dispatch's headline assertion: the very first wrapper_connected
-        // snapshot emitted after wiring must carry disabled:true when the
-        // option was set. We capture the emission via setSendOverride instead
-        // of standing up a real socket — same shape as the NativeCacheTest
-        // wrapperConnectedEmissionCarriesDisabled test.
-        NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
-        try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", null);
-            GoldLapelOptions opts = new GoldLapelOptions();
-            opts.setDisableNativeCache(true);
-            GoldLapel gl = GoldLapelClassTest.newUnstarted(
-                "postgresql://localhost:5432/mydb", opts);
-            gl.applyDisableNativeCacheToCacheSingleton();
-
-            NativeCache cache = NativeCache.getInstance();
-            List<String> emissions = Collections.synchronizedList(new ArrayList<>());
-            cache.setSendOverride(emissions::add);
-            // Replay the synchronous emission the invalidation thread does
-            // immediately after the socket connects (see invalidationLoop()).
-            cache.emitStateChange("wrapper_connected");
-
-            String body = null;
-            synchronized (emissions) {
-                for (String l : emissions) {
-                    if (l.startsWith("S:")) { body = l; break; }
-                }
-            }
-            assertNotNull(body, "expected an S: emission, got " + emissions);
-            assertTrue(body.contains("\"state\":\"wrapper_connected\""), body);
-            assertTrue(body.contains("\"disabled\":true"), body);
-        } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
-            NativeCache.reset();
-        }
-    }
-
-    @Test
-    void testDisableNativeCacheWiringEnvVarBeatsOptionFalse() throws Exception {
-        // Precedence: env var > option. GOLDLAPEL_DISABLE_NATIVE_CACHE=true
-        // seeds the singleton at construction time; the wiring step must NOT
-        // silently re-enable the native cache even when the option is false.
-        // (Env-wins safety valve: an operator can force the native cache off
-        // without touching app code.)
-        NativeCache.reset();
-        String origEnv = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
-        try {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", "true");
-            // Force the singleton to (re)read env on next getInstance().
-            NativeCache.reset();
-            // Default opts → disableNativeCache false on the option side.
-            GoldLapel gl = GoldLapelClassTest.newUnstarted(
-                "postgresql://localhost:5432/mydb");
-            gl.applyDisableNativeCacheToCacheSingleton();
-            assertTrue(NativeCache.getInstance().isDisabled(),
-                "env-set GOLDLAPEL_DISABLE_NATIVE_CACHE=true must survive the option=false wiring step");
-        } finally {
-            ClientOptionTest.setEnv("GOLDLAPEL_DISABLE_NATIVE_CACHE", origEnv);
-            NativeCache.reset();
         }
     }
 }

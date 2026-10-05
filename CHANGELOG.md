@@ -4,6 +4,35 @@
 
 ### Breaking changes
 
+**The in-process cache (L1) is gone.** The proxy's result cache now serves
+every client the same way, so the wrapper no longer carries its own. Deleted
+with it: `NativeCache`, `ConnectionProxy` and `CachedResultSet`, the
+session-settings tracker (`GucState`), aggressive post-DML verify
+(`AggressiveVerifyMode`), the invalidation-socket client and its stats
+reporting, and Spring Boot's `CachedDataSource`. `gl.connection()` and the
+connections you open from `gl.getJdbcUrl()` were never wrapped; the Spring
+Boot integration now returns your `DataSource` itself, repointed at the
+proxy, and no longer sets HikariCP's `connectionInitSql` to `DISCARD ALL`.
+
+**Removed options, no aliases:** `GoldLapelOptions.setInvalidationPort`,
+`setDisableNativeCache`, `setAggressiveVerify` and `setDisableMatviews`
+(with their getters), the `gl.invalidationPort()` and `gl.aggressiveVerify()`
+accessors, and the Spring properties `goldlapel.invalidation-port`,
+`goldlapel.disable-native-cache`, `goldlapel.aggressive-verify` and
+`goldlapel.disable-matviews`. The `GOLDLAPEL_DISABLE_NATIVE_CACHE`,
+`GOLDLAPEL_NATIVE_CACHE`, `GOLDLAPEL_NATIVE_CACHE_SIZE` and
+`GOLDLAPEL_REPORT_STATS` env vars are no longer read. The proxy now uses two
+ports: proxy and dashboard (proxy + 1).
+
+**Removed `config` keys** for materialized views, which the proxy no longer
+has: `refreshIntervalSecs`, `patternTtlSecs`, `maxTablesPerView`,
+`maxColumnsPerView`, `disableConsolidation`, `disableRewrite`,
+`disableShadowMode`. `enableCoalescing` is replaced by `disableCoalescing`,
+matching the proxy (coalescing is on by default). Passing a removed key
+throws `IllegalArgumentException` at `start`.
+
+---
+
 **Phase 5 of schema-to-core: 5 Redis-compat families moved under nested
 namespaces.** The flat `gl.incr` / `gl.getCounter`, `gl.zadd` / `gl.zrange`
 / `gl.zincrby` / `gl.zrank` / `gl.zscore` / `gl.zrem`, `gl.hset` / `gl.hget`

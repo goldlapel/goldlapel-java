@@ -138,7 +138,9 @@ class StreamsIntegrationTest {
     /**
      * Concurrency regression: two consumers running streamRead at the same
      * time on the same group must divide the pending messages between them,
-     * never claiming the same message twice.
+     * never claiming the same message twice. Each consumer has its own
+     * connection, as real consumers do — two threads sharing one JDBC
+     * connection share one transaction, so the row lock can't separate them.
      *
      * Without the BEGIN/COMMIT wrapping in {@link Utils#streamRead} the
      * SELECT ... FOR UPDATE lock is released immediately under autocommit,
@@ -159,18 +161,23 @@ class StreamsIntegrationTest {
             // Each "consumer" task loops until the stream is drained so the
             // two threads genuinely interleave at the cursor.
             Callable<List<Long>> mkTask = () -> {
-                start.await();
-                String me = "c-" + Thread.currentThread().getId();
-                List<Long> mine = new ArrayList<>();
-                while (true) {
-                    List<Map<String, Object>> batch =
-                        gl.streams.read(streamName, "workers", me, 4);
-                    if (batch.isEmpty()) break;
-                    for (Map<String, Object> m : batch) {
-                        mine.add((Long) m.get("id"));
+                java.util.Properties props = new java.util.Properties();
+                if (gl.getJdbcUser() != null) props.setProperty("user", gl.getJdbcUser());
+                if (gl.getJdbcPassword() != null) props.setProperty("password", gl.getJdbcPassword());
+                try (Connection conn = DriverManager.getConnection(gl.getJdbcUrl(), props)) {
+                    start.await();
+                    String me = "c-" + Thread.currentThread().getId();
+                    List<Long> mine = new ArrayList<>();
+                    while (true) {
+                        List<Map<String, Object>> batch =
+                            gl.streams.read(streamName, "workers", me, 4, conn);
+                        if (batch.isEmpty()) break;
+                        for (Map<String, Object> m : batch) {
+                            mine.add((Long) m.get("id"));
+                        }
                     }
+                    return mine;
                 }
-                return mine;
             };
             Future<List<Long>> fa = pool.submit(mkTask);
             Future<List<Long>> fb = pool.submit(mkTask);

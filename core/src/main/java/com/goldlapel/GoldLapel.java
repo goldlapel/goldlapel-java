@@ -53,9 +53,9 @@ public class GoldLapel implements AutoCloseable {
     static final long STARTUP_POLL_INTERVAL_MS = 50;
 
     // Keys that are valid inside the structured `config` map. Top-level
-    // concepts (proxyPort, dashboardPort, invalidationPort, logLevel, mode,
-    // license, client, configFile) live on GoldLapelOptions directly and
-    // are NOT accepted here — passing them via Config raises.
+    // concepts (proxyPort, dashboardPort, logLevel, mode, license, client,
+    // configFile) live on GoldLapelOptions directly and are NOT accepted
+    // here — passing them via Config raises.
     private static final Set<String> VALID_CONFIG_KEYS;
     private static final Set<String> BOOLEAN_KEYS;
     private static final Set<String> LIST_KEYS;
@@ -63,30 +63,29 @@ public class GoldLapel implements AutoCloseable {
     static {
         Set<String> keys = new HashSet<>();
         Collections.addAll(keys,
-            "minPatternCount", "refreshIntervalSecs", "patternTtlSecs",
-            "maxTablesPerView", "maxColumnsPerView", "deepPaginationThreshold",
+            "minPatternCount", "deepPaginationThreshold",
             "reportIntervalSecs", "proxyCacheSize", "batchCacheSize",
             "batchCacheTtlSecs", "poolSize", "poolTimeoutSecs",
             "poolMode", "mgmtIdleTimeout", "fallback", "readAfterWriteSecs",
             "n1Threshold", "n1WindowMs", "n1CrossThreshold",
             "tlsCert", "tlsKey", "tlsClientCa",
-            "disableConsolidation", "disableBtreeIndexes",
+            "disableBtreeIndexes",
             "disableTrigramIndexes", "disableExpressionIndexes",
-            "disablePartialIndexes", "disableRewrite", "disableRewritePreparedCache",
+            "disablePartialIndexes", "disableRewritePreparedCache",
             "disablePool",
-            "disableN1", "disableN1CrossConnection", "disableShadowMode",
-            "enableCoalescing", "replica", "excludeTables"
+            "disableN1", "disableN1CrossConnection",
+            "disableCoalescing", "replica", "excludeTables"
         );
         VALID_CONFIG_KEYS = Collections.unmodifiableSet(keys);
 
         Set<String> bools = new HashSet<>();
         Collections.addAll(bools,
-            "disableConsolidation", "disableBtreeIndexes",
+            "disableBtreeIndexes",
             "disableTrigramIndexes", "disableExpressionIndexes",
-            "disablePartialIndexes", "disableRewrite", "disableRewritePreparedCache",
+            "disablePartialIndexes", "disableRewritePreparedCache",
             "disablePool",
-            "disableN1", "disableN1CrossConnection", "disableShadowMode",
-            "enableCoalescing"
+            "disableN1", "disableN1CrossConnection",
+            "disableCoalescing"
         );
         BOOLEAN_KEYS = Collections.unmodifiableSet(bools);
 
@@ -99,8 +98,6 @@ public class GoldLapel implements AutoCloseable {
     private final int proxyPort;
     private final int dashboardPort;
     private final boolean dashboardPortExplicit;
-    private final int invalidationPort;
-    private final boolean invalidationPortExplicit;
     private final String logLevel;
     private final String mode;
     private final String license;
@@ -111,12 +108,9 @@ public class GoldLapel implements AutoCloseable {
     private final boolean silent;
     private final boolean mesh;
     private final String meshTag;
-    private final boolean disableNativeCache;
     private final boolean disableProxyCache;
-    private final boolean disableMatviews;
     private final boolean disableSqloptimize;
     private final boolean disableAutoIndexes;
-    private final AggressiveVerifyMode aggressiveVerify;
     private Process process;
     private String proxyUrl;
     private Connection internalConn;
@@ -166,15 +160,11 @@ public class GoldLapel implements AutoCloseable {
         this.upstream = upstream;
         this.proxyPort = options.getProxyPort() != null ? options.getProxyPort() : DEFAULT_PROXY_PORT;
 
-        // Dashboard / invalidation: null on options → derive from proxyPort.
-        // Non-null → record the explicit override so startProxy() emits the
-        // matching --dashboard-port / --invalidation-port flag.
+        // Dashboard: null on options → derive from proxyPort. Non-null →
+        // record the explicit override so startProxy() emits --dashboard-port.
         Integer dp = options.getDashboardPort();
         this.dashboardPortExplicit = (dp != null);
         this.dashboardPort = dp != null ? dp : this.proxyPort + 1;
-        Integer ip = options.getInvalidationPort();
-        this.invalidationPortExplicit = (ip != null);
-        this.invalidationPort = ip != null ? ip : this.proxyPort + 2;
 
         this.logLevel = options.getLogLevel();
         this.mode = options.getMode();
@@ -201,13 +191,9 @@ public class GoldLapel implements AutoCloseable {
         this.mesh = options.isMesh();
         String tag = options.getMeshTag();
         this.meshTag = (tag == null || tag.isEmpty()) ? null : tag;
-        this.disableNativeCache = options.isDisableNativeCache();
         this.disableProxyCache = options.isDisableProxyCache();
-        this.disableMatviews = options.isDisableMatviews();
         this.disableSqloptimize = options.isDisableSqloptimize();
         this.disableAutoIndexes = options.isDisableAutoIndexes();
-        AggressiveVerifyMode mode = options.getAggressiveVerify();
-        this.aggressiveVerify = mode == null ? AggressiveVerifyMode.AUTO : mode;
         this.process = null;
         this.proxyUrl = null;
 
@@ -266,13 +252,6 @@ public class GoldLapel implements AutoCloseable {
         if (process != null && process.isAlive()) {
             return;
         }
-
-        // Push the disableNativeCache option onto the NativeCache singleton BEFORE
-        // the proxy spawn (and well before any caller invokes connectInvalidation),
-        // so the very first wrapper_connected snapshot carries the correct
-        // disabled field. Mirrors the .NET wrapper's pre-spawn singleton
-        // poke (see goldlapel-dotnet/src/GoldLapel/GoldLapel.cs SpawnAsync).
-        applyDisableNativeCacheToCacheSingleton();
 
         String binary = findBinary();
         List<String> cmd = buildSpawnCmd(binary);
@@ -346,37 +325,6 @@ public class GoldLapel implements AutoCloseable {
     }
 
     /**
-     * Push the {@code disableNativeCache} option onto the {@link NativeCache}
-     * singleton. Called from {@link #startProxy()} before the subprocess is
-     * spawned, so the very first {@code wrapper_connected} snapshot the cache
-     * emits carries the correct {@code disabled} field.
-     *
-     * <p>Precedence: env var &gt; option. {@code GOLDLAPEL_DISABLE_NATIVE_CACHE=true}
-     * seeds the singleton at construction time via {@code NativeCache.envDisabled()};
-     * this method only flips the flag when the env var didn't already force it
-     * on. That way an env-forced session can never be silently re-enabled by
-     * an option, matching the safety-valve role env vars play in the rest of
-     * the wrapper surface.
-     *
-     * <p>Best-effort: NativeCache singleton construction can throw on unusual
-     * classloader paths (Spring devtools restarts, OSGi); never fail proxy
-     * spawn for a telemetry knob. Package-private so unit tests can invoke
-     * the wiring directly without spawning the Rust binary.
-     */
-    void applyDisableNativeCacheToCacheSingleton() {
-        try {
-            NativeCache cache = NativeCache.getInstance();
-            String envDisable = System.getenv("GOLDLAPEL_DISABLE_NATIVE_CACHE");
-            boolean envForced = envDisable != null && "true".equalsIgnoreCase(envDisable);
-            if (!envForced) {
-                cache.setDisabled(disableNativeCache);
-            }
-        } catch (Throwable ignored) {
-            // No singleton, no telemetry knob — proxy spawn proceeds normally.
-        }
-    }
-
-    /**
      * Build the argv that {@link #startProxy()} hands to {@link ProcessBuilder}.
      * Package-private so tests can verify CLI-flag emission for top-level
      * options (mesh, disableProxyCache, etc.) without spawning the Rust
@@ -398,10 +346,6 @@ public class GoldLapel implements AutoCloseable {
         if (dashboardPortExplicit) {
             cmd.add("--dashboard-port");
             cmd.add(String.valueOf(dashboardPort));
-        }
-        if (invalidationPortExplicit) {
-            cmd.add("--invalidation-port");
-            cmd.add(String.valueOf(invalidationPort));
         }
         String verboseFlag = translateLogLevel(logLevel);
         if (verboseFlag != null) {
@@ -431,9 +375,6 @@ public class GoldLapel implements AutoCloseable {
         // place — matches the canonical surface contract).
         if (disableProxyCache) {
             cmd.add("--disable-proxy-cache");
-        }
-        if (disableMatviews) {
-            cmd.add("--disable-matviews");
         }
         if (disableSqloptimize) {
             cmd.add("--disable-sqloptimize");
@@ -676,15 +617,6 @@ public class GoldLapel implements AutoCloseable {
     }
 
     /**
-     * Return the cache-invalidation port this instance's proxy is listening
-     * on (typically proxy port + 2 unless {@link GoldLapelOptions#setInvalidationPort(Integer)}
-     * was called).
-     */
-    public int invalidationPort() {
-        return invalidationPort;
-    }
-
-    /**
      * Return the dashboard token the wrapper uses to authenticate against
      * /api/ddl/* on this instance's proxy. Provisioned during startProxy()
      * for internally-spawned proxies; {@code null} for externally-launched
@@ -709,22 +641,10 @@ public class GoldLapel implements AutoCloseable {
         return meshTag;
     }
 
-    // Package-private accessor for tests to verify disableNativeCache storage on
-    // the instance. The actual cache-side wiring is exercised by tests that
-    // inspect NativeCache.getInstance() after start(); this getter is for
-    // the lightweight "option flowed onto the bag" assertion.
-    boolean disableNativeCache() {
-        return disableNativeCache;
-    }
-
-    // Package-private accessors for tests to verify the four promoted disable
+    // Package-private accessors for tests to verify the three promoted disable
     // flags flow from the options bag onto the GoldLapel instance.
     boolean disableProxyCache() {
         return disableProxyCache;
-    }
-
-    boolean disableMatviews() {
-        return disableMatviews;
     }
 
     boolean disableSqloptimize() {
@@ -733,17 +653,6 @@ public class GoldLapel implements AutoCloseable {
 
     boolean disableAutoIndexes() {
         return disableAutoIndexes;
-    }
-
-    /**
-     * The post-DML aggressive-verify mode that this instance was started with.
-     * Read by the Spring-Boot wiring (and by raw-JDBC callers who want to
-     * thread the same mode into a custom {@link ConnectionProxy#wrap} call)
-     * so the customer's CLI/Spring/options choice flows all the way to the
-     * connection wrapper. Defaults to {@link AggressiveVerifyMode#AUTO}.
-     */
-    public AggressiveVerifyMode aggressiveVerify() {
-        return aggressiveVerify;
     }
 
     public String getDashboardUrl() {
@@ -1249,7 +1158,7 @@ public class GoldLapel implements AutoCloseable {
      * {@code Implementation-Version} manifest entry; CI sets this from the git
      * tag at publish time. Local dev / test builds return {@code "0.0.0"}.
      * Used to build the {@code application_name} marker on PG connections so
-     * the proxy can classify wrapper-vs-raw traffic and gate the proxy cache.
+     * Gold Lapel's connections are recognisable in {@code pg_stat_activity}.
      */
     static String wrapperVersion() {
         Package pkg = GoldLapel.class.getPackage();
@@ -1267,8 +1176,8 @@ public class GoldLapel implements AutoCloseable {
     /**
      * Append {@code application_name=goldlapel:java:<version>} to {@code url}
      * unless one is already present (or {@code PGAPPNAME} is set in the env).
-     * The marker tells the proxy this is wrapper traffic so it can skip the
-     * proxy cache (the wrapper has its own native cache). Idempotent and
+     * The marker identifies wrapper connections in {@code pg_stat_activity};
+     * the proxy caches them like any other client. Idempotent and
      * override-respecting.
      */
     static String injectApplicationName(String url) {

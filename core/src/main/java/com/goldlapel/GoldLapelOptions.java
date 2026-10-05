@@ -21,14 +21,13 @@ import java.util.Map;
  * every Gold Lapel wrapper — see
  * {@code docs/reviews/schema-to-core/config-surface-canonical.md} in the
  * main goldlapel repo. The structured {@link #getConfig() config} map only
- * holds the ~45 low-level tuning knobs (pool size, cache sizes, disable_X
+ * holds the low-level tuning knobs (pool size, cache sizes, disable_X
  * booleans, replicas, etc.); concepts that users reach for regularly
  * (ports, log level, mode) have their own top-level setters.
  */
 public class GoldLapelOptions {
     private Integer proxyPort;
     private Integer dashboardPort;
-    private Integer invalidationPort;
     private String logLevel;
     private String mode;
     private String license;
@@ -39,12 +38,9 @@ public class GoldLapelOptions {
     private boolean silent;
     private boolean mesh;
     private String meshTag;
-    private boolean disableNativeCache;
     private boolean disableProxyCache;
-    private boolean disableMatviews;
     private boolean disableSqloptimize;
     private boolean disableAutoIndexes;
-    private AggressiveVerifyMode aggressiveVerify = AggressiveVerifyMode.AUTO;
 
     public Integer getProxyPort() {
         return proxyPort;
@@ -65,18 +61,6 @@ public class GoldLapelOptions {
      */
     public void setDashboardPort(Integer dashboardPort) {
         this.dashboardPort = dashboardPort;
-    }
-
-    public Integer getInvalidationPort() {
-        return invalidationPort;
-    }
-
-    /**
-     * Cache-invalidation listen port. When {@code null} (default), the port
-     * is derived as {@code proxyPort + 2}.
-     */
-    public void setInvalidationPort(Integer invalidationPort) {
-        this.invalidationPort = invalidationPort;
     }
 
     public String getLogLevel() {
@@ -127,8 +111,8 @@ public class GoldLapelOptions {
     }
 
     /**
-     * Structured config map of the ~45 tuning keys (pool size, cache sizes,
-     * disable_X booleans, replicas, exclude_tables, tls_*, n1_*, pattern_*).
+     * Structured config map of the tuning keys (pool size, cache sizes,
+     * disable_X booleans, replicas, exclude_tables, tls_*, n1_*).
      * Keys are {@code camelCase} strings matching the Java idiom; the
      * wrapper translates to {@code --kebab-case} CLI flags.
      *
@@ -207,36 +191,12 @@ public class GoldLapelOptions {
     }
 
     /**
-     * Whether to disable the wrapper's native cache entirely. Default {@code false}.
-     * When {@code true}, the in-process {@link NativeCache} acts as a no-op
-     * pass-through: {@code get()} always returns null, {@code put()} never
-     * stores. Misses still tick (so the proxy sees per-query traffic), hits
-     * stay zero, and no eviction happens.
-     *
-     * <p>This is distinct from setting the cache capacity to zero via the
-     * {@code cacheSize} tuning key. {@code cacheSize=0} forces customers to
-     * lose their tuned capacity to toggle the layer; {@code disableNativeCache=true}
-     * lets them keep the size and toggle independently.
-     *
-     * <p>The invalidation channel still runs while disabled — the wrapper
-     * stays connected to the proxy for telemetry and snapshot replies.
-     */
-    public boolean isDisableNativeCache() {
-        return disableNativeCache;
-    }
-
-    public void setDisableNativeCache(boolean disableNativeCache) {
-        this.disableNativeCache = disableNativeCache;
-    }
-
-    /**
      * Whether to disable the proxy-side cache layer entirely. Default
      * {@code false}. Maps 1:1 to the proxy CLI flag
      * {@code --disable-proxy-cache}. Use this when the proxy-side cache is
      * causing operational pain (debugging stale data, isolating an
      * invalidation bug) and you want to keep every other Gold Lapel
-     * feature on. Distinct from {@link #isDisableNativeCache()}, which
-     * toggles the wrapper-side cache.
+     * feature on.
      */
     public boolean isDisableProxyCache() {
         return disableProxyCache;
@@ -247,25 +207,10 @@ public class GoldLapelOptions {
     }
 
     /**
-     * Whether to disable automatic materialized-view creation. Default
-     * {@code false}. Maps 1:1 to the proxy CLI flag {@code --disable-matviews}.
-     * Reach for this in environments where matviews would conflict with an
-     * existing migration / ownership model, or while debugging which Gold
-     * Lapel optimization is responsible for an observed behavior change.
-     */
-    public boolean isDisableMatviews() {
-        return disableMatviews;
-    }
-
-    public void setDisableMatviews(boolean disableMatviews) {
-        this.disableMatviews = disableMatviews;
-    }
-
-    /**
      * Whether to disable the SQL-rewrite optimization pipeline ("sqloptimize").
      * Default {@code false}. Maps 1:1 to the proxy CLI flag
      * {@code --disable-sqloptimize}. Disable this to bypass per-kind SQL
-     * rewriting while keeping caching, matviews, and auto-indexes active.
+     * rewriting while keeping caching and auto-indexes active.
      */
     public boolean isDisableSqloptimize() {
         return disableSqloptimize;
@@ -288,28 +233,5 @@ public class GoldLapelOptions {
 
     public void setDisableAutoIndexes(boolean disableAutoIndexes) {
         this.disableAutoIndexes = disableAutoIndexes;
-    }
-
-    /**
-     * Post-DML aggressive-verify mode. Default {@link AggressiveVerifyMode#AUTO},
-     * which bumps the per-connection post-DML sequence counter after every
-     * observed INSERT/UPDATE/DELETE/MERGE/TRUNCATE/CALL/DDL, rolling the
-     * wrapper-side cache key forward so a cached pre-DML response cannot be
-     * served against potentially-trigger-mutated session state.
-     * {@link AggressiveVerifyMode#ON} is a synonym for AUTO;
-     * {@link AggressiveVerifyMode#OFF} skips the bump (audited-schema
-     * opt-out, logs a one-time warning).
-     *
-     * <p>Background: Wave 1 covers stored function/procedure SETs. This setting
-     * controls the Wave 2 "post-DML expansion" — closing the trigger-internal
-     * SET correctness gap. See
-     * {@code goldlapel/docs/todos/aggressive-verify-flag.md}.
-     */
-    public AggressiveVerifyMode getAggressiveVerify() {
-        return aggressiveVerify;
-    }
-
-    public void setAggressiveVerify(AggressiveVerifyMode aggressiveVerify) {
-        this.aggressiveVerify = aggressiveVerify == null ? AggressiveVerifyMode.AUTO : aggressiveVerify;
     }
 }
