@@ -87,6 +87,55 @@ class ReactiveCancellationTest {
     }
 
     @Test
+    void cancellingDoesNotBlockTheCancellingThread(@TempDir Path tmp) throws Exception {
+        // stop() waits up to 5s for a subprocess that ignores SIGTERM; the
+        // cancel must hand that wait to another thread, not block the caller.
+        Assumptions.assumeTrue(
+            !System.getProperty("os.name", "").toLowerCase().contains("windows"),
+            "POSIX-only test (needs /bin/sh + python3)"
+        );
+        Assumptions.assumeTrue(isOnPath("python3"), "python3 not on PATH");
+
+        int port;
+        try (ServerSocket probe = new ServerSocket(0)) {
+            port = probe.getLocalPort();
+        }
+        Path pidFile = tmp.resolve("fake.pid");
+        Path script = writeFakeProxyBinary(tmp, pidFile,
+            "import signal\n" +
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n");
+
+        String origBin = System.getenv("GOLDLAPEL_BINARY");
+        try {
+            setEnvReflective("GOLDLAPEL_BINARY", script.toString());
+            Disposable d = ReactiveGoldLapel.start(
+                "postgresql://localhost:5432/mydb",
+                opts -> opts.setProxyPort(port)
+            ).subscribe(ignored -> { }, ignored -> { });
+
+            long deadline = System.nanoTime() + 3_000_000_000L;
+            while (System.nanoTime() < deadline && !Files.exists(pidFile)) {
+                Thread.sleep(25);
+            }
+            assertTrue(Files.exists(pidFile), "fake binary should have recorded its PID");
+            // Let the start reach its (blocking) eager connect.
+            Thread.sleep(500);
+
+            long t0 = System.nanoTime();
+            d.dispose();
+            long tookMs = (System.nanoTime() - t0) / 1_000_000L;
+            assertTrue(tookMs < 1000, "dispose() blocked for " + tookMs + "ms");
+
+            long pid = Long.parseLong(Files.readString(pidFile).trim());
+            waitForProcessExit(pid, 15_000);
+            assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false),
+                "subprocess PID " + pid + " should still be killed, just off the cancelling thread");
+        } finally {
+            setEnvReflective("GOLDLAPEL_BINARY", origBin);
+        }
+    }
+
+    @Test
     void startFailurePropagatesAsMonoError(@TempDir Path tmp) throws Exception {
         // Negative: when the spawn itself fails, the Mono should emit onError
         // rather than hang. Use a binary path that doesn't exist.
@@ -105,6 +154,10 @@ class ReactiveCancellationTest {
     // ─── helpers (mirrors FactoryApiTest) ──────────────────────
 
     private static Path writeFakeProxyBinary(Path tmp, Path pidFile) throws IOException {
+        return writeFakeProxyBinary(tmp, pidFile, "");
+    }
+
+    private static Path writeFakeProxyBinary(Path tmp, Path pidFile, String prelude) throws IOException {
         Path script = tmp.resolve("fake-goldlapel.sh");
         Files.writeString(script,
             "#!/bin/sh\n" +
@@ -118,6 +171,7 @@ class ReactiveCancellationTest {
             "done\n" +
             "exec python3 -c \"\n" +
             "import socket, time\n" +
+            prelude +
             "s = socket.socket()\n" +
             "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n" +
             "s.bind(('127.0.0.1', ${PORT}))\n" +

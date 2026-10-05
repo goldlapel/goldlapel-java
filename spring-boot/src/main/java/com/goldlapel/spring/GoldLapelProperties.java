@@ -5,11 +5,15 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-@ConfigurationProperties(prefix = "goldlapel")
+// Unknown goldlapel.* properties fail startup rather than being ignored —
+// including the ones removed with the in-process cache
+// (invalidation-port, disable-native-cache, aggressive-verify) and
+// disable-matviews.
+@ConfigurationProperties(prefix = "goldlapel", ignoreUnknownFields = false)
 public class GoldLapelProperties {
 
     private boolean enabled = true;
-    private int proxyPort = 7932;
+    private Integer proxyPort = null;
     private Integer dashboardPort = null;
     private String extraArgs = "";
     private String logLevel = null;
@@ -32,19 +36,24 @@ public class GoldLapelProperties {
         this.enabled = enabled;
     }
 
-    public int getProxyPort() {
+    public Integer getProxyPort() {
         return proxyPort;
     }
 
     /**
-     * Proxy listen port (default 7932). The first DataSource's proxy gets it.
-     * DataSources sharing an upstream share its proxy. Each further upstream
-     * gets the next port at or above it whose proxy and dashboard ports are
-     * both free of the proxies already started, so two DataSources land on
-     * 7932 and 7934 (7933 is the first one's dashboard), or on 7932 and 7933
-     * with {@code dashboard-port: 0}.
+     * Proxy listen port. When {@code null} (the default), the proxy takes
+     * the first port from 7932 up whose proxy and dashboard ports are both
+     * free — of every other Gold Lapel proxy in this JVM (other DataSources,
+     * other cached test contexts) and of anything else on the machine.
+     *
+     * <p>DataSources sharing an upstream share its proxy. With several
+     * upstreams, an explicit port applies to the <em>first</em> proxy only;
+     * later ones get free ports as above, so two DataSources land on 7932
+     * and 7934 (7933 is the first one's dashboard), or on 7932 and 7933 with
+     * {@code dashboard-port: 0}. An explicit port another proxy in this JVM
+     * already uses fails startup.
      */
-    public void setProxyPort(int proxyPort) {
+    public void setProxyPort(Integer proxyPort) {
         this.proxyPort = proxyPort;
     }
 

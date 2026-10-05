@@ -3,6 +3,8 @@ package com.goldlapel;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -12,10 +14,16 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -51,6 +59,8 @@ public class GoldLapel implements AutoCloseable {
     static final int DEFAULT_PROXY_PORT = 7932;
     static final long STARTUP_TIMEOUT_MS = 10000;
     static final long STARTUP_POLL_INTERVAL_MS = 50;
+    // How much of the proxy's stderr a failed start reports.
+    static final int STDERR_TAIL_CHARS = 4096;
     // Upper bound on the eager JDBC connect (pgjdbc loginTimeout). Without it a
     // proxy that accepts TCP but never answers the startup handshake hangs
     // start() indefinitely. A loginTimeout in the URL query still wins.
@@ -98,9 +108,88 @@ public class GoldLapel implements AutoCloseable {
         LIST_KEYS = Collections.unmodifiableSet(lists);
     }
 
+    // Options that no longer exist, and why — so passing one in `config`
+    // says what happened instead of just "unknown".
+    private static final Map<String, String> REMOVED_CONFIG_KEYS = Map.ofEntries(
+        Map.entry("invalidationPort", "the in-process cache"),
+        Map.entry("disableNativeCache", "the in-process cache"),
+        Map.entry("nativeCacheSize", "the in-process cache"),
+        Map.entry("aggressiveVerify", "the in-process cache"),
+        Map.entry("disableMatviews", "materialized views"),
+        Map.entry("refreshIntervalSecs", "materialized views"),
+        Map.entry("patternTtlSecs", "materialized views"),
+        Map.entry("maxTablesPerView", "materialized views"),
+        Map.entry("maxColumnsPerView", "materialized views"),
+        Map.entry("disableConsolidation", "materialized views"),
+        Map.entry("disableRewrite", "materialized views"),
+        Map.entry("disableShadowMode", "materialized views")
+    );
+
+    // TLS/GSS parameters of the upstream URL. They configure the proxy's hop
+    // to Postgres, not the app's hop to the proxy — which is plain TCP unless
+    // the proxy has its own --tls-cert/--tls-key — so the app's URL drops
+    // them (`?sslmode=require` would make every connection fail). Lower-case;
+    // matched case-insensitively. The libpq names, then pgjdbc's own.
+    private static final Set<String> UPSTREAM_TLS_PARAMS = Set.of(
+        "sslmode", "sslcert", "sslkey", "sslrootcert", "sslcrl", "sslcrldir",
+        "sslpassword", "sslsni", "sslnegotiation", "ssl_min_protocol_version",
+        "ssl_max_protocol_version", "requiressl", "channel_binding", "gssencmode",
+        "krbsrvname", "gsslib",
+        "ssl", "sslfactory", "sslfactoryarg", "sslhostnameverifier",
+        "sslpasswordcallback", "sslresponsetimeout", "kerberosservername"
+    );
+
+    // Proxies this process has spawned, by upstream URL. A start() for an
+    // upstream already here shares its proxy; one for a new upstream gets
+    // ports no live entry claims. Guarded by its own monitor, as is each
+    // instance's `proxy` field and each entry's `holders`.
+    private static final Map<String, Proxy> PROXIES = new HashMap<>();
+
+    // A spawned proxy subprocess, shared by every GoldLapel holding it and
+    // stopped when the last of them stops.
+    private static final class Proxy {
+        final String upstream;
+        final int proxyPort;
+        final int dashboardPort; // 0: no dashboard
+        // Completes when the spawn succeeds or fails; holders that didn't
+        // spawn it wait here.
+        final CompletableFuture<Void> ready = new CompletableFuture<>();
+        volatile Process process;
+        volatile String url;
+        volatile String dashboardToken;
+        int holders;
+
+        Proxy(String upstream, int proxyPort, int dashboardPort) {
+            this.upstream = upstream;
+            this.proxyPort = proxyPort;
+            this.dashboardPort = dashboardPort;
+        }
+
+        boolean claims(int port) {
+            return port == proxyPort || (dashboardPort > 0 && port == dashboardPort);
+        }
+
+        // Started, then exited (or failed to start): its ports are free
+        // again, and a start() for its upstream spawns a fresh one.
+        boolean isDead() {
+            Process proc = process;
+            return ready.isDone() && (ready.isCompletedExceptionally() || proc == null || !proc.isAlive());
+        }
+
+        // Every holder stopped while it was still starting.
+        boolean abandoned() {
+            synchronized (PROXIES) {
+                return holders == 0;
+            }
+        }
+    }
+
     private final String upstream;
-    private final int proxyPort;
-    private final int dashboardPort;
+    // Requested ports until start() settles them: allocated when not
+    // explicit, or the shared proxy's when it reuses one.
+    private volatile int proxyPort;
+    private volatile int dashboardPort;
+    private final boolean proxyPortExplicit;
     private final boolean dashboardPortExplicit;
     private final String logLevel;
     private final String mode;
@@ -108,6 +197,9 @@ public class GoldLapel implements AutoCloseable {
     private final String configFile;
     private final Map<String, Object> config;
     private final List<String> extraArgs;
+    // The proxy itself serves TLS to the app (--tls-cert): the app's URL
+    // then keeps the upstream URL's TLS parameters.
+    private final boolean clientTls;
     private final String client;
     private final boolean silent;
     private final boolean mesh;
@@ -120,9 +212,11 @@ public class GoldLapel implements AutoCloseable {
     // then reads process/internalConn; start writes them then reads
     // `stopped` — so one side always sees the other and cleans up.
     private volatile Process process;
-    private String proxyUrl;
+    private volatile String proxyUrl;
     private volatile Connection internalConn;
     private volatile boolean stopped;
+    // The proxy this instance holds, from start() until stop(). Guarded by PROXIES.
+    private Proxy proxy;
 
     // Nested namespaces — canonical schema-to-core sub-API instances. Each
     // holds a back-reference to this client for shared state (license,
@@ -151,7 +245,7 @@ public class GoldLapel implements AutoCloseable {
     /** Geo sub-API (PostGIS GEOGRAPHY-native) — accessible as
      *  {@code gl.geos.<verb>(...)}. */
     public final GeosApi geos;
-    // Dashboard token — provisioned per-session on startProxy. Exposed to the
+    // Dashboard token — provisioned per proxy when it is spawned. Exposed to the
     // DDL client via dashboardToken(). Non-final because we clear it on stop().
     private volatile String dashboardToken;
     // DDL pattern cache — one entry per (family, name) fetched from the proxy.
@@ -167,10 +261,11 @@ public class GoldLapel implements AutoCloseable {
     // actually spawning the proxy subprocess. Production callers use start().
     GoldLapel(String upstream, GoldLapelOptions options) {
         this.upstream = upstream;
-        this.proxyPort = options.getProxyPort() != null ? options.getProxyPort() : DEFAULT_PROXY_PORT;
+        this.proxyPortExplicit = options.getProxyPort() != null;
+        this.proxyPort = proxyPortExplicit ? options.getProxyPort() : DEFAULT_PROXY_PORT;
 
         // Dashboard: null on options → derive from proxyPort. Non-null →
-        // record the explicit override so startProxy() emits --dashboard-port.
+        // record the explicit override so buildSpawnCmd() emits --dashboard-port.
         Integer dp = options.getDashboardPort();
         this.dashboardPortExplicit = (dp != null);
         this.dashboardPort = dp != null ? dp : this.proxyPort + 1;
@@ -185,9 +280,7 @@ public class GoldLapel implements AutoCloseable {
         // spawning still catch bad keys (same contract as configToArgs()).
         if (cfg != null) {
             for (String key : cfg.keySet()) {
-                if (!VALID_CONFIG_KEYS.contains(key)) {
-                    throw new IllegalArgumentException("Unknown config key: " + key);
-                }
+                checkConfigKey(key);
             }
         }
         this.config = cfg;
@@ -195,6 +288,8 @@ public class GoldLapel implements AutoCloseable {
         this.extraArgs = options.getExtraArgs() != null
             ? new ArrayList<>(options.getExtraArgs())
             : new ArrayList<>();
+        this.clientTls = (cfg != null && cfg.containsKey("tlsCert"))
+            || extraArgs.stream().anyMatch(a -> a.equals("--tls-cert") || a.startsWith("--tls-cert="));
         this.client = options.getClient() != null ? options.getClient() : "java";
         this.silent = options.isSilent();
         this.mesh = options.isMesh();
@@ -226,13 +321,27 @@ public class GoldLapel implements AutoCloseable {
      * {@code GoldLapel} instance backed by an eagerly-opened internal JDBC
      * connection. Implements {@link AutoCloseable} so try-with-resources
      * cleans up the proxy (and the internal connection) automatically.
+     *
+     * <p>Ports: without {@link GoldLapelOptions#setProxyPort}, the proxy
+     * takes the first port from 7932 up whose proxy port and dashboard port
+     * (proxy port + 1, unless set) are both free — of this process's other
+     * proxies and of anything else on the machine. An explicit port another
+     * proxy of this process already uses throws {@link IllegalStateException};
+     * one some other program uses fails with the proxy's own message.
+     *
+     * <p>One proxy per upstream: starting an upstream this process already
+     * runs a proxy for returns a new instance sharing that proxy (its ports
+     * and options; the new call's options are not applied) with its own
+     * internal connection. The proxy stops when the last instance sharing
+     * it stops.
      */
     public static GoldLapel start(String upstream) {
         return start(upstream, null);
     }
 
     /**
-     * Start a Gold Lapel proxy, configuring it via the supplied lambda.
+     * Start a Gold Lapel proxy, configuring it via the supplied lambda. See
+     * {@link #start(String)} for how ports are chosen and proxies shared.
      *
      * <pre>{@code
      * GoldLapel gl = GoldLapel.start(url, opts -> {
@@ -246,11 +355,19 @@ public class GoldLapel implements AutoCloseable {
     }
 
     /**
-     * Start a Gold Lapel proxy, handing the instance to {@code onCreated}
-     * before the subprocess is spawned. Calling {@link #stop()} on that
-     * instance from another thread aborts the in-flight start: the
-     * subprocess is killed and this method throws. Used by the reactive
-     * wrappers so cancellation reaches a start that is still blocking.
+     * Internal hook for the {@code goldlapel-reactor} and
+     * {@code goldlapel-rxjava3} wrappers; application code should call
+     * {@link #start(String, Consumer)}. Not covered by compatibility
+     * guarantees.
+     *
+     * <p>Starts like {@link #start(String, Consumer)}, but first hands the
+     * new, not-yet-started instance to {@code onCreated}, on the calling
+     * thread. The only method valid on it inside the callback, or from
+     * another thread before this method returns, is {@link #stop()}: it
+     * aborts the in-flight start (the subprocess is killed unless another
+     * instance shares it) and this method throws. Everything else —
+     * connections, URLs, ports, the sub-APIs — is undefined until this
+     * method returns. Whatever the callback throws aborts the start.
      */
     public static GoldLapel start(String upstream, Consumer<GoldLapelOptions> configurator,
                                   Consumer<GoldLapel> onCreated) {
@@ -259,20 +376,25 @@ public class GoldLapel implements AutoCloseable {
             configurator.accept(options);
         }
         GoldLapel gl = new GoldLapel(upstream, options);
+        boolean started = false;
         try {
             if (onCreated != null) {
                 onCreated.accept(gl);
             }
-            gl.startProxy();
+            gl.acquireProxy();
             gl.eagerConnect();
             // A concurrent stop() that ran before internalConn was assigned
-            // couldn't close it; the catch below does.
+            // couldn't close it; the stop() below does.
             if (gl.stopped) {
                 throw abortedStart();
             }
-        } catch (RuntimeException e) {
-            gl.stop();
-            throw e;
+            started = true;
+        } finally {
+            // Any failure, Errors included, gives up this instance's hold on
+            // the proxy — stopping the subprocess unless someone shares it.
+            if (!started) {
+                gl.stop();
+            }
         }
         return gl;
     }
@@ -281,16 +403,174 @@ public class GoldLapel implements AutoCloseable {
         return new RuntimeException("Gold Lapel start aborted: stop() was called while starting");
     }
 
-    private void startProxy() {
-        if (process != null && process.isAlive()) {
+    // Hold this upstream's proxy: share the one this process already runs,
+    // or allocate ports and spawn one.
+    private void acquireProxy() {
+        Proxy p;
+        boolean spawn;
+        synchronized (PROXIES) {
+            if (stopped) {
+                throw abortedStart();
+            }
+            p = PROXIES.get(upstream);
+            if (p != null && p.isDead()) {
+                PROXIES.remove(upstream);
+                p = null;
+            }
+            spawn = p == null;
+            if (spawn) {
+                allocatePorts();
+                p = new Proxy(upstream, proxyPort, dashboardPort);
+                PROXIES.put(upstream, p);
+            }
+            p.holders++;
+            proxy = p;
+        }
+        if (spawn) {
+            try {
+                spawnProxy(p);
+            } catch (RuntimeException | Error e) {
+                synchronized (PROXIES) {
+                    PROXIES.remove(upstream, p);
+                }
+                p.ready.completeExceptionally(e);
+                throw e;
+            }
+            p.ready.complete(null);
+        } else {
+            awaitReady(p);
+        }
+        proxyPort = p.proxyPort;
+        dashboardPort = p.dashboardPort;
+        process = p.process;
+        dashboardToken = p.dashboardToken;
+        proxyUrl = p.url;
+        if (spawn) {
+            printBanner(System.err);
+        }
+    }
+
+    // Wait for another start() of the same upstream to finish spawning.
+    private void awaitReady(Proxy p) {
+        while (true) {
+            if (stopped) {
+                throw abortedStart();
+            }
+            try {
+                p.ready.get(STARTUP_POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
+                return;
+            } catch (TimeoutException e) {
+                // Still spawning; check for stop() and wait again.
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                throw new RuntimeException(cause.getMessage(), cause);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for Gold Lapel to start", e);
+            }
+        }
+    }
+
+    // Choose this proxy's ports. Called holding the PROXIES lock, so two
+    // concurrent starts can't pick the same pair. An explicit port that
+    // another live proxy here listens on is an error. Otherwise the proxy
+    // takes the smallest port from 7932 up such that neither it nor its
+    // dashboard port (explicit, or proxy port + 1) is claimed here, and the
+    // OS lets us bind both right now. An explicit port in use by another
+    // program is left for the proxy to refuse, with its own message.
+    private void allocatePorts() {
+        if (proxyPortExplicit) {
+            requireUnclaimed(proxyPort, "proxy");
+        }
+        if (dashboardPort > 0 && (dashboardPortExplicit || proxyPortExplicit)) {
+            requireUnclaimed(dashboardPort, "dashboard");
+        }
+        if (proxyPortExplicit) {
             return;
         }
-        if (stopped) {
-            throw abortedStart();
+        for (int port = DEFAULT_PROXY_PORT; port < 65535; port++) {
+            int dashboard = dashboardPortExplicit ? dashboardPort : port + 1;
+            if (port == dashboard || isClaimed(port) || !isPortFree(port)) {
+                continue;
+            }
+            if (!dashboardPortExplicit && (isClaimed(dashboard) || !isPortFree(dashboard))) {
+                continue;
+            }
+            proxyPort = port;
+            dashboardPort = dashboard;
+            return;
         }
+        throw new IllegalStateException(
+            "I'm afraid Gold Lapel found no free pair of ports at or above " + DEFAULT_PROXY_PORT +
+            ". Choose one with setProxyPort.");
+    }
 
+    private static boolean isClaimed(int port) {
+        return claimant(port) != null;
+    }
+
+    private static Proxy claimant(int port) {
+        for (Proxy p : PROXIES.values()) {
+            if (!p.isDead() && p.claims(port)) {
+                return p;
+            }
+        }
+        return null;
+    }
+
+    private static void requireUnclaimed(int port, String what) {
+        Proxy other = claimant(port);
+        if (other != null) {
+            String setter = what.equals("proxy")
+                ? "setProxyPort, or leave it unset and a free one is chosen"
+                : "setDashboardPort (0 turns the dashboard off)";
+            throw new IllegalStateException(
+                "I'm afraid port " + port + ", for the " + what + ", is already in use by this " +
+                "process's Gold Lapel for " + redactUpstream(other.upstream) +
+                ". Choose another with " + setter + ".");
+        }
+    }
+
+    /**
+     * Whether the OS lets a listener bind {@code port} on every interface
+     * right now — the same check the proxy makes before it starts. The
+     * socket is closed straight away. Java's default SO_REUSEADDR matches
+     * Rust's (on for POSIX, where it only skips TIME_WAIT); SO_REUSEPORT is
+     * never set, so a live listener always makes the bind fail.
+     */
+    static boolean isPortFree(int port) {
+        try (ServerSocket s = new ServerSocket()) {
+            s.bind(new InetSocketAddress(port));
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /** {@code url} with the password in its userinfo, if any, replaced by {@code ***}. */
+    static String redactUpstream(String url) {
+        int scheme = url.indexOf("://");
+        int start = scheme < 0 ? 0 : scheme + 3;
+        int end = indexOfAny(url.substring(start), "/?#");
+        end = end < 0 ? url.length() : start + end;
+        int at = url.lastIndexOf('@', end - 1);
+        if (at < start) {
+            return url;
+        }
+        int colon = url.indexOf(':', start);
+        if (colon < 0 || colon > at) {
+            return url;
+        }
+        return url.substring(0, colon + 1) + "***" + url.substring(at);
+    }
+
+    private void spawnProxy(Proxy p) {
         String binary = findBinary();
         List<String> cmd = buildSpawnCmd(binary);
+        // Something else already listening on our port answers the readiness
+        // connect, so that would prove nothing: the proxy refuses a busy port
+        // and exits, and we wait for that instead.
+        boolean portsBusy = !isPortFree(proxyPort) || (dashboardPort > 0 && !isPortFree(dashboardPort));
 
         Process proc;
         try {
@@ -302,75 +582,94 @@ public class GoldLapel implements AutoCloseable {
             // Pre-set env wins; otherwise generate a fresh one per session.
             String existingToken = pb.environment().get("GOLDLAPEL_DASHBOARD_TOKEN");
             if (existingToken != null && !existingToken.isEmpty()) {
-                this.dashboardToken = existingToken;
+                p.dashboardToken = existingToken;
             } else {
                 byte[] randomBytes = new byte[32];
                 new java.security.SecureRandom().nextBytes(randomBytes);
                 StringBuilder sb = new StringBuilder();
                 for (byte b : randomBytes) sb.append(String.format("%02x", b));
-                this.dashboardToken = sb.toString();
-                pb.environment().put("GOLDLAPEL_DASHBOARD_TOKEN", this.dashboardToken);
+                p.dashboardToken = sb.toString();
+                pb.environment().put("GOLDLAPEL_DASHBOARD_TOKEN", p.dashboardToken);
             }
             pb.redirectInput(ProcessBuilder.Redirect.PIPE);
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
             pb.redirectError(ProcessBuilder.Redirect.PIPE);
             proc = pb.start();
-            process = proc;
+            p.process = proc;
             proc.getOutputStream().close();
         } catch (IOException e) {
             throw new RuntimeException("Failed to start Gold Lapel process", e);
         }
-        if (stopped) {
+        if (p.abandoned()) {
             proc.destroyForcibly();
             throw abortedStart();
         }
 
-        // Drain stderr on a daemon thread to prevent pipe-buffer deadlock
-        StringBuilder stderrBuf = new StringBuilder();
+        // Drain stderr on a daemon thread to prevent pipe-buffer deadlock,
+        // keeping only the tail: it runs for the proxy's whole life.
+        StringBuilder stderrTail = new StringBuilder();
         Thread stderrDrain = new Thread(() -> {
-            try {
-                InputStream err = proc.getErrorStream();
-                byte[] buf = new byte[1024];
+            try (java.io.Reader err = new java.io.InputStreamReader(
+                    proc.getErrorStream(), java.nio.charset.StandardCharsets.UTF_8)) {
+                char[] buf = new char[1024];
                 int n;
                 while ((n = err.read(buf)) != -1) {
-                    stderrBuf.append(new String(buf, 0, n));
+                    synchronized (stderrTail) {
+                        stderrTail.append(buf, 0, n);
+                        if (stderrTail.length() > 2 * STDERR_TAIL_CHARS) {
+                            stderrTail.delete(0, stderrTail.length() - STDERR_TAIL_CHARS);
+                        }
+                    }
                 }
             } catch (IOException ignored) {}
         });
         stderrDrain.setDaemon(true);
         stderrDrain.start();
 
-        // Poll for port readiness, short-circuiting if the process exits early
+        // Ready once the port answers while our child is still alive — a
+        // child that exited (say, refusing a busy port) isn't what answered.
         long deadline = System.nanoTime() + STARTUP_TIMEOUT_MS * 1_000_000L;
         boolean ready = false;
         while (System.nanoTime() < deadline) {
-            if (!proc.isAlive() || stopped) break;
-            if (waitForPort("127.0.0.1", proxyPort, 500)) {
-                ready = true;
+            if (!proc.isAlive() || p.abandoned()) break;
+            if (portsBusy) {
+                try {
+                    proc.waitFor(STARTUP_POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            } else if (waitForPort("127.0.0.1", proxyPort, 500)) {
+                ready = proc.isAlive();
                 break;
             }
         }
 
         if (!ready) {
+            boolean exited = !proc.isAlive();
             proc.destroyForcibly();
-            if (stopped) {
+            if (p.abandoned()) {
                 throw abortedStart();
             }
-            try { proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+            try { proc.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
             try { stderrDrain.join(2000); } catch (InterruptedException ignored) {}
+            String stderr;
+            synchronized (stderrTail) {
+                stderr = stderrTail.toString().strip();
+            }
+            String why = exited
+                ? ": the proxy exited with status " + proc.exitValue() + "."
+                : " within " + (STARTUP_TIMEOUT_MS / 1000) + "s.";
             throw new RuntimeException(
-                "Gold Lapel failed to start on port " + proxyPort +
-                " within " + (STARTUP_TIMEOUT_MS / 1000) + "s.\nstderr: " + stderrBuf
+                "Gold Lapel failed to start on port " + proxyPort + why + "\nstderr: " + stderr
             );
         }
 
-        proxyUrl = makeProxyUrl(upstream, proxyPort);
-
-        printBanner(System.err);
+        p.url = makeProxyUrl(upstream, proxyPort, clientTls);
     }
 
     /**
-     * Build the argv that {@link #startProxy()} hands to {@link ProcessBuilder}.
+     * Build the argv that {@link #spawnProxy} hands to {@link ProcessBuilder}.
      * Package-private so tests can verify CLI-flag emission for top-level
      * options (mesh, disableProxyCache, etc.) without spawning the Rust
      * binary. Order: required flags first ({@code --upstream}, {@code --proxy-port}),
@@ -436,7 +735,7 @@ public class GoldLapel implements AutoCloseable {
      * Write the one-line startup banner to {@code stream}. No-op when the
      * {@code silent} option is set. Package-private so tests can exercise the
      * routing and silent-suppression paths directly without spawning the Rust
-     * binary. {@link #startProxy()} always calls this with {@code System.err}
+     * binary. {@link #acquireProxy()} calls this, for the start that spawned the proxy, with {@code System.err}
      * — library code must never write to stdout unconditionally (app stdout is
      * piped, captured by test runners, consumed by CLI tools).
      */
@@ -509,6 +808,11 @@ public class GoldLapel implements AutoCloseable {
             }
             authority = authority.substring(at + 1);
         }
+        // pgjdbc ignores libpq's application_name; its name is ApplicationName.
+        int q = rest.indexOf('?');
+        if (q >= 0) {
+            rest = rest.substring(0, q) + rest.substring(q).replaceAll("([?&])application_name=", "$1ApplicationName=");
+        }
         return new JdbcConnectionInfo("jdbc:postgresql://" + authority + rest, user, password);
     }
 
@@ -575,26 +879,39 @@ public class GoldLapel implements AutoCloseable {
 
     /**
      * Stop the proxy and close the internal connection. Idempotent.
-     * Called automatically by {@link #close()} (try-with-resources).
+     * Called automatically by {@link #close()} (try-with-resources). A proxy
+     * shared with other instances (same upstream) keeps running until the
+     * last of them stops.
      */
     public void stop() {
         // Set first: an in-flight start() checks this after each step.
         stopped = true;
         // Drop any cached DDL patterns — they're tied to the proxy we're
-        // about to kill.
+        // about to release.
         ddlCache.clear();
         dashboardToken = null;
         if (internalConn != null) {
             try { internalConn.close(); } catch (SQLException ignored) {}
             internalConn = null;
         }
-        Process proc = process;
         process = null;
         proxyUrl = null;
+        Proxy p;
+        boolean last;
+        synchronized (PROXIES) {
+            p = proxy;
+            proxy = null;
+            last = p != null && --p.holders == 0;
+            if (last) {
+                PROXIES.remove(p.upstream, p);
+            }
+        }
+        // Still spawning: the spawning start() sees it abandoned and kills it.
+        Process proc = last ? p.process : null;
         if (proc != null && proc.isAlive()) {
             proc.destroy();
             try {
-                if (!proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                if (!proc.waitFor(5, TimeUnit.SECONDS)) {
                     proc.destroyForcibly();
                     proc.waitFor();
                 }
@@ -666,7 +983,7 @@ public class GoldLapel implements AutoCloseable {
 
     /**
      * Return the dashboard token the wrapper uses to authenticate against
-     * /api/ddl/* on this instance's proxy. Provisioned during startProxy()
+     * /api/ddl/* on this instance's proxy. Provisioned when the proxy is spawned
      * for internally-spawned proxies; {@code null} for externally-launched
      * proxies (in that case the DDL client falls back to env/file).
      */
@@ -1128,9 +1445,7 @@ public class GoldLapel implements AutoCloseable {
             String key = entry.getKey();
             Object value = entry.getValue();
 
-            if (!VALID_CONFIG_KEYS.contains(key)) {
-                throw new IllegalArgumentException("Unknown config key: " + key);
-            }
+            checkConfigKey(key);
 
             String flag = "--" + camelToKebab(key);
 
@@ -1165,6 +1480,17 @@ public class GoldLapel implements AutoCloseable {
         return args;
     }
 
+    private static void checkConfigKey(String key) {
+        String removedWith = REMOVED_CONFIG_KEYS.get(key);
+        if (removedWith != null) {
+            throw new IllegalArgumentException(
+                "Config key '" + key + "' was removed with " + removedWith + "; drop it from your config.");
+        }
+        if (!VALID_CONFIG_KEYS.contains(key)) {
+            throw new IllegalArgumentException("Unknown config key: " + key);
+        }
+    }
+
     // ── Internal methods ───────────────────────────────────
 
     private static final Pattern WITH_PORT =
@@ -1173,8 +1499,9 @@ public class GoldLapel implements AutoCloseable {
     private static final Pattern NO_PORT =
         Pattern.compile("^(postgres(?:ql)?://(?:.*@)?)([^:/?#]+)(.*)$");
 
+    // libpq spells it application_name; pgjdbc only reads ApplicationName.
     private static final Pattern APP_NAME_PRESENT =
-        Pattern.compile("[?&]application_name=");
+        Pattern.compile("[?&](application_name|ApplicationName)=");
 
     static String findBinary() {
         // 1. Explicit override via env var
@@ -1237,6 +1564,16 @@ public class GoldLapel implements AutoCloseable {
     }
 
     static String makeProxyUrl(String upstream, int port) {
+        return makeProxyUrl(upstream, port, false);
+    }
+
+    /**
+     * The URL the app connects to: {@code upstream} with the host replaced
+     * by {@code localhost:port}, the application-name marker added, and —
+     * unless the proxy serves TLS to the app ({@code clientTls}) — the
+     * upstream's TLS/GSS parameters removed.
+     */
+    static String makeProxyUrl(String upstream, int port, boolean clientTls) {
         // Build a proxy URL: replace host with localhost and set the proxy port.
         // Uses regex instead of java.net.URI to avoid decoding percent-encoded
         // characters in passwords (e.g. %40 for @), which would corrupt the URL.
@@ -1244,23 +1581,43 @@ public class GoldLapel implements AutoCloseable {
         // pg URL with explicit port: scheme://[userinfo@]host:PORT[/path][?query]
         Matcher m = WITH_PORT.matcher(upstream);
         if (m.matches()) {
-            return injectApplicationName(m.group(1) + "localhost:" + port + m.group(4));
+            String rest = clientTls ? m.group(4) : withoutTlsParams(m.group(4));
+            return injectApplicationName(m.group(1) + "localhost:" + port + rest);
         }
 
         // pg URL without port: scheme://[userinfo@]host[/path][?query]
         m = NO_PORT.matcher(upstream);
         if (m.matches()) {
-            return injectApplicationName(m.group(1) + "localhost:" + port + m.group(3));
+            String rest = clientTls ? m.group(3) : withoutTlsParams(m.group(3));
+            return injectApplicationName(m.group(1) + "localhost:" + port + rest);
         }
 
-        // bare host:port (only if not a URL — guard against splitting on scheme colons).
-        // Bare-host form skips the marker — atypical caller path.
-        if (!upstream.contains("://") && upstream.contains(":")) {
-            return "localhost:" + port;
-        }
-
-        // bare host
+        // bare host:port or bare host — no query, and no marker (atypical
+        // caller path).
         return "localhost:" + port;
+    }
+
+    // `rest` ([/path][?query][#fragment], everything after host:port) without
+    // the upstream TLS/GSS parameters.
+    static String withoutTlsParams(String rest) {
+        int q = rest.indexOf('?');
+        if (q < 0) {
+            return rest;
+        }
+        int hash = rest.indexOf('#', q);
+        String query = hash < 0 ? rest.substring(q + 1) : rest.substring(q + 1, hash);
+        StringBuilder kept = new StringBuilder();
+        for (String param : query.split("&")) {
+            int eq = param.indexOf('=');
+            String key = (eq < 0 ? param : param.substring(0, eq)).toLowerCase(Locale.ROOT);
+            if (param.isEmpty() || UPSTREAM_TLS_PARAMS.contains(key)) {
+                continue;
+            }
+            kept.append(kept.length() == 0 ? "" : "&").append(param);
+        }
+        return rest.substring(0, q)
+            + (kept.length() == 0 ? "" : "?" + kept)
+            + (hash < 0 ? "" : rest.substring(hash));
     }
 
     static boolean waitForPort(String host, int port, long timeoutMs) {

@@ -249,4 +249,26 @@ class ReactiveGoldLapelUnitTest {
         assertSame(internal, gl.connection());
         assertSame(sync, gl.sync());
     }
+
+    @Test
+    void r2dbcOptionsCarryTheApplicationName() throws Exception {
+        GoldLapel sync = syncWithConnection(mock(Connection.class));
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("proxyUrl");
+        f.setAccessible(true);
+        f.set(sync, "postgresql://u:p@localhost:7932/db?connect_timeout=5&application_name=goldlapel:java:1.2.3");
+
+        io.r2dbc.spi.ConnectionFactoryOptions opts = ReactiveGoldLapel.r2dbcOptions(sync);
+        assertEquals("goldlapel:java:1.2.3", opts.getValue(ReactiveGoldLapel.APPLICATION_NAME));
+        assertEquals("db", opts.getValue(io.r2dbc.spi.ConnectionFactoryOptions.DATABASE));
+    }
+
+    @Test
+    void r2dbcOptionsOmitTheApplicationNameWhenThereIsNone() throws Exception {
+        GoldLapel sync = syncWithConnection(mock(Connection.class));
+        java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("proxyUrl");
+        f.setAccessible(true);
+        f.set(sync, "postgresql://u:p@localhost:7932/db");
+
+        assertNull(ReactiveGoldLapel.r2dbcOptions(sync).getValue(ReactiveGoldLapel.APPLICATION_NAME));
+    }
 }

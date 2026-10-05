@@ -41,9 +41,9 @@ try (GoldLapel gl = GoldLapel.start("postgresql://user:pass@localhost:5432/mydb"
 // try-with-resources auto-stops the proxy
 ```
 
-Point any JDBC driver at `gl.getJdbcUrl()` (with `gl.getJdbcUser()` / `gl.getJdbcPassword()` in a `Properties`, since JDBC rejects inline userinfo). Gold Lapel sits between your app and your DB, caching results and creating indexes from your query patterns. Connections are tagged `application_name=goldlapel:java:<version>` so they're recognisable in `pg_stat_activity`.
+Point any JDBC driver at `gl.getJdbcUrl()` (with `gl.getJdbcUser()` / `gl.getJdbcPassword()` in a `Properties`, since JDBC rejects inline userinfo). Gold Lapel sits between your app and your DB, caching results and creating indexes from your query patterns. Connections are tagged `goldlapel:java:<version>` — `ApplicationName` in `getJdbcUrl()`, `application_name` in `getUrl()` — so they're recognisable in `pg_stat_activity`. The upstream URL's TLS parameters (`sslmode` and the like) stay on the proxy's hop to Postgres; the app's URL leaves them out.
 
-The proxy listens on two ports: the proxy itself (`setProxyPort`, default 7932) and the dashboard (`setDashboardPort`, default proxy port + 1; `0` disables it).
+The proxy listens on two ports: the proxy itself (`setProxyPort`) and the dashboard (`setDashboardPort`, default proxy port + 1; `0` disables it). Leave the proxy port unset and it's the first port from 7932 up where both are free, so several databases (or test contexts) in one JVM never collide. Starting the same upstream twice shares one proxy, which stops when the last instance using it stops.
 
 Scoped transactional coordination via `gl.using(conn, Runnable)`, reactive (`goldlapel-reactor`, `goldlapel-rxjava3`) and Spring Boot (`goldlapel-spring-boot`) flavours are in the docs.
 

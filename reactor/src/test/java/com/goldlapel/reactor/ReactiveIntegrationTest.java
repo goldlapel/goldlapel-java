@@ -139,4 +139,21 @@ class ReactiveIntegrationTest {
             .expectNext(42L)
             .verifyComplete();
     }
+
+    @Test
+    void r2dbcConnectionsAreTaggedInPgStatActivity() {
+        Mono<String> pipeline = ReactiveGoldLapel.start(upstream, opts -> opts.setSilent(true))
+            .flatMap(gl -> Mono.usingWhen(
+                    Mono.from(gl.connectionFactory().create()),
+                    conn -> Mono.from(conn.createStatement(
+                            "SELECT application_name FROM pg_stat_activity WHERE pid = pg_backend_pid()")
+                        .execute())
+                        .flatMap(result -> Mono.from(result.map((row, meta) -> row.get(0, String.class)))),
+                    conn -> conn.close())
+                .flatMap(name -> gl.stop().thenReturn(name)));
+
+        StepVerifier.create(pipeline)
+            .assertNext(name -> assertTrue(name.startsWith("goldlapel:java:"), name))
+            .verifyComplete();
+    }
 }

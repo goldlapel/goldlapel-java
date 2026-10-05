@@ -46,6 +46,13 @@ public class GoldLapelOptions {
         return proxyPort;
     }
 
+    /**
+     * Proxy listen port. When {@code null} (default), the proxy takes the
+     * first port from 7932 up whose proxy and dashboard ports are both free —
+     * of this JVM's other Gold Lapel proxies and of anything else on the
+     * machine. An explicit port another proxy in this JVM uses makes
+     * {@link GoldLapel#start(String, java.util.function.Consumer)} throw.
+     */
     public void setProxyPort(Integer proxyPort) {
         this.proxyPort = proxyPort;
     }

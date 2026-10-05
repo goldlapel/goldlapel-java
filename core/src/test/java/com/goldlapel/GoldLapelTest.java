@@ -166,9 +166,73 @@ class MakeProxyUrlTest {
     @Test
     void preservesQueryParams() {
         assertEquals(
-            "postgresql://user:pass@localhost:7932/mydb?sslmode=require&" + APP_NAME_SUFFIX,
-            GoldLapel.makeProxyUrl("postgresql://user:pass@remote:5432/mydb?sslmode=require", 7932)
+            "postgresql://user:pass@localhost:7932/mydb?connect_timeout=10&" + APP_NAME_SUFFIX,
+            GoldLapel.makeProxyUrl("postgresql://user:pass@remote:5432/mydb?connect_timeout=10", 7932)
         );
+    }
+
+    // The upstream's TLS/GSS parameters configure the proxy's hop to
+    // Postgres. The app talks plain TCP to the proxy, so they must not
+    // reach its URL: `sslmode=require` would fail every connection.
+    @Test
+    void dropsUpstreamTlsParams() {
+        assertEquals(
+            "postgresql://user:pass@localhost:7932/mydb?application_name=my-app&connect_timeout=5",
+            GoldLapel.makeProxyUrl(
+                "postgresql://user:pass@ep-x.neon.tech/mydb?sslmode=require&channel_binding=require"
+                    + "&application_name=my-app&SSLRootCert=/ca.pem&connect_timeout=5&GSSENCMODE=disable",
+                7932)
+        );
+    }
+
+    @Test
+    void dropsPgjdbcTlsParams() {
+        assertEquals(
+            "postgresql://localhost:7932/mydb?" + APP_NAME_SUFFIX,
+            GoldLapel.makeProxyUrl(
+                "postgresql://host:5432/mydb?ssl=true&sslfactory=org.postgresql.ssl.NonValidatingFactory",
+                7932)
+        );
+    }
+
+    @Test
+    void dropsTheQueryWhenOnlyTlsParamsWereThere() {
+        assertEquals(
+            "postgresql://localhost:7932/mydb?application_name=x#frag",
+            GoldLapel.makeProxyUrl("postgresql://host/mydb?sslmode=require&application_name=x#frag", 7932)
+        );
+    }
+
+    @Test
+    void keepsTlsParamsWhenTheProxyServesTls() {
+        assertEquals(
+            "postgresql://localhost:7932/mydb?sslmode=require&" + APP_NAME_SUFFIX,
+            GoldLapel.makeProxyUrl("postgresql://host:5432/mydb?sslmode=require", 7932, true)
+        );
+    }
+
+    @Test
+    void tlsConfigKeyTurnsClientTlsOn() {
+        GoldLapelOptions opts = new GoldLapelOptions();
+        opts.setConfig(Map.of("tlsCert", "/c.pem", "tlsKey", "/k.pem"));
+        GoldLapel withTls = new GoldLapel("postgresql://h/db?sslmode=require", opts);
+        GoldLapelOptions viaArgs = new GoldLapelOptions();
+        viaArgs.setExtraArgs("--tls-cert=/c.pem", "--tls-key=/k.pem");
+        GoldLapel withTlsArgs = new GoldLapel("postgresql://h/db?sslmode=require", viaArgs);
+        GoldLapel without = new GoldLapel("postgresql://h/db?sslmode=require", new GoldLapelOptions());
+        assertTrue(readClientTls(withTls));
+        assertTrue(readClientTls(withTlsArgs));
+        assertFalse(readClientTls(without));
+    }
+
+    private static boolean readClientTls(GoldLapel gl) {
+        try {
+            java.lang.reflect.Field f = GoldLapel.class.getDeclaredField("clientTls");
+            f.setAccessible(true);
+            return f.getBoolean(gl);
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Test
@@ -222,7 +286,7 @@ class MakeProxyUrlTest {
     @Test
     void atSignInPasswordWithQueryParams() {
         assertEquals(
-            "postgresql://user:p@ss@localhost:7932/mydb?sslmode=require&param=val@ue&" + APP_NAME_SUFFIX,
+            "postgresql://user:p@ss@localhost:7932/mydb?param=val@ue&" + APP_NAME_SUFFIX,
             GoldLapel.makeProxyUrl("postgresql://user:p@ss@host:5432/mydb?sslmode=require&param=val@ue", 7932)
         );
     }
@@ -246,9 +310,36 @@ class ApplicationNameMarkerTest {
 
     @Test
     void appendsMarkerAfterExistingQueryParams() {
-        String out = GoldLapel.makeProxyUrl("postgresql://localhost:5432/mydb?sslmode=require", 7932);
-        assertTrue(out.contains("sslmode=require"));
+        String out = GoldLapel.makeProxyUrl("postgresql://localhost:5432/mydb?connect_timeout=5", 7932);
+        assertTrue(out.contains("connect_timeout=5"));
         assertTrue(out.contains("&application_name=goldlapel:java:"));
+    }
+
+    @Test
+    void respectsUserSetPgjdbcApplicationName() {
+        // A JDBC-style upstream (Spring) spells it ApplicationName.
+        String out = GoldLapel.makeProxyUrl(
+            "postgresql://localhost:5432/mydb?ApplicationName=my-app", 7932);
+        assertTrue(out.contains("ApplicationName=my-app"));
+        assertFalse(out.contains("goldlapel:java"));
+    }
+
+    // pgjdbc reads ApplicationName and silently ignores application_name, so
+    // the JDBC URL must carry pgjdbc's spelling for the marker to reach
+    // pg_stat_activity.
+    @Test
+    void jdbcUrlCarriesPgjdbcSpelling() {
+        String url = GoldLapel.makeProxyUrl("postgresql://u:p@localhost:5432/mydb?connect_timeout=5", 7932);
+        String jdbc = GoldLapel.toJdbcConnectionInfo(url).url;
+        assertEquals("jdbc:postgresql://localhost:7932/mydb?connect_timeout=5&ApplicationName="
+            + GoldLapel.applicationNameMarker(), jdbc);
+        assertTrue(url.contains("application_name="), "libpq-style URL keeps libpq's spelling: " + url);
+    }
+
+    @Test
+    void jdbcUrlRenamesUserApplicationName() {
+        assertEquals("jdbc:postgresql://localhost:7932/db?ApplicationName=my-app",
+            GoldLapel.toJdbcConnectionInfo("postgresql://localhost:7932/db?application_name=my-app").url);
     }
 
     @Test
@@ -681,6 +772,24 @@ class ConfigKeysTest {
     }
 
     @Test
+    void inProcessCacheKeysSayTheyWereRemoved() {
+        // Java's typed setters can't take an unknown option; the config map
+        // can, so a removed option moved into it must say what happened.
+        for (String key : new String[]{
+                "invalidationPort", "disableNativeCache", "nativeCacheSize", "aggressiveVerify"}) {
+            GoldLapelOptions opts = new GoldLapelOptions();
+            opts.setConfig(Collections.singletonMap(key, 1));
+            IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> new GoldLapel("postgresql://h/db", opts), key);
+            assertEquals("Config key '" + key + "' was removed with the in-process cache; "
+                + "drop it from your config.", ex.getMessage());
+        }
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+            () -> GoldLapel.configToArgs(Collections.singletonMap("refreshIntervalSecs", 60)));
+        assertTrue(ex.getMessage().contains("removed with materialized views"), ex.getMessage());
+    }
+
+    @Test
     void isUnmodifiable() {
         Set<String> keys = GoldLapel.configKeys();
         assertThrows(UnsupportedOperationException.class, () -> keys.add("bogus"));
@@ -997,5 +1106,27 @@ class ConfigToArgsTest {
             assertFalse(m.getName().contains("EnableProxyCacheForWrappers"),
                 "Model B pivot: " + m.getName() + " must not be reintroduced");
         }
+    }
+}
+
+
+class RedactUpstreamTest {
+
+    @Test
+    void hidesThePassword() {
+        assertEquals("postgresql://alice:***@db:5432/app",
+            GoldLapel.redactUpstream("postgresql://alice:s3cret@db:5432/app"));
+    }
+
+    @Test
+    void hidesAPasswordContainingAt() {
+        assertEquals("postgresql://alice:***@db/app?x=1",
+            GoldLapel.redactUpstream("postgresql://alice:p@ss@db/app?x=1"));
+    }
+
+    @Test
+    void leavesUrlsWithoutAPasswordAlone() {
+        assertEquals("postgresql://alice@db/app", GoldLapel.redactUpstream("postgresql://alice@db/app"));
+        assertEquals("postgresql://db:5432/app?u=a@b", GoldLapel.redactUpstream("postgresql://db:5432/app?u=a@b"));
     }
 }

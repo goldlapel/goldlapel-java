@@ -7,6 +7,7 @@ import com.goldlapel.Utils;
 import io.r2dbc.spi.ConnectionFactories;
 import io.r2dbc.spi.ConnectionFactory;
 import io.r2dbc.spi.ConnectionFactoryOptions;
+import io.r2dbc.spi.Option;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -133,9 +134,15 @@ public final class ReactiveGoldLapel implements AutoCloseable {
             final AtomicReference<GoldLapel> spawned = new AtomicReference<>();
             final AtomicBoolean cancelled = new AtomicBoolean();
 
+            // stop() waits up to 5s for the subprocess to exit, so it runs
+            // on boundedElastic, not on the cancelling thread. `cancelled`
+            // is set here and now, so nothing is emitted after the cancel.
             sink.onCancel(() -> {
                 cancelled.set(true);
-                stopQuietly(spawned.get());
+                GoldLapel gl = spawned.get();
+                if (gl != null) {
+                    Schedulers.boundedElastic().schedule(() -> stopQuietly(gl));
+                }
             });
 
             Schedulers.boundedElastic().schedule(() -> {
@@ -172,10 +179,13 @@ public final class ReactiveGoldLapel implements AutoCloseable {
     }
 
     private static ConnectionFactory buildR2dbcFactory(GoldLapel gl) {
-        // Build an R2DBC ConnectionFactory pointing at the proxy. Parse the
-        // JDBC URL / user / password to populate the R2DBC options — the
-        // proxy URL is already a plain postgres:// URL, but R2DBC uses its
-        // own ConnectionFactoryOptions DSL rather than URL strings.
+        return ConnectionFactories.get(r2dbcOptions(gl));
+    }
+
+    // R2DBC options pointing at the proxy. Parse the JDBC URL / user /
+    // password to populate them — R2DBC uses its own ConnectionFactoryOptions
+    // DSL rather than URL strings.
+    static ConnectionFactoryOptions r2dbcOptions(GoldLapel gl) {
         String host = "127.0.0.1";
         int port = gl.getProxyPort();
         String jdbcUrl = gl.getJdbcUrl(); // jdbc:postgresql://host:port/db?query
@@ -196,7 +206,32 @@ public final class ReactiveGoldLapel implements AutoCloseable {
         if (password != null) {
             builder.option(ConnectionFactoryOptions.PASSWORD, password);
         }
-        return ConnectionFactories.get(builder.build());
+        // The same application name JDBC connections carry (the
+        // goldlapel:java:<version> marker, or the upstream URL's own).
+        String applicationName = parseQueryParam(jdbcUrl, "ApplicationName");
+        if (applicationName != null) {
+            builder.option(APPLICATION_NAME, applicationName);
+        }
+        return builder.build();
+    }
+
+    // r2dbc-postgresql's application-name option.
+    static final Option<String> APPLICATION_NAME = Option.valueOf("applicationName");
+
+    // The URL-decoded value of query parameter `name` in `url`, or null.
+    static String parseQueryParam(String url, String name) {
+        if (url == null) return null;
+        int q = url.indexOf('?');
+        if (q < 0) return null;
+        int h = url.indexOf('#', q);
+        String query = h < 0 ? url.substring(q + 1) : url.substring(q + 1, h);
+        for (String param : query.split("&")) {
+            if (param.startsWith(name + "=")) {
+                return java.net.URLDecoder.decode(param.substring(name.length() + 1),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            }
+        }
+        return null;
     }
 
     // Extract the database name from a JDBC URL. Returns null if absent.

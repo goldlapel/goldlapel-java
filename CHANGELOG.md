@@ -168,18 +168,21 @@ post-processing. Code that called the renamed methods through the bean
 (e.g. `goldLapel.docInsert(...)`) needs the same search-and-replace as any
 other caller.
 
-**Multiple DataSources no longer collide on ports.** Each proxy listens on
-two ports (proxy and dashboard, proxy + 1), but a second upstream was given
-the next port up — the first proxy's dashboard. Each new upstream now gets
-the smallest port at or above `goldlapel.proxy-port` whose proxy and
-dashboard ports are both unclaimed, so two DataSources land on 7932 and 7934.
-An explicit `goldlapel.dashboard-port` now applies to the first proxy only
-(it used to be handed to every proxy, which could never all bind it); later
-proxies derive proxy port + 1, and allocation skips the explicit dashboard
-port. `goldlapel.dashboard-port: 0` disables the dashboard on every proxy,
-so each claims only its proxy port and they sit on consecutive ports (7932,
-7933). DataSources sharing an upstream now share one proxy — previously
-each started its own process on the same port, which could not bind.
+**Multiple DataSources no longer collide on ports.** Port allocation now
+happens in `GoldLapel.start` (see *Ports and proxy sharing* below), so it
+also covers several cached test contexts in one JVM. With no
+`goldlapel.proxy-port` set — now the default; it was 7932 — each upstream's
+proxy gets free ports, so two DataSources land on 7932 and 7934. An explicit
+`goldlapel.proxy-port`, or a non-zero `goldlapel.dashboard-port`, applies to
+the first proxy only; later proxies get free ports (a `proxy-port` of 9000
+used to be a base the later proxies counted up from). `goldlapel.dashboard-port:
+0` disables the dashboard on every proxy. DataSources sharing an upstream
+share one proxy.
+
+**Unknown `goldlapel.*` properties fail startup** instead of being ignored —
+including the removed `goldlapel.invalidation-port`,
+`goldlapel.disable-native-cache`, `goldlapel.aggressive-verify` and
+`goldlapel.disable-matviews`, and typos of real properties.
 
 ### Reactive start
 
@@ -188,9 +191,64 @@ each started its own process on the same port, which could not bind.
 `RxJavaGoldLapel.start`) while the proxy was still starting used to leave the
 subprocess running until the blocking start finished on its own. The
 instance is now handed over before the spawn, so cancellation kills it
-immediately. The new `GoldLapel.start(upstream, configurator, onCreated)`
-overload exposes the same hook: calling `stop()` on the instance passed to
-`onCreated` aborts an in-flight start, which then throws.
+immediately. Cancelling no longer blocks the cancelling thread while the subprocess shuts
+down (up to 5 seconds); that wait now happens on `Schedulers.boundedElastic()`.
+
+`GoldLapel.start(upstream, configurator, onCreated)` is an **internal hook**
+for the reactive modules, outside compatibility guarantees: it hands the
+not-yet-started instance to `onCreated` before spawning, and `stop()` is the
+only method valid on that instance until `start` returns — it aborts the
+in-flight start, which then throws. Applications should call
+`GoldLapel.start(upstream, configurator)`.
+
+### Ports and proxy sharing
+
+**`GoldLapel.start` allocates ports.** Every start used to default to 7932,
+so two `GoldLapel.start` calls for different databases collided — and since
+the proxy then co-bound the port, the second app's queries could silently
+reach the first one's database. Now, with no `setProxyPort`, the proxy takes
+the first port from 7932 up whose proxy port and dashboard port (proxy + 1,
+or `setDashboardPort`) are free: not used by another Gold Lapel proxy in this
+JVM, and bindable right now. An explicit port another proxy in this JVM uses
+throws `IllegalStateException` naming the port and that proxy's upstream
+(password redacted). An explicit port some other program holds fails with the
+proxy's own "already in use" message.
+
+**One proxy per upstream.** Starting an upstream this JVM already runs a
+proxy for returns a new instance sharing that proxy — its ports and options
+(the new call's options are not applied) — with its own internal
+connection. The proxy stops when the last instance sharing it stops.
+
+**A start only succeeds if its own proxy answered.** If the subprocess exits
+during startup, `start` fails with its exit status and the tail of its
+stderr, rather than accepting whatever else answered on the port. Failures
+of any kind — `Error`s included — now stop the subprocess.
+
+### Connection URLs
+
+**The application-name marker reaches `pg_stat_activity` from JDBC.** pgjdbc
+reads `ApplicationName`, not libpq's `application_name`, so JDBC connections
+showed up as "PostgreSQL JDBC Driver". `getJdbcUrl()` now carries
+`ApplicationName=goldlapel:java:<version>` (an `application_name` from the
+upstream URL is carried over under pgjdbc's name); `getUrl()` keeps libpq's
+spelling. The reactive `connectionFactory()` sets R2DBC's `applicationName`.
+
+**Upstream TLS parameters stay on the upstream hop.** `getUrl()` and
+`getJdbcUrl()` no longer carry `sslmode`, `sslrootcert`, `channel_binding`,
+`gssencmode` and the other TLS/GSS parameters (libpq's and pgjdbc's, such as
+`ssl` and `sslfactory`): the app talks plain TCP to the proxy, so
+`?sslmode=require` — in every Neon, Supabase and RDS URL — made its
+connections fail. The proxy still uses them toward Postgres. They are kept
+when the proxy serves TLS itself (`tlsCert` in `config`, or `--tls-cert` in
+`extraArgs`).
+
+**Removed `config` keys say so.** `invalidationPort`, `disableNativeCache`,
+`nativeCacheSize` and `aggressiveVerify` in the `config` map throw "was
+removed with the in-process cache"; the materialized-view keys say they
+went with materialized views. (Removed top-level options had their setters
+deleted, so they no longer compile.)
+
+### Startup
 
 **`start()` no longer waits indefinitely on a silent proxy.** The internal
 JDBC connection now uses a 30-second `loginTimeout`; a `loginTimeout` in the

@@ -13,11 +13,9 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, DisposableBean {
 
@@ -27,11 +25,9 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
 
     private final GoldLapelProperties properties;
     // One proxy per unique upstream URL: DataSources sharing an upstream
-    // share its proxy rather than starting a second one on the same port.
+    // share its proxy. (GoldLapel.start shares across contexts too, and
+    // allocates ports that no other proxy of this JVM uses.)
     private final Map<String, GoldLapel> proxies = new LinkedHashMap<>();
-    // Every port a proxy started here listens on: its proxy port and its
-    // dashboard port (unless the dashboard is disabled).
-    private final Set<Integer> claimedPorts = new HashSet<>();
 
     public GoldLapelDataSourcePostProcessor(GoldLapelProperties properties) {
         this.properties = properties;
@@ -113,23 +109,27 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
         return ds;
     }
 
-    // Start the proxy for a new upstream. A dashboard-port of 0 disables the
-    // dashboard on every proxy; any other explicit dashboard-port belongs to
-    // the first proxy only, and later ones derive theirs (proxy port + 1).
+    // Start the proxy for a new upstream. An explicit proxy-port, or a
+    // non-zero dashboard-port, belongs to the first proxy only; later ones
+    // get free ports chosen by GoldLapel.start. A dashboard-port of 0
+    // disables the dashboard on every proxy.
     private GoldLapel startProxy(String upstream, String beanName) {
+        boolean first = proxies.isEmpty();
+        Integer proxyPort = first ? properties.getProxyPort() : null;
         Integer dashboardPort = properties.getDashboardPort();
-        if (dashboardPort != null && dashboardPort != 0 && !proxies.isEmpty()) {
+        if (dashboardPort != null && dashboardPort != 0 && !first) {
             dashboardPort = null;
         }
         final Integer assignedDashboardPort = dashboardPort;
-        final int port = claimPorts(dashboardPort);
 
         String extraArgsStr = properties.getExtraArgs();
         Map<String, String> configMap = properties.getConfig();
 
         try {
             return GoldLapel.start(upstream, opts -> {
-                opts.setProxyPort(port);
+                if (proxyPort != null) {
+                    opts.setProxyPort(proxyPort);
+                }
                 if (configMap != null && !configMap.isEmpty()) {
                     opts.setConfig(normalizeCamelCase(configMap));
                 }
@@ -166,26 +166,8 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
             String safeUpstream = upstream.replaceAll("://.*@", "://***@");
             throw new RuntimeException(
                     "Gold Lapel failed to start proxy for datasource '" + beanName +
-                    "' (upstream: " + safeUpstream + ", port: " + port + ")", e);
+                    "' (upstream: " + safeUpstream + "): " + e.getMessage(), e);
         }
-    }
-
-    // Pick the smallest proxy port >= goldlapel.proxy-port such that neither it
-    // nor its dashboard port (explicit, or proxy port + 1) is already claimed
-    // by a proxy started here, then claim both. A dashboard port of 0 means
-    // no dashboard, so nothing beyond the proxy port is claimed.
-    private int claimPorts(Integer dashboardPort) {
-        int port = properties.getProxyPort();
-        while (claimedPorts.contains(port)
-                || (dashboardPort == null && claimedPorts.contains(port + 1))) {
-            port++;
-        }
-        int dashboard = dashboardPort != null ? dashboardPort : port + 1;
-        claimedPorts.add(port);
-        if (dashboard > 0) {
-            claimedPorts.add(dashboard);
-        }
-        return port;
     }
 
     // Visible for testing
