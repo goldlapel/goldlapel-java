@@ -134,11 +134,84 @@ class FactoryApiTest {
         }
     }
 
+    @Test
+    void stopFromAnotherThreadAbortsInFlightStart(@TempDir Path tmp) throws Exception {
+        // The reactive wrappers cancel a start by calling stop() on the
+        // instance handed to onCreated while start() is still blocking. The
+        // fake binary here accepts connections but never answers, so the
+        // eager JDBC connect blocks until stop() kills the subprocess.
+        Assumptions.assumeTrue(
+            !System.getProperty("os.name", "").toLowerCase().contains("windows"),
+            "POSIX-only test (needs /bin/sh + python3)"
+        );
+        Assumptions.assumeTrue(isOnPath("python3"), "python3 not on PATH");
+
+        int port;
+        try (ServerSocket probe = new ServerSocket(0)) {
+            port = probe.getLocalPort();
+        }
+        Path pidFile = tmp.resolve("fake.pid");
+        Path script = writeFakeProxyBinary(tmp, pidFile,
+            "conns = []\n" +
+            "while True:\n" +
+            "    c, _ = s.accept()\n" +
+            "    conns.append(c)\n");
+
+        String origBin = System.getenv("GOLDLAPEL_BINARY");
+        try {
+            setEnvReflective("GOLDLAPEL_BINARY", script.toString());
+
+            AtomicReference<GoldLapel> created = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Thread starter = new Thread(() -> {
+                try {
+                    GoldLapel.start("postgresql://localhost:5432/mydb",
+                        opts -> opts.setProxyPort(port), created::set);
+                } catch (Throwable t) {
+                    failure.set(t);
+                }
+            });
+            starter.start();
+
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (System.nanoTime() < deadline && !Files.exists(pidFile)) {
+                Thread.sleep(25);
+            }
+            assertTrue(Files.exists(pidFile), "fake binary should have recorded its PID");
+            assertNotNull(created.get(), "onCreated should run before the spawn");
+
+            long stopAt = System.nanoTime();
+            created.get().stop();
+            starter.join(10_000);
+            assertFalse(starter.isAlive(), "start() should return promptly after stop()");
+            assertTrue((System.nanoTime() - stopAt) / 1_000_000L < 10_000,
+                "start() should abort well inside the eager-connect timeout");
+            assertNotNull(failure.get(), "an aborted start() must throw, not return an instance");
+
+            long pid = Long.parseLong(Files.readString(pidFile).trim());
+            waitForProcessExit(pid, 5000);
+            assertFalse(
+                java.lang.ProcessHandle.of(pid).map(java.lang.ProcessHandle::isAlive).orElse(false),
+                "subprocess PID " + pid + " should have been killed by stop() — leak!"
+            );
+        } finally {
+            setEnvReflective("GOLDLAPEL_BINARY", origBin);
+        }
+    }
+
     private static Path writeFakeProxyBinary(Path tmp, Path pidFile) throws IOException {
+        // Accept + close every inbound connection (makes JDBC handshake read EOF).
+        return writeFakeProxyBinary(tmp, pidFile,
+            "while True:\n" +
+            "    c, _ = s.accept()\n" +
+            "    c.close()\n");
+    }
+
+    private static Path writeFakeProxyBinary(Path tmp, Path pidFile, String acceptLoop) throws IOException {
         Path script = tmp.resolve("fake-goldlapel.sh");
         // Shell parses --proxy-port, records its own PID ($$ survives exec),
-        // then exec's into a python server that binds the port and accepts +
-        // closes every inbound connection (makes JDBC handshake read EOF).
+        // then exec's into a python server that binds the port and runs
+        // acceptLoop against the listening socket `s`.
         Files.writeString(script,
             "#!/bin/sh\n" +
             "echo $$ > \"" + pidFile.toString() + "\"\n" +
@@ -155,9 +228,7 @@ class FactoryApiTest {
             "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n" +
             "s.bind(('127.0.0.1', ${PORT}))\n" +
             "s.listen(5)\n" +
-            "while True:\n" +
-            "    c, _ = s.accept()\n" +
-            "    c.close()\n" +
+            acceptLoop +
             "\"\n"
         );
         script.toFile().setExecutable(true);

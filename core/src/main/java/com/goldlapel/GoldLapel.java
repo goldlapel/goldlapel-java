@@ -51,6 +51,10 @@ public class GoldLapel implements AutoCloseable {
     static final int DEFAULT_PROXY_PORT = 7932;
     static final long STARTUP_TIMEOUT_MS = 10000;
     static final long STARTUP_POLL_INTERVAL_MS = 50;
+    // Upper bound on the eager JDBC connect (pgjdbc loginTimeout). Without it a
+    // proxy that accepts TCP but never answers the startup handshake hangs
+    // start() indefinitely. A loginTimeout in the URL query still wins.
+    static final int EAGER_CONNECT_TIMEOUT_S = 30;
 
     // Keys that are valid inside the structured `config` map. Top-level
     // concepts (proxyPort, dashboardPort, logLevel, mode, license, client,
@@ -111,9 +115,14 @@ public class GoldLapel implements AutoCloseable {
     private final boolean disableProxyCache;
     private final boolean disableSqloptimize;
     private final boolean disableAutoIndexes;
-    private Process process;
+    // Volatile with `stopped`: stop() may run on another thread while start()
+    // is spawning/connecting (reactive cancellation). stop() sets `stopped`
+    // then reads process/internalConn; start writes them then reads
+    // `stopped` — so one side always sees the other and cleans up.
+    private volatile Process process;
     private String proxyUrl;
-    private Connection internalConn;
+    private volatile Connection internalConn;
+    private volatile boolean stopped;
 
     // Nested namespaces — canonical schema-to-core sub-API instances. Each
     // holds a back-reference to this client for shared state (license,
@@ -233,14 +242,34 @@ public class GoldLapel implements AutoCloseable {
      * }</pre>
      */
     public static GoldLapel start(String upstream, Consumer<GoldLapelOptions> configurator) {
+        return start(upstream, configurator, null);
+    }
+
+    /**
+     * Start a Gold Lapel proxy, handing the instance to {@code onCreated}
+     * before the subprocess is spawned. Calling {@link #stop()} on that
+     * instance from another thread aborts the in-flight start: the
+     * subprocess is killed and this method throws. Used by the reactive
+     * wrappers so cancellation reaches a start that is still blocking.
+     */
+    public static GoldLapel start(String upstream, Consumer<GoldLapelOptions> configurator,
+                                  Consumer<GoldLapel> onCreated) {
         GoldLapelOptions options = new GoldLapelOptions();
         if (configurator != null) {
             configurator.accept(options);
         }
         GoldLapel gl = new GoldLapel(upstream, options);
         try {
+            if (onCreated != null) {
+                onCreated.accept(gl);
+            }
             gl.startProxy();
             gl.eagerConnect();
+            // A concurrent stop() that ran before internalConn was assigned
+            // couldn't close it; the catch below does.
+            if (gl.stopped) {
+                throw abortedStart();
+            }
         } catch (RuntimeException e) {
             gl.stop();
             throw e;
@@ -248,14 +277,22 @@ public class GoldLapel implements AutoCloseable {
         return gl;
     }
 
+    private static RuntimeException abortedStart() {
+        return new RuntimeException("Gold Lapel start aborted: stop() was called while starting");
+    }
+
     private void startProxy() {
         if (process != null && process.isAlive()) {
             return;
+        }
+        if (stopped) {
+            throw abortedStart();
         }
 
         String binary = findBinary();
         List<String> cmd = buildSpawnCmd(binary);
 
+        Process proc;
         try {
             ProcessBuilder pb = new ProcessBuilder(cmd);
             // Explicit config wins over inherited env (matches Spring Boot /
@@ -277,17 +314,22 @@ public class GoldLapel implements AutoCloseable {
             pb.redirectInput(ProcessBuilder.Redirect.PIPE);
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
             pb.redirectError(ProcessBuilder.Redirect.PIPE);
-            process = pb.start();
-            process.getOutputStream().close();
+            proc = pb.start();
+            process = proc;
+            proc.getOutputStream().close();
         } catch (IOException e) {
             throw new RuntimeException("Failed to start Gold Lapel process", e);
+        }
+        if (stopped) {
+            proc.destroyForcibly();
+            throw abortedStart();
         }
 
         // Drain stderr on a daemon thread to prevent pipe-buffer deadlock
         StringBuilder stderrBuf = new StringBuilder();
         Thread stderrDrain = new Thread(() -> {
             try {
-                InputStream err = process.getErrorStream();
+                InputStream err = proc.getErrorStream();
                 byte[] buf = new byte[1024];
                 int n;
                 while ((n = err.read(buf)) != -1) {
@@ -302,7 +344,7 @@ public class GoldLapel implements AutoCloseable {
         long deadline = System.nanoTime() + STARTUP_TIMEOUT_MS * 1_000_000L;
         boolean ready = false;
         while (System.nanoTime() < deadline) {
-            if (!process.isAlive()) break;
+            if (!proc.isAlive() || stopped) break;
             if (waitForPort("127.0.0.1", proxyPort, 500)) {
                 ready = true;
                 break;
@@ -310,8 +352,11 @@ public class GoldLapel implements AutoCloseable {
         }
 
         if (!ready) {
-            process.destroyForcibly();
-            try { process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+            proc.destroyForcibly();
+            if (stopped) {
+                throw abortedStart();
+            }
+            try { proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
             try { stderrDrain.join(2000); } catch (InterruptedException ignored) {}
             throw new RuntimeException(
                 "Gold Lapel failed to start on port " + proxyPort +
@@ -422,6 +467,7 @@ public class GoldLapel implements AutoCloseable {
             java.util.Properties props = new java.util.Properties();
             if (info.user != null) props.setProperty("user", info.user);
             if (info.password != null) props.setProperty("password", info.password);
+            props.setProperty("loginTimeout", String.valueOf(EAGER_CONNECT_TIMEOUT_S));
             internalConn = DriverManager.getConnection(info.url, props);
         } catch (SQLException e) {
             throw new RuntimeException(
@@ -532,6 +578,8 @@ public class GoldLapel implements AutoCloseable {
      * Called automatically by {@link #close()} (try-with-resources).
      */
     public void stop() {
+        // Set first: an in-flight start() checks this after each step.
+        stopped = true;
         // Drop any cached DDL patterns — they're tied to the proxy we're
         // about to kill.
         ddlCache.clear();

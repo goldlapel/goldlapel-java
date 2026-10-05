@@ -180,3 +180,19 @@ port. `goldlapel.dashboard-port: 0` disables the dashboard on every proxy,
 so each claims only its proxy port and they sit on consecutive ports (7932,
 7933). DataSources sharing an upstream now share one proxy — previously
 each started its own process on the same port, which could not bind.
+
+### Reactive start
+
+**Cancelling a reactive start now stops the proxy right away.** Disposing the
+`Mono` from `ReactiveGoldLapel.start` (or the `Single` from
+`RxJavaGoldLapel.start`) while the proxy was still starting used to leave the
+subprocess running until the blocking start finished on its own. The
+instance is now handed over before the spawn, so cancellation kills it
+immediately. The new `GoldLapel.start(upstream, configurator, onCreated)`
+overload exposes the same hook: calling `stop()` on the instance passed to
+`onCreated` aborts an in-flight start, which then throws.
+
+**`start()` no longer waits indefinitely on a silent proxy.** The internal
+JDBC connection now uses a 30-second `loginTimeout`; a `loginTimeout` in the
+upstream URL's query still takes precedence. The PostgreSQL JDBC driver is
+now 42.7.11.

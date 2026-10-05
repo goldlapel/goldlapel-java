@@ -1,10 +1,9 @@
-package com.goldlapel.reactor;
+package com.goldlapel.rxjava3;
 
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import reactor.core.Disposable;
-import reactor.test.StepVerifier;
+import io.reactivex.rxjava3.disposables.Disposable;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -15,16 +14,16 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Verifies that cancelling the {@code Mono<ReactiveGoldLapel>} returned by
- * {@link ReactiveGoldLapel#start(String)} kills the spawned proxy subprocess
- * — no leaks.
+ * Verifies that disposing the {@code Single<RxJavaGoldLapel>} returned by
+ * {@link RxJavaGoldLapel#start(String)} kills the spawned proxy subprocess
+ * — no leaks. Mirrors the reactor module's ReactiveCancellationTest.
  *
  * <p>Uses a fake binary (shell script) that binds the requested port but
  * speaks no Postgres protocol. The sync {@code GoldLapel.start()} blocks
- * on eagerConnect(); subscribing via Reactor and cancelling mid-wait
+ * on eagerConnect(); subscribing via RxJava and cancelling mid-wait
  * should propagate to {@code sink.onCancel} → {@code gl.stop()} → kill.
  */
-class ReactiveCancellationTest {
+class RxJavaCancellationTest {
 
     @Test
     void cancellingStartKillsSpawnedSubprocess(@TempDir Path tmp) throws Exception {
@@ -53,7 +52,7 @@ class ReactiveCancellationTest {
             // via JDBC — our fake server never answers the handshake, so start
             // is still blocking when we dispose. Cancellation must reach it.
             AtomicReference<Throwable> asyncErr = new AtomicReference<>();
-            Disposable d = ReactiveGoldLapel.start(
+            Disposable d = RxJavaGoldLapel.start(
                 "postgresql://localhost:5432/mydb",
                 opts -> opts.setProxyPort(port)
             ).subscribe(
@@ -81,22 +80,6 @@ class ReactiveCancellationTest {
                 ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false),
                 "subprocess PID " + pid + " should have been killed on cancellation — leak!"
             );
-        } finally {
-            setEnvReflective("GOLDLAPEL_BINARY", origBin);
-        }
-    }
-
-    @Test
-    void startFailurePropagatesAsMonoError(@TempDir Path tmp) throws Exception {
-        // Negative: when the spawn itself fails, the Mono should emit onError
-        // rather than hang. Use a binary path that doesn't exist.
-        Path missing = tmp.resolve("definitely-not-a-binary");
-        String origBin = System.getenv("GOLDLAPEL_BINARY");
-        try {
-            setEnvReflective("GOLDLAPEL_BINARY", missing.toString());
-            StepVerifier.create(ReactiveGoldLapel.start("postgresql://localhost:5432/db"))
-                .expectError(RuntimeException.class)
-                .verify(java.time.Duration.ofSeconds(10));
         } finally {
             setEnvReflective("GOLDLAPEL_BINARY", origBin);
         }

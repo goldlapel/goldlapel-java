@@ -17,6 +17,8 @@ import java.sql.SQLException;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -125,36 +127,48 @@ public final class ReactiveGoldLapel implements AutoCloseable {
     public static Mono<ReactiveGoldLapel> start(String upstream, Consumer<GoldLapelOptions> configurator) {
         return Mono.<ReactiveGoldLapel>create(sink -> {
             // Run the actual blocking spawn on boundedElastic so we don't
-            // block a non-blocking thread. Track the sync instance so we can
-            // clean up on cancellation.
-            final GoldLapel[] spawned = new GoldLapel[1];
-            final boolean[] cancelled = new boolean[1];
+            // block a non-blocking thread. The sync instance is handed over
+            // before the spawn, so a cancel mid-start can stop() it — that
+            // kills the subprocess and makes the blocked start() throw.
+            final AtomicReference<GoldLapel> spawned = new AtomicReference<>();
+            final AtomicBoolean cancelled = new AtomicBoolean();
 
             sink.onCancel(() -> {
-                cancelled[0] = true;
-                GoldLapel gl = spawned[0];
-                if (gl != null) {
-                    try { gl.stop(); } catch (RuntimeException ignored) {}
-                }
+                cancelled.set(true);
+                stopQuietly(spawned.get());
             });
 
             Schedulers.boundedElastic().schedule(() -> {
+                if (cancelled.get()) return;
                 try {
-                    GoldLapel gl = GoldLapel.start(upstream, configurator);
-                    spawned[0] = gl;
-                    // If the subscription got cancelled while we were spawning,
-                    // stop the proxy we just started and don't emit.
-                    if (cancelled[0]) {
-                        try { gl.stop(); } catch (RuntimeException ignored) {}
+                    GoldLapel gl = GoldLapel.start(upstream, configurator, created -> {
+                        spawned.set(created);
+                        // Cancelled before we published the instance: onCancel
+                        // saw null, so stop it here (start() then aborts).
+                        if (cancelled.get()) stopQuietly(created);
+                    });
+                    // Cancelled after start() finished: tear down, don't emit.
+                    if (cancelled.get()) {
+                        stopQuietly(gl);
                         return;
                     }
                     ConnectionFactory cf = buildR2dbcFactory(gl);
                     sink.success(new ReactiveGoldLapel(gl, cf));
                 } catch (Throwable t) {
-                    sink.error(t);
+                    // start() cleans up after itself, but a failure building
+                    // the R2DBC factory would leave a running proxy behind.
+                    stopQuietly(spawned.get());
+                    // A cancelled start fails by design; nobody is listening.
+                    if (!cancelled.get()) sink.error(t);
                 }
             });
         });
+    }
+
+    private static void stopQuietly(GoldLapel gl) {
+        if (gl != null) {
+            try { gl.stop(); } catch (RuntimeException ignored) {}
+        }
     }
 
     private static ConnectionFactory buildR2dbcFactory(GoldLapel gl) {
