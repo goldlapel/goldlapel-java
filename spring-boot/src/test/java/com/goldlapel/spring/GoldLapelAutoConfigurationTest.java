@@ -214,11 +214,13 @@ class GoldLapelAutoConfigurationTest {
 
     @Test
     void multipleDataSourcesGetSeparateProxies() {
+        // Each proxy takes two ports: P and its dashboard P+1. The second
+        // proxy must skip 7933 (the first proxy's dashboard) and land on 7934.
         List<GoldLapelOptions> captured = new ArrayList<>();
         try (MockedStatic<GoldLapel> ignored = stubStart(
                 u -> u.contains("5432")
                         ? "postgresql://localhost:7932/db1"
-                        : "postgresql://localhost:7933/db2",
+                        : "postgresql://localhost:7934/db2",
                 captured)) {
 
             HikariDataSource ds1 = new HikariDataSource();
@@ -234,16 +236,125 @@ class GoldLapelAutoConfigurationTest {
             Object result2 = processor.postProcessAfterInitialization(ds2, "analyticsDataSource");
 
             assertThat(captured).hasSize(2);
+            assertThat(captured.get(0).getProxyPort()).isEqualTo(7932);
+            assertThat(captured.get(1).getProxyPort()).isEqualTo(7934);
+            assertThat(captured.get(0).getDashboardPort()).isNull();
+            assertThat(captured.get(1).getDashboardPort()).isNull();
             assertThat(ds1.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7932/db1");
-            assertThat(ds2.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7933/db2");
+            assertThat(ds2.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:7934/db2");
 
             assertThat(processor.getProxies()).hasSize(2);
             assertThat(result1).isSameAs(ds1);
             assertThat(result2).isSameAs(ds2);
 
-            // Each unique upstream gets its own port
             assertThat(processor.getUpstreamPorts()).hasSize(2);
-            assertThat(processor.getUpstreamPorts().values()).containsExactly(7932, 7933);
+            assertThat(processor.getUpstreamPorts().values()).containsExactly(7932, 7934);
+        }
+    }
+
+    @Test
+    void threeDataSourcesStepByTwo() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/db", captured)) {
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            props.setProxyPort(9000);
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+
+            for (int i = 1; i <= 3; i++) {
+                HikariDataSource ds = new HikariDataSource();
+                ds.setJdbcUrl("jdbc:postgresql://host" + i + ":5432/db");
+                processor.postProcessAfterInitialization(ds, "ds" + i);
+            }
+
+            assertThat(processor.getUpstreamPorts().values()).containsExactly(9000, 9002, 9004);
+        }
+    }
+
+    @Test
+    void explicitDashboardPortAppliesToFirstProxyOnly() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/db", captured)) {
+
+            HikariDataSource ds1 = new HikariDataSource();
+            ds1.setJdbcUrl("jdbc:postgresql://host1:5432/db1");
+            HikariDataSource ds2 = new HikariDataSource();
+            ds2.setJdbcUrl("jdbc:postgresql://host2:5432/db2");
+            HikariDataSource ds1Again = new HikariDataSource();
+            ds1Again.setJdbcUrl("jdbc:postgresql://host1:5432/db1");
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            props.setDashboardPort(8000);
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+
+            processor.postProcessAfterInitialization(ds1, "ds1");
+            processor.postProcessAfterInitialization(ds2, "ds2");
+            processor.postProcessAfterInitialization(ds1Again, "ds1Again");
+
+            // First proxy: 7932 + dashboard 8000, so 7933 stays free and the
+            // second proxy takes it with a derived dashboard on 7934.
+            assertThat(captured.get(0).getProxyPort()).isEqualTo(7932);
+            assertThat(captured.get(0).getDashboardPort()).isEqualTo(8000);
+            assertThat(captured.get(1).getProxyPort()).isEqualTo(7933);
+            assertThat(captured.get(1).getDashboardPort()).isNull();
+            // A DataSource sharing the first upstream gets the first proxy's settings.
+            assertThat(captured.get(2).getProxyPort()).isEqualTo(7932);
+            assertThat(captured.get(2).getDashboardPort()).isEqualTo(8000);
+        }
+    }
+
+    @Test
+    void allocationSkipsExplicitDashboardPort() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/db", captured)) {
+
+            HikariDataSource ds1 = new HikariDataSource();
+            ds1.setJdbcUrl("jdbc:postgresql://host1:5432/db1");
+            HikariDataSource ds2 = new HikariDataSource();
+            ds2.setJdbcUrl("jdbc:postgresql://host2:5432/db2");
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            props.setDashboardPort(7934);
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+
+            processor.postProcessAfterInitialization(ds1, "ds1");
+            processor.postProcessAfterInitialization(ds2, "ds2");
+
+            // Claimed: 7932, 7934. 7933 would need dashboard 7934 (taken),
+            // 7934 is taken, so the second proxy lands on 7935 (+7936).
+            assertThat(captured.get(0).getProxyPort()).isEqualTo(7932);
+            assertThat(captured.get(0).getDashboardPort()).isEqualTo(7934);
+            assertThat(captured.get(1).getProxyPort()).isEqualTo(7935);
+            assertThat(captured.get(1).getDashboardPort()).isNull();
+        }
+    }
+
+    @Test
+    void disabledDashboardFreesNeighbouringPort() {
+        List<GoldLapelOptions> captured = new ArrayList<>();
+        try (MockedStatic<GoldLapel> ignored = stubStart(
+                u -> "postgresql://localhost:7932/db", captured)) {
+
+            HikariDataSource ds1 = new HikariDataSource();
+            ds1.setJdbcUrl("jdbc:postgresql://host1:5432/db1");
+            HikariDataSource ds2 = new HikariDataSource();
+            ds2.setJdbcUrl("jdbc:postgresql://host2:5432/db2");
+
+            GoldLapelProperties props = new GoldLapelProperties();
+            props.setDashboardPort(0);
+            GoldLapelDataSourcePostProcessor processor = new GoldLapelDataSourcePostProcessor(props);
+
+            processor.postProcessAfterInitialization(ds1, "ds1");
+            processor.postProcessAfterInitialization(ds2, "ds2");
+
+            // First proxy has no dashboard, so it claims only 7932.
+            assertThat(captured.get(0).getProxyPort()).isEqualTo(7932);
+            assertThat(captured.get(0).getDashboardPort()).isEqualTo(0);
+            assertThat(captured.get(1).getProxyPort()).isEqualTo(7933);
+            assertThat(captured.get(1).getDashboardPort()).isNull();
         }
     }
 
@@ -1117,7 +1228,7 @@ class GoldLapelAutoConfigurationTest {
         try (MockedStatic<GoldLapel> ignored = stubStart(
                 u -> u.contains("host1")
                         ? "postgresql://localhost:7932/db1"
-                        : "postgresql://localhost:7933/db2",
+                        : "postgresql://localhost:7934/db2",
                 captured, capturedUpstreams, capturedProxies)) {
 
             HikariDataSource ds1 = new HikariDataSource();
@@ -1178,7 +1289,7 @@ class GoldLapelAutoConfigurationTest {
         try (MockedStatic<GoldLapel> ignored = stubStart(
                 u -> u.contains("host1")
                         ? "postgresql://localhost:7932/db1"
-                        : "postgresql://localhost:7933/db2",
+                        : "postgresql://localhost:7934/db2",
                 captured, null, capturedProxies)) {
 
             HikariDataSource ds1 = new HikariDataSource();

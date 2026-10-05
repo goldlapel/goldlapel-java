@@ -167,3 +167,12 @@ bean exposed in the application context still drops in via DataSource
 post-processing. Code that called the renamed methods through the bean
 (e.g. `goldLapel.docInsert(...)`) needs the same search-and-replace as any
 other caller.
+
+**Multiple DataSources no longer collide on ports.** Each proxy listens on
+two ports (proxy and dashboard, proxy + 1), but a second upstream was given
+the next port up — the first proxy's dashboard. Each new upstream now gets
+the smallest port at or above `goldlapel.proxy-port` whose proxy and
+dashboard ports are both unclaimed, so two DataSources land on 7932 and 7934.
+`goldlapel.dashboard-port` now applies to the first proxy only (it used to
+be handed to every proxy, which could never all bind it); later proxies
+derive proxy port + 1, and allocation skips the explicit dashboard port.

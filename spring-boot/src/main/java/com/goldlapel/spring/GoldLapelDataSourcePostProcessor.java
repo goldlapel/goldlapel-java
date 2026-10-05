@@ -13,9 +13,11 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, DisposableBean {
 
@@ -29,11 +31,12 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
     // upstream gets its own proxy instance while duplicate DataSources sharing
     // the same upstream reuse the same proxy.
     private final Map<String, Integer> upstreamPorts = new LinkedHashMap<>();
-    private int nextPort;
+    // Every port a proxy started here listens on: its proxy port and its
+    // dashboard port (unless the dashboard is disabled).
+    private final Set<Integer> claimedPorts = new HashSet<>();
 
     public GoldLapelDataSourcePostProcessor(GoldLapelProperties properties) {
         this.properties = properties;
-        this.nextPort = properties.getProxyPort();
     }
 
     /**
@@ -84,10 +87,18 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
             upstream = injectUserinfo(upstream, dsUser, dsPassword);
         }
 
-        // Assign a unique port per unique upstream URL. If two DataSource beans
-        // point to the same upstream, they share a proxy. Otherwise each gets
-        // its own port so they don't collide.
-        int port = upstreamPorts.computeIfAbsent(upstream, k -> nextPort++);
+        // Assign a port per unique upstream URL. If two DataSource beans point
+        // to the same upstream, they share a proxy's port. An explicit
+        // goldlapel.dashboard-port belongs to the first upstream's proxy only;
+        // the others derive theirs (proxy port + 1).
+        boolean firstUpstream = upstreamPorts.isEmpty()
+                || upstreamPorts.keySet().iterator().next().equals(upstream);
+        Integer dashboardPort = firstUpstream ? properties.getDashboardPort() : null;
+        Integer port = upstreamPorts.get(upstream);
+        if (port == null) {
+            port = claimPorts(dashboardPort);
+            upstreamPorts.put(upstream, port);
+        }
 
         String extraArgsStr = properties.getExtraArgs();
         Map<String, String> configMap = properties.getConfig();
@@ -112,8 +123,8 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
                 opts.setDisableProxyCache(properties.isDisableProxyCache());
                 opts.setDisableSqloptimize(properties.isDisableSqloptimize());
                 opts.setDisableAutoIndexes(properties.isDisableAutoIndexes());
-                if (properties.getDashboardPort() != null) {
-                    opts.setDashboardPort(properties.getDashboardPort());
+                if (dashboardPort != null) {
+                    opts.setDashboardPort(dashboardPort);
                 }
                 if (properties.getLogLevel() != null) {
                     opts.setLogLevel(properties.getLogLevel());
@@ -153,6 +164,24 @@ public class GoldLapelDataSourcePostProcessor implements BeanPostProcessor, Disp
 
         log.info("Gold Lapel proxy started — {} now routes through localhost:{}", beanName, port);
         return ds;
+    }
+
+    // Pick the smallest proxy port >= goldlapel.proxy-port such that neither it
+    // nor its dashboard port (explicit, or proxy port + 1) is already claimed
+    // by a proxy started here, then claim both. A dashboard port of 0 means
+    // no dashboard, so nothing beyond the proxy port is claimed.
+    private int claimPorts(Integer dashboardPort) {
+        int port = properties.getProxyPort();
+        while (claimedPorts.contains(port)
+                || (dashboardPort == null && claimedPorts.contains(port + 1))) {
+            port++;
+        }
+        int dashboard = dashboardPort != null ? dashboardPort : port + 1;
+        claimedPorts.add(port);
+        if (dashboard > 0) {
+            claimedPorts.add(dashboard);
+        }
+        return port;
     }
 
     // Visible for testing

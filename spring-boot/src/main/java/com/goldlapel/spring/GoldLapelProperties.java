@@ -36,6 +36,12 @@ public class GoldLapelProperties {
         return proxyPort;
     }
 
+    /**
+     * Proxy listen port (default 7932). The first DataSource's proxy gets it.
+     * Each further upstream gets the next port at or above it whose proxy and
+     * dashboard ports are both free of the proxies already started, so two
+     * DataSources land on 7932 and 7934 (7933 is the first one's dashboard).
+     */
     public void setProxyPort(int proxyPort) {
         this.proxyPort = proxyPort;
     }
@@ -80,10 +86,14 @@ public class GoldLapelProperties {
     /**
      * Dashboard listen port. When {@code null} (the default), the dashboard
      * port is auto-derived as {@code proxyPort + 1}. Set to {@code 0} to
-     * disable the dashboard entirely. Spring users typically reach for this
-     * when running multiple Gold Lapel proxies on the same host and want
-     * explicit control over each proxy's dashboard port (e.g. one per pod
-     * with hard-coded ports for kubectl port-forward routing).
+     * disable the dashboard entirely.
+     *
+     * <p>With several DataSources pointing at different upstreams, each gets
+     * its own proxy, and this setting applies to the <em>first</em> proxy
+     * only. Later proxies derive their dashboard as their own proxy port + 1,
+     * and port allocation skips this port so nothing collides. For example,
+     * {@code proxy-port: 7932} with {@code dashboard-port: 8000} gives the
+     * first proxy 7932 + 8000 and the second 7933 + 7934.
      *
      * <p>YAML: {@code goldlapel.dashboard-port: 7933}.
      */
