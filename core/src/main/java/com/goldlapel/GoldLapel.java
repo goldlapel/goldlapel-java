@@ -78,7 +78,7 @@ public class GoldLapel implements AutoCloseable {
         Set<String> keys = new HashSet<>();
         Collections.addAll(keys,
             "minPatternCount", "deepPaginationThreshold",
-            "reportIntervalSecs", "proxyCacheSize", "batchCacheSize",
+            "reportIntervalSecs", "proxyCacheSize", "proxyCacheMaxBytes", "proxyCacheMaxEntryBytes", "batchCacheSize",
             "batchCacheTtlSecs", "poolSize", "poolTimeoutSecs",
             "poolMode", "mgmtIdleTimeout", "fallback", "readAfterWriteSecs",
             "n1Threshold", "n1WindowMs", "n1CrossThreshold",
