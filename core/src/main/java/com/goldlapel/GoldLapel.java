@@ -80,7 +80,7 @@ public class GoldLapel implements AutoCloseable {
             "minPatternCount", "deepPaginationThreshold",
             "reportIntervalSecs", "proxyCacheSize", "proxyCacheMaxBytes", "proxyCacheMaxEntryBytes", "batchCacheSize",
             "batchCacheTtlSecs", "poolSize", "poolTimeoutSecs",
-            "poolMode", "mgmtIdleTimeout", "fallback", "readAfterWriteSecs",
+            "poolMode", "mgmtIdleTimeout", "fallback", "sessionUpstream", "readAfterWriteSecs",
             "n1Threshold", "n1WindowMs", "n1CrossThreshold",
             "tlsCert", "tlsKey", "tlsClientCa",
             "disableBtreeIndexes",
